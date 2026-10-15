@@ -4,10 +4,29 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
+description = "Stages, tasks, commits, leases and the local and distributed executors."
 
 [lints]
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+metrics = { workspace = true }
+pi-store = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+# CancellationToken: how a lost lease or a failed sibling stops a running task.
+tokio-util = { version = "0.7.18" }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true }
+object_store = { workspace = true }

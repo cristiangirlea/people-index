@@ -1,0 +1,314 @@
+# people-index on one Docker host: the same topology as Kubernetes, scaled down.
+#
+#   certs        one-shot: CA + node certificates (elasticsearch-certutil), the CA for clients
+#   es01..es03   Elasticsearch 9.5.5, three master+data nodes, TLS on HTTP and transport,
+#                one zone attribute each (zone-a/b/c) with allocation awareness, as on k3d
+#   es-users     one-shot: waits for the formed cluster, creates role people-index-writer and
+#                user pipeline (the pipeline never uses the elastic superuser)
+#   s3           SeaweedFS S3 gateway on s3:8333 (conditional writes verified by s3-init)
+#   s3-init      one-shot: creates bucket people-index and proves the store returns 412 for a
+#                create-if-absent on an existing key and for a stale If-Match
+#   datagen      profile datagen: writes both feeds to s3://people-index/raw/
+#   coordinator  people-index run (PI_EXECUTOR=distributed)
+#   worker       people-index worker, `--scale worker=N`
+#   verify       profile verify: acceptance queries and the content digest against the alias
+#   prometheus   profile metrics: scrapes the coordinator, every worker and the store
+#
+# Usage is in docs/OPERATIONS.md (make compose-up / compose-run / compose-down). Every value
+# with a default below can be set in deploy/compose/.env (copy .env.example). The defaults are
+# development-only credentials for a stack whose published ports bind to 127.0.0.1.
+
+name: people-index
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-es-env: &es-env
+  cluster.name: people-index
+  cluster.initial_master_nodes: es01,es02,es03
+  node.roles: master,data,ingest
+  cluster.routing.allocation.awareness.attributes: zone
+  cluster.routing.allocation.disk.threshold_enabled: ${ES_DISK_THRESHOLD_ENABLED:-true}
+  bootstrap.memory_lock: "true"
+  ES_JAVA_OPTS: -Xms${ES_HEAP:-512m} -Xmx${ES_HEAP:-512m}
+  xpack.license.self_generated.type: basic
+  xpack.ml.enabled: "false"
+  xpack.security.enabled: "true"
+  xpack.security.http.ssl.enabled: "true"
+  xpack.security.http.ssl.certificate_authorities: certs/ca/ca.crt
+  xpack.security.transport.ssl.enabled: "true"
+  xpack.security.transport.ssl.certificate_authorities: certs/ca/ca.crt
+  xpack.security.transport.ssl.verification_mode: certificate
+
+x-es-node: &es-node
+  image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+  depends_on:
+    certs:
+      condition: service_completed_successfully
+  ulimits:
+    memlock: { soft: -1, hard: -1 }
+    nofile: { soft: 65535, hard: 65535 }
+  deploy:
+    resources:
+      limits:
+        memory: ${ES_MEM_LIMIT:-1g}
+  stop_grace_period: 2m
+  restart: unless-stopped
+  logging: *logging
+  healthcheck:
+    # An authenticated health call would need the password in the healthcheck; a 401 over a
+    # verified TLS connection already proves the node is up and serving HTTPS.
+    test: ["CMD-SHELL", "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"]
+    interval: 5s
+    timeout: 5s
+    retries: 120
+    start_period: 20s
+
+x-pipeline-env: &pipeline-env
+  PI_STORE_URL: s3://people-index/
+  PI_S3_ENDPOINT: http://s3:8333
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-people-index-dev}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
+  AWS_REGION: us-east-1
+  PI_ES_URL: https://es01:9200
+  PI_ES_USERNAME: pipeline
+  PI_ES_PASSWORD: ${PIPELINE_ES_PASSWORD:-pipeline-dev-password}
+  PI_ES_CA_CERT: /etc/people-index/es-ca/ca.crt
+  PI_ALIAS: ${PI_ALIAS:-persons}
+  PI_EXECUTOR: distributed
+  # One id shared by the coordinator and the workers. `make compose-run` sets a fresh one;
+  # rerunning with the same id resumes that run from its commits.
+  PI_RUN_ID: ${PI_RUN_ID:-compose}
+  PI_LEASE_TTL: ${PI_LEASE_TTL:-60s}
+  PI_PARTITION_TARGET_BYTES: ${PI_PARTITION_TARGET_BYTES:-268435456}
+  PI_MIN_PARTITIONS: ${PI_MIN_PARTITIONS:-16}
+  PI_BULK_MAX_BYTES: ${PI_BULK_MAX_BYTES:-8388608}
+  PI_SENDERS_PER_WORKER: ${PI_SENDERS_PER_WORKER:-2}
+  PI_MAX_MALFORMED: ${PI_MAX_MALFORMED:-1000}
+  PI_METRICS_ADDR: 0.0.0.0:9464
+  PI_LOG_FORMAT: ${PI_LOG_FORMAT:-json}
+  RUST_LOG: ${RUST_LOG:-info}
+
+x-pipeline: &pipeline
+  image: people-index:local
+  # The image is built locally (`make image`); never look for it on a registry.
+  pull_policy: never
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  volumes:
+    - es-ca:/etc/people-index/es-ca:ro
+    # The root filesystem is read-only; scratch space is an anonymous volume (on disk, not
+    # in the memory limit like a tmpfs would be). `make compose-down` removes it.
+    - /tmp
+  logging: *logging
+
+services:
+  certs:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+    user: "0"
+    entrypoint: ["bash", "/scripts/certs.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+      - certs:/usr/share/elasticsearch/config/certs
+      - es-ca:/ca-public
+    logging: *logging
+
+  es01:
+    <<: *es-node
+    hostname: es01
+    environment:
+      <<: *es-env
+      node.name: es01
+      node.attr.zone: zone-a
+      discovery.seed_hosts: es02,es03
+      # Only the bootstrap node needs it: the password of the built-in elastic superuser.
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-elastic-dev-password}
+      xpack.security.http.ssl.key: certs/es01/es01.key
+      xpack.security.http.ssl.certificate: certs/es01/es01.crt
+      xpack.security.transport.ssl.key: certs/es01/es01.key
+      xpack.security.transport.ssl.certificate: certs/es01/es01.crt
+    ports:
+      - "127.0.0.1:${ES_PORT:-9200}:9200"
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs:ro
+      - es01-data:/usr/share/elasticsearch/data
+
+  es02:
+    <<: *es-node
+    hostname: es02
+    environment:
+      <<: *es-env
+      node.name: es02
+      node.attr.zone: zone-b
+      discovery.seed_hosts: es01,es03
+      xpack.security.http.ssl.key: certs/es02/es02.key
+      xpack.security.http.ssl.certificate: certs/es02/es02.crt
+      xpack.security.transport.ssl.key: certs/es02/es02.key
+      xpack.security.transport.ssl.certificate: certs/es02/es02.crt
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs:ro
+      - es02-data:/usr/share/elasticsearch/data
+
+  es03:
+    <<: *es-node
+    hostname: es03
+    environment:
+      <<: *es-env
+      node.name: es03
+      node.attr.zone: zone-c
+      discovery.seed_hosts: es01,es02
+      xpack.security.http.ssl.key: certs/es03/es03.key
+      xpack.security.http.ssl.certificate: certs/es03/es03.crt
+      xpack.security.transport.ssl.key: certs/es03/es03.key
+      xpack.security.transport.ssl.certificate: certs/es03/es03.crt
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs:ro
+      - es03-data:/usr/share/elasticsearch/data
+
+  es-users:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+    entrypoint: ["bash", "/scripts/es-users.sh"]
+    depends_on:
+      es01: { condition: service_healthy }
+      es02: { condition: service_healthy }
+      es03: { condition: service_healthy }
+    environment:
+      ES_URL: https://es01:9200
+      ES_NODES: "3"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-elastic-dev-password}
+      PIPELINE_ES_PASSWORD: ${PIPELINE_ES_PASSWORD:-pipeline-dev-password}
+      PI_ALIAS: ${PI_ALIAS:-persons}
+    volumes:
+      - ./scripts:/scripts:ro
+      - es-ca:/ca:ro
+    logging: *logging
+
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    hostname: s3
+    # One process runs master, volume, filer and the S3 gateway; the image's entrypoint adds
+    # -dir=/data and drops to the seaweed user. AWS_* in the environment become the admin
+    # identity, so the gateway and the pipeline share one secret.
+    command: ["server", "-s3", "-s3.port=8333", "-ip.bind=0.0.0.0", "-metricsPort=9327"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-people-index-dev}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
+    ports:
+      - "127.0.0.1:${S3_PORT:-8333}:8333"
+    volumes:
+      - s3-data:/data
+    restart: unless-stopped
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
+
+  s3-init:
+    image: amazon/aws-cli:2.37.4
+    entrypoint: ["bash", "/scripts/s3-init.sh"]
+    depends_on:
+      s3: { condition: service_healthy }
+    environment:
+      S3_ENDPOINT: http://s3:8333
+      S3_BUCKET: people-index
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-people-index-dev}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    volumes:
+      - ./scripts:/scripts:ro
+    logging: *logging
+
+  datagen:
+    <<: *pipeline
+    profiles: [datagen]
+    depends_on:
+      s3-init: { condition: service_completed_successfully }
+    environment: *pipeline-env
+    command:
+      - datagen
+      - --persons=${DATAGEN_PERSONS:-200000}
+      - --organizations=${DATAGEN_ORGANIZATIONS:-50000}
+      - --files=${DATAGEN_FILES:-8}
+      - --seed=${DATAGEN_SEED:-42}
+      - --out=s3://people-index/raw/
+    deploy:
+      resources:
+        limits: { cpus: "${DATAGEN_CPUS:-2}", memory: "${DATAGEN_MEMORY:-1g}" }
+
+  coordinator:
+    <<: *pipeline
+    depends_on:
+      es-users: { condition: service_completed_successfully }
+      s3-init: { condition: service_completed_successfully }
+    environment:
+      <<: *pipeline-env
+      PI_WORKER_ID: coordinator
+      PI_CONCURRENCY: "1"
+    command: ["run"]
+    # No restart policy: the exit code is the run's verdict (`docker compose wait coordinator`).
+    # A crashed run is resumed by starting it again with the same PI_RUN_ID (make compose-resume).
+    restart: "no"
+    deploy:
+      resources:
+        limits: { cpus: "${COORDINATOR_CPUS:-1}", memory: "${COORDINATOR_MEMORY:-1g}" }
+
+  worker:
+    <<: *pipeline
+    depends_on:
+      es-users: { condition: service_completed_successfully }
+      s3-init: { condition: service_completed_successfully }
+    environment:
+      <<: *pipeline-env
+      # Tasks at once in one worker; keep it equal to WORKER_CPUS (CPU work is per task).
+      PI_CONCURRENCY: "${WORKER_CONCURRENCY:-2}"
+    command: ["worker"]
+    # A worker that crashes is replaced; its lease expires and any worker takes the task over.
+    restart: on-failure:5
+    stop_grace_period: 30s
+    deploy:
+      replicas: ${WORKERS:-3}
+      resources:
+        limits: { cpus: "${WORKER_CPUS:-2}", memory: "${WORKER_MEMORY:-2g}" }
+
+  verify:
+    <<: *pipeline
+    profiles: [verify]
+    depends_on:
+      es-users: { condition: service_completed_successfully }
+      s3-init: { condition: service_completed_successfully }
+    environment: *pipeline-env
+    command:
+      - verify
+      - --expected=${VERIFY_EXPECTED:-s3://people-index/raw/expected.json}
+      - --digest
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: [metrics]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    logging: *logging
+
+volumes:
+  certs:
+  es-ca:
+  es01-data:
+  es02-data:
+  es03-data:
+  s3-data:
+  prometheus-data:

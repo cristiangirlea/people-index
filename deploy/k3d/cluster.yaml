@@ -1,0 +1,61 @@
+# A local multi-node, multi-zone Kubernetes cluster for people-index (k3d v5).
+#
+#   k3d cluster create --config deploy/k3d/cluster.yaml
+#   docker build -t people-index:local . && k3d image import people-index:local -c people-index
+#
+# One server (control plane only) and three agents, each agent in its own zone, so the
+# Elasticsearch zone awareness, the topology spread of masters, data nodes and workers, and
+# the loss of a zone (`docker stop k3d-people-index-agent-1`) all behave as on a real
+# multi-zone cluster, on one machine.
+#
+# The kube context is `k3d-people-index`. The cluster is added to the kubeconfig without
+# switching the current context: every command names the context explicitly
+# (`kubectl --context k3d-people-index ...`) so nothing ever lands on another cluster.
+#
+# Nothing is published on the host. Reach Elasticsearch or the object store with
+# `kubectl --context k3d-people-index -n people-index port-forward svc/es-es-http 9200` (or
+# svc/s3 8333).
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: people-index
+servers: 1
+agents: 3
+# Pinned so every machine runs the same Kubernetes (the k3s release k3d v5.9.0 defaults to).
+image: rancher/k3s:v1.35.5-k3s1
+# The API server listens on loopback only (k3d's default is every interface), on a free port
+# that k3d writes into the kubeconfig.
+kubeAPI:
+  hostIP: "127.0.0.1"
+options:
+  k3d:
+    wait: true
+    timeout: "300s"
+    disableLoadbalancer: true
+  k3s:
+    extraArgs:
+      # No ingress controller or service load balancer: nothing here is exposed.
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+      - arg: --disable=servicelb
+        nodeFilters:
+          - server:*
+      # Keep workloads off the server, so every pod lands on a node that has a zone. k3s'
+      # own add-ons (CoreDNS, local-path provisioner, metrics-server) tolerate this taint.
+      - arg: --node-taint=CriticalAddonsOnly=true:NoExecute
+        nodeFilters:
+          - server:*
+    nodeLabels:
+      - label: topology.kubernetes.io/zone=zone-a
+        nodeFilters:
+          - agent:0
+      - label: topology.kubernetes.io/zone=zone-b
+        nodeFilters:
+          - agent:1
+      - label: topology.kubernetes.io/zone=zone-c
+        nodeFilters:
+          - agent:2
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: false

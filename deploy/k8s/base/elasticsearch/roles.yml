@@ -1,0 +1,17 @@
+# File-realm roles, loaded by ECK from the `people-index-es-roles` Secret.
+#
+# people-index-writer is everything the pipeline does and nothing more:
+#   monitor                  read `_nodes` (shard count per data node) and cluster health
+#   manage_index_templates   install the index template before the first load
+#   persons* all             create `<alias>-<run_id>`, bulk load, change its settings,
+#                            move the alias, delete the indexes the alias left behind
+# A different PI_ALIAS needs its own index pattern here.
+people-index-writer:
+  cluster:
+    - monitor
+    - manage_index_templates
+  indices:
+    - names:
+        - "persons*"
+      privileges:
+        - all

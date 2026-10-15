@@ -1,0 +1,11 @@
+# An allowlist: the build context holds only what cargo needs, so editing docs, deploy files or
+# CI never invalidates a layer, and nothing local (an .env, a store, generated data) can leak
+# into an image.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!.cargo/config.toml
+!crates/
+crates/**/target/
+**/*.seg

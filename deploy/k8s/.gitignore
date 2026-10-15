@@ -1,0 +1,2 @@
+# Credentials for the secretGenerators (created by gen-secrets.sh from the *.env.example files).
+*.env

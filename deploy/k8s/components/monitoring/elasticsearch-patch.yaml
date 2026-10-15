@@ -1,0 +1,9 @@
+# JSON 6902 patch: append the exporter's role and file-realm user to the cluster's auth lists.
+- op: add
+  path: /spec/auth/roles/-
+  value:
+    secretName: people-index-es-monitor-role
+- op: add
+  path: /spec/auth/fileRealm/-
+  value:
+    secretName: es-exporter-credentials

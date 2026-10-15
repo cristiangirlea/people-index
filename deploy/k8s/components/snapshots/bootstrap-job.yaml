@@ -1,0 +1,83 @@
+# Registers the snapshot repository and the SLM policy (bootstrap.sh). It waits for the
+# cluster itself, so it can be applied together with everything else.
+#
+# It uses the `elastic` superuser that ECK generates: registering a repository needs the
+# `manage` cluster privilege, which is far more than the pipeline's role should carry, and this
+# is an administrative step that runs once per apply. The short TTL lets the next apply run it
+# again (both PUTs are idempotent); the script ConfigMap has a fixed name so a still-existing
+# Job's pod template never changes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: snapshot-bootstrap
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: snapshot-bootstrap
+        app.kubernetes.io/component: snapshots
+        people-index.io/es-client: "true"
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bootstrap
+          image: quay.io/curl/curl:8.22.0
+          command: ["/bin/sh", "/scripts/bootstrap.sh"]
+          env:
+            - name: ES_URL
+              value: https://es-es-http:9200
+            - name: ES_CA_CERT
+              value: /etc/es-ca/ca.crt
+            - name: ES_USERNAME
+              value: elastic
+            - name: ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: es-es-elastic-user
+                  key: elastic
+            - name: SNAPSHOT_BUCKET
+              value: people-index
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: es-ca
+              mountPath: /etc/es-ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scripts
+          configMap:
+            name: snapshot-bootstrap
+        - name: es-ca
+          secret:
+            secretName: es-es-http-certs-public
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

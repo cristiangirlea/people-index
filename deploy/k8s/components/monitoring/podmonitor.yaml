@@ -1,0 +1,20 @@
+# Every pipeline pod (coordinator, workers, datagen) serves Prometheus metrics on :9464
+# (PI_METRICS_ADDR). A PodMonitor rather than a ServiceMonitor: run pods are short-lived Job
+# pods with no Service in front of them, and each worker's counters matter on their own. The
+# run id and the pod's role become metric labels so runs and roles can be told apart.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: pipeline
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: people-index
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_people_index_io_run_id]
+          targetLabel: run_id
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          targetLabel: role

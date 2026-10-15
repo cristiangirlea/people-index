@@ -1,0 +1,55 @@
+# Everything that persists between runs: the namespace, Elasticsearch (ECK), the in-cluster
+# object store, the pipeline's identity and settings, and the network policies.
+#
+# Not applied on its own: an overlay adds the credentials (pipeline-es-credentials,
+# s3-credentials) from git-ignored env files and sizes the cluster. Runs are Jobs rendered from
+# deploy/k8s/jobs, which refer to the names below, so generated names carry no hash suffix.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: people-index
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: people-index
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - pipeline-serviceaccount.yaml
+  - networkpolicies.yaml
+  - elasticsearch/elasticsearch.yaml
+  - s3/seaweedfs.yaml
+  - s3/bucket-init-job.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  # The PI_* settings every pipeline pod loads with envFrom (docs/ARCHITECTURE.md,
+  # Configuration). Per-run values (PI_RUN_ID, PI_WORKER_ID, PI_CONCURRENCY) are set on the
+  # Jobs; credentials come from Secrets.
+  - name: people-index-config
+    literals:
+      - PI_STORE_URL=s3://people-index/
+      - PI_S3_ENDPOINT=http://s3:8333
+      - AWS_REGION=us-east-1
+      - PI_ES_URL=https://es-es-http:9200
+      - PI_ES_CA_CERT=/etc/people-index/es-ca/ca.crt
+      - PI_ALIAS=persons
+      - PI_EXECUTOR=distributed
+      - PI_LEASE_TTL=60s
+      - PI_INDEX_REPLICAS=1
+      - PI_INDEX_CODEC=best_compression
+      - PI_BULK_MAX_BYTES=8388608
+      - PI_SENDERS_PER_WORKER=2
+      - PI_METRICS_ADDR=0.0.0.0:9464
+      - PI_LOG_FORMAT=json
+  - name: s3-bucket-init
+    files:
+      - bucket-init.sh=s3/bucket-init.sh
+
+secretGenerator:
+  # Role definitions are not secret, but ECK reads them only from a Secret.
+  - name: people-index-es-roles
+    files:
+      - roles.yml=elasticsearch/roles.yml

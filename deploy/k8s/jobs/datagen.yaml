@@ -1,0 +1,95 @@
+# Generates the synthetic input feeds (and expected.json) straight into the object store, under
+# the `raw/` prefix a run reads from. Rendered by render.sh like run.yaml. The generator is
+# seeded, so a failed pod's replacement rewrites the same files.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pi-datagen-${JOB_ID}
+  namespace: people-index
+  labels:
+    app.kubernetes.io/name: people-index
+    app.kubernetes.io/component: datagen
+    app.kubernetes.io/part-of: people-index
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: ${DATAGEN_DEADLINE_SECONDS}
+  ttlSecondsAfterFinished: 86400
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: people-index
+        app.kubernetes.io/component: datagen
+        app.kubernetes.io/part-of: people-index
+        people-index.io/s3-client: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: people-index-pipeline
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: people-index
+          image: ${IMAGE}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
+          args:
+            - datagen
+            - --persons
+            - "${PERSONS}"
+            - --organizations
+            - "${ORGANIZATIONS}"
+            - --files
+            - "${FILES}"
+            - --seed
+            - "${SEED}"
+            - --out
+            - s3://people-index/raw/
+          envFrom:
+            - configMapRef:
+                name: people-index-config
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: TMPDIR
+              value: /tmp
+          ports:
+            - name: metrics
+              containerPort: 9464
+          resources:
+            requests:
+              cpu: "${DATAGEN_CPU}"
+              memory: "${DATAGEN_MEMORY}"
+              ephemeral-storage: 256Mi
+            limits:
+              memory: "${DATAGEN_MEMORY}"
+              ephemeral-storage: "${TMP_SIZE}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: "${TMP_SIZE}"

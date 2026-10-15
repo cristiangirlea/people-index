@@ -1,0 +1,53 @@
+# The local k3d cluster (deploy/k3d/cluster.yaml): the full topology at laptop size.
+#
+#   deploy/k8s/gen-secrets.sh local       # once: random credentials in git-ignored env files
+#   kubectl --context k3d-people-index apply --server-side -k deploy/k8s/eck
+#   kubectl --context k3d-people-index apply --server-side -k deploy/k8s/overlays/local
+#
+# Elasticsearch: 3 masters (512 MiB heap) and 3 data nodes (768 MiB heap), one of each per
+# zone, about 7.5 GiB of memory in all; give Docker at least 10 GiB. Snapshots go to the
+# in-cluster store. Monitoring is left out because k3d has no prometheus-operator; add
+# `- ../../components/monitoring` to `components` (and generate es-exporter-credentials, as
+# overlays/production-example does) once kube-prometheus-stack is installed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Set here as well as in base: base's transformers do not reach what components add.
+namespace: people-index
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: people-index
+    includeSelectors: false
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/snapshots
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  # ECK reads it as a file-realm user (username, password, roles); the pipeline reads
+  # username and password.
+  - name: pipeline-es-credentials
+    type: kubernetes.io/basic-auth
+    literals:
+      - username=pipeline
+      - roles=people-index-writer
+    envs:
+      - secrets/pipeline-es.env
+  - name: s3-credentials
+    envs:
+      - secrets/s3.env
+
+patches:
+  - target:
+      group: elasticsearch.k8s.elastic.co
+      kind: Elasticsearch
+      name: es
+    path: elasticsearch-patch.yaml
+  - target:
+      kind: StatefulSet
+      name: seaweedfs
+    path: seaweedfs-patch.yaml

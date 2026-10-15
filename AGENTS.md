@@ -27,9 +27,13 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 scripts/check-deploy.sh        # kustomize build | kubeconform, compose config
 scripts/scrub-check.sh
+cargo deny check               # audit job (also weekly)
 ```
 
-`/check` (`.claude/skills/check`) runs all of them.
+CI also checks the MSRV (`cargo check` at `rust-version`), lints the workflow, shell scripts and
+Dockerfile (actionlint, shellcheck, hadolint), builds the image, and on pushes to `main` runs
+the compose end-to-end (`make compose-run`). `make check` runs the list above (cargo-deny when
+installed); `/check` (`.claude/skills/check`) runs all but cargo-deny.
 
 ## Rules
 

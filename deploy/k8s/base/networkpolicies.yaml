@@ -1,0 +1,113 @@
+# Network policies for the namespace. The model: nothing may connect to a pod here unless a
+# policy below says so, and the pipeline itself may connect only to Elasticsearch, the object
+# store and DNS.
+#
+# Clients opt in with labels rather than by name, so a new Job only needs the right label:
+#   people-index.io/es-client: "true"   may reach Elasticsearch on 9200
+#   people-index.io/s3-client: "true"   may reach the object store on 8333
+#
+# Components add their own policies (monitoring: scrapes; snapshots: Elasticsearch to S3).
+# Policies are additive, so a component never has to edit these.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# Elasticsearch: HTTP from labelled clients and from the ECK operator (it manages the cluster
+# over the HTTP API: health, shard migrations before restarts, users); transport only between
+# the cluster's own nodes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: elasticsearch-ingress
+spec:
+  podSelector:
+    matchLabels:
+      elasticsearch.k8s.elastic.co/cluster-name: es
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              elasticsearch.k8s.elastic.co/cluster-name: es
+      ports:
+        - port: 9200
+          protocol: TCP
+        - port: 9300
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              people-index.io/es-client: "true"
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: elastic-system
+          podSelector:
+            matchLabels:
+              control-plane: elastic-operator
+      ports:
+        - port: 9200
+          protocol: TCP
+---
+# The object store: the S3 API only, from labelled clients.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: s3-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: seaweedfs
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              people-index.io/s3-client: "true"
+      ports:
+        - port: 8333
+          protocol: TCP
+---
+# The pipeline (coordinator, workers, datagen) may open connections to Elasticsearch, the
+# object store and cluster DNS, and nowhere else: a compromised worker cannot reach the API
+# server, other namespaces or the internet. overlays/production-example replaces the
+# object-store rule for an external S3 endpoint.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pipeline-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: people-index
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              elasticsearch.k8s.elastic.co/cluster-name: es
+      ports:
+        - port: 9200
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: seaweedfs
+      ports:
+        - port: 8333
+          protocol: TCP

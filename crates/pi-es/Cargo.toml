@@ -4,10 +4,27 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
+description = "Elasticsearch client, index admin, bulk indexer, publisher and verifier for people-index"
 
 [lints]
 workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+memchr = { workspace = true }
+metrics = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11.1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
+wiremock = { workspace = true }

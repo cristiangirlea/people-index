@@ -1,13 +1,25 @@
 [package]
 name = "pi-segment"
+description = "people-index segment files: zstd-compressed, varint-framed postcard rows behind an 8-byte magic"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
+repository.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
+pi-model = { workspace = true }
+proptest = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }

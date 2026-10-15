@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/cristiangirlea/people-index"
+
+[workspace.dependencies]
+pi-model = { path = "crates/pi-model" }
+pi-segment = { path = "crates/pi-segment" }
+pi-store = { path = "crates/pi-store" }
+pi-coord = { path = "crates/pi-coord" }
+pi-es = { path = "crates/pi-es" }
+pi-stages = { path = "crates/pi-stages" }
+pi-datagen = { path = "crates/pi-datagen" }
+
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+futures = "0.3.34"
+humantime = "2.4.0"
+memchr = "2.8.3"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"] }
+object_store = { version = "0.14.2", features = ["aws"] }
+postcard = { version = "1.1.3", features = ["use-std"] }
+proptest = "1.12.0"
+rand = "0.10.3"
+rand_chacha = "0.10.0"
+rand_distr = "0.6.0"
+rayon = "1.12.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "gzip", "stream"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
+tokio = { version = "1.53.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1.28.0", features = ["v4", "v7"] }
+wiremock = "0.6.5"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
+zstd = "0.14.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

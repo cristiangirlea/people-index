@@ -1,0 +1,36 @@
+{
+  "attribution": { "commit": "", "pr": "", "sessionUrl": false },
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)", "PowerShell(cargo build:*)",
+      "Bash(cargo check:*)", "PowerShell(cargo check:*)",
+      "Bash(cargo test:*)", "PowerShell(cargo test:*)",
+      "Bash(cargo clippy:*)", "PowerShell(cargo clippy:*)",
+      "Bash(cargo fmt:*)", "PowerShell(cargo fmt:*)",
+      "Bash(cargo tree:*)", "PowerShell(cargo tree:*)",
+      "Bash(kubectl kustomize:*)", "PowerShell(kubectl kustomize:*)",
+      "Bash(docker compose config:*)", "PowerShell(docker compose config:*)",
+      "Bash(scripts/check-deploy.sh:*)", "PowerShell(bash scripts/check-deploy.sh:*)",
+      "Bash(scripts/scrub-check.sh:*)", "PowerShell(bash scripts/scrub-check.sh:*)",
+      "Bash(git status:*)", "PowerShell(git status:*)",
+      "Bash(git diff:*)", "PowerShell(git diff:*)",
+      "Bash(git log:*)", "PowerShell(git log:*)"
+    ],
+    "ask": [
+      "Bash(kubectl apply:*)", "PowerShell(kubectl apply:*)",
+      "Bash(kubectl delete:*)", "PowerShell(kubectl delete:*)",
+      "Bash(k3d cluster delete:*)", "PowerShell(k3d cluster delete:*)",
+      "Bash(gh pr merge:*)", "PowerShell(gh pr merge:*)",
+      "Bash(gh release:*)", "PowerShell(gh release:*)"
+    ],
+    "deny": [
+      "Read(./.env)", "Read(./**/*.pem)", "Read(./**/*.key)",
+      "Bash(git push --force:*)", "PowerShell(git push --force:*)",
+      "Bash(git push -f:*)", "PowerShell(git push -f:*)",
+      "Bash(git push origin main:*)", "PowerShell(git push origin main:*)",
+      "Bash(gh pr merge --auto:*)", "PowerShell(gh pr merge --auto:*)",
+      "Bash(gh pr merge --admin:*)", "PowerShell(gh pr merge --admin:*)",
+      "Bash(cargo publish:*)", "PowerShell(cargo publish:*)"
+    ]
+  }
+}

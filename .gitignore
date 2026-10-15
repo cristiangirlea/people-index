@@ -1,0 +1,7 @@
+/target/
+/store/
+/data/
+*.seg
+CLAUDE.local.md
+.claude/settings.local.json
+.env

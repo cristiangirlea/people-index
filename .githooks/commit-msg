@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# The commit message must not carry a forbidden word either (list: see scripts/scrub-check.sh).
+root="$(git rev-parse --show-toplevel)"
+words="${SCRUB_WORDS_FILE:-$root/../people-index.scrub-words}"
+[[ -f "$words" ]] || exit 0
+pattern="$(grep -v '^[[:space:]]*$' "$words" | paste -sd '|' -)"
+if [[ -n "$pattern" ]] && grep -n -i -E "$pattern" "$1"; then
+  echo "commit-msg: forbidden word in the message" >&2
+  exit 1
+fi

@@ -4,10 +4,33 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
+repository.workspace = true
+description = "The eight stages of a people-index run, each a pi-coord Stage, and their registry."
 
 [lints]
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+memchr = { workspace = true }
+metrics = { workspace = true }
+pi-coord = { workspace = true }
+pi-es = { workspace = true }
+pi-model = { workspace = true }
+pi-segment = { workspace = true }
+pi-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,14 @@
+# Everything the pipeline needs lives in one namespace, so one set of NetworkPolicies and one
+# Pod Security level cover it. ECK-managed pods meet "baseline"; "restricted" is reported as
+# warnings and audit events so a regression in our own pods shows up without blocking ECK.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: people-index
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

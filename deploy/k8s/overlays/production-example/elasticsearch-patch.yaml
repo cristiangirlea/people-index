@@ -1,0 +1,76 @@
+# Production sizing and the external snapshot endpoint. JSON 6902: node sets and env entries
+# are addressed by index, each guarded by a `test` op.
+#
+# Storage: the default StorageClass is used. Set storageClassName on both claim templates to a
+# fast, zone-bound class with volumeBindingMode WaitForFirstConsumer, so each volume is created
+# in the zone its pod is scheduled to.
+#
+# Dedicated node pools: to keep Elasticsearch off the pipeline's nodes (and the reverse), add a
+# nodeSelector or node affinity and a matching toleration to each node set's podTemplate.
+- op: test
+  path: /spec/nodeSets/0/name
+  value: master
+- op: test
+  path: /spec/nodeSets/0/podTemplate/spec/containers/0/env/1/name
+  value: ES_JAVA_OPTS
+- op: replace
+  path: /spec/nodeSets/0/podTemplate/spec/containers/0/env/1/value
+  value: "-Xms2g -Xmx2g"
+- op: replace
+  path: /spec/nodeSets/0/podTemplate/spec/containers/0/resources
+  value:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      memory: 4Gi
+- op: replace
+  path: /spec/nodeSets/0/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 10Gi
+- op: replace
+  path: /spec/nodeSets/0/config/s3.client.default.endpoint
+  value: s3.eu-west-1.amazonaws.com
+- op: replace
+  path: /spec/nodeSets/0/config/s3.client.default.protocol
+  value: https
+- op: replace
+  path: /spec/nodeSets/0/config/s3.client.default.path_style_access
+  value: false
+- op: replace
+  path: /spec/nodeSets/0/config/s3.client.default.region
+  value: eu-west-1
+- op: test
+  path: /spec/nodeSets/1/name
+  value: data
+- op: replace
+  path: /spec/nodeSets/1/count
+  value: 6
+- op: test
+  path: /spec/nodeSets/1/podTemplate/spec/containers/0/env/1/name
+  value: ES_JAVA_OPTS
+- op: replace
+  path: /spec/nodeSets/1/podTemplate/spec/containers/0/env/1/value
+  value: "-Xms16g -Xmx16g"
+- op: replace
+  path: /spec/nodeSets/1/podTemplate/spec/containers/0/resources
+  value:
+    requests:
+      cpu: "8"
+      memory: 32Gi
+    limits:
+      memory: 32Gi
+- op: replace
+  path: /spec/nodeSets/1/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 500Gi
+- op: replace
+  path: /spec/nodeSets/1/config/s3.client.default.endpoint
+  value: s3.eu-west-1.amazonaws.com
+- op: replace
+  path: /spec/nodeSets/1/config/s3.client.default.protocol
+  value: https
+- op: replace
+  path: /spec/nodeSets/1/config/s3.client.default.path_style_access
+  value: false
+- op: replace
+  path: /spec/nodeSets/1/config/s3.client.default.region
+  value: eu-west-1

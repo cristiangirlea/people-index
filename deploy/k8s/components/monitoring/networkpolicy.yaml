@@ -1,0 +1,25 @@
+# Admit Prometheus (in the `monitoring` namespace) to the metrics ports of the pipeline pods,
+# the exporter and the object store. Everything else stays denied by base/networkpolicies.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metrics-ingress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: ["people-index", "elasticsearch-exporter", "seaweedfs"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9464
+          protocol: TCP
+        - port: 9114
+          protocol: TCP
+        - port: 9327
+          protocol: TCP

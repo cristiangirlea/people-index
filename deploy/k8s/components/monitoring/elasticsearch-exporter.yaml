@@ -1,0 +1,104 @@
+# prometheus-community elasticsearch-exporter, one replica for the whole cluster (--es.all):
+# it talks to the HTTP service, so it follows the cluster through node restarts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch-exporter
+        app.kubernetes.io/component: monitoring
+        people-index.io/es-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: quay.io/prometheuscommunity/elasticsearch-exporter:v1.11.0
+          args:
+            - --es.uri=https://es-es-http:9200
+            - --es.ca=/etc/es-ca/ca.crt
+            - --es.timeout=30s
+            - --es.all
+            - --es.indices
+            - --es.shards
+            - --es.aliases
+            - --collector.snapshots
+            - --collector.clustersettings
+            - --collector.health-report
+            - --log.format=json
+          # The exporter reads ES_USERNAME / ES_PASSWORD, which keeps the password out of the
+          # URI and the process arguments.
+          env:
+            - name: ES_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: es-exporter-credentials
+                  key: username
+            - name: ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: es-exporter-credentials
+                  key: password
+          ports:
+            - name: metrics
+              containerPort: 9114
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: es-ca
+              mountPath: /etc/es-ca
+              readOnly: true
+      volumes:
+        - name: es-ca
+          secret:
+            secretName: es-es-http-certs-public
+            items:
+              - key: ca.crt
+                path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-exporter
+  labels:
+    app.kubernetes.io/name: elasticsearch-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: elasticsearch-exporter
+  ports:
+    - name: metrics
+      port: 9114
+      targetPort: metrics

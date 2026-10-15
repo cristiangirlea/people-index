@@ -1,0 +1,22 @@
+# The pipeline's third egress rule admitted the in-cluster store; replace it with HTTPS to
+# addresses outside the private ranges. The link-local range is excluded so a pod cannot reach
+# the cloud metadata service (169.254.169.254) and borrow the node's identity. With a VPC
+# endpoint or a published prefix list, narrow the CIDR to it.
+- op: test
+  path: /spec/egress/2/to/0/podSelector/matchLabels/app.kubernetes.io~1name
+  value: seaweedfs
+- op: replace
+  path: /spec/egress/2
+  value:
+    to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except:
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+            - 192.168.0.0/16
+            - 169.254.0.0/16
+            - 100.64.0.0/10
+    ports:
+      - port: 443
+        protocol: TCP

@@ -1,0 +1,148 @@
+# The in-cluster S3-compatible object store: SeaweedFS in one pod (master, volume server, filer
+# and S3 gateway in one process).
+#
+# Why SeaweedFS: the pipeline's commit and lease protocol needs conditional writes, and this
+# store answers them like S3 does (verified against chrislusf/seaweedfs:4.48: PUT with
+# `If-None-Match: *` on an existing key and PUT with a stale `If-Match` etag both return 412,
+# and of 16 concurrent create-if-absent PUTs on one key exactly one wins). MinIO no longer
+# publishes container images.
+#
+# Why one replica: it stands in for a managed object store on a laptop cluster. Its data is
+# re-creatable (generated inputs, run intermediates, snapshots of an index the pipeline can
+# rebuild). Production uses real S3 (overlays/production-example removes all of this).
+#
+# Only the S3 gateway (8333) and the metrics port (9327) listen on the pod IP; the internal
+# master, volume and filer ports bind to loopback, so nothing but S3 is reachable even before
+# the NetworkPolicies apply. Credentials come from the `s3-credentials` Secret through the
+# AWS_* variables, which SeaweedFS turns into its single admin identity; anonymous requests get
+# 403.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: seaweedfs
+spec:
+  serviceName: seaweedfs-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: seaweedfs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seaweedfs
+        app.kubernetes.io/component: object-store
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        # uid 1000 is the image's `seaweed` user; running as it directly skips the
+        # entrypoint's chown-and-drop-privileges path, and fsGroup makes the volume writable.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:4.48
+          # The image's entrypoint adds `-dir=/data -volume.max=0` for `server`.
+          args:
+            - server
+            - -s3
+            - -ip=127.0.0.1
+            - -ip.bind=127.0.0.1
+            - -s3.ip.bind=0.0.0.0
+            - -metricsIp=0.0.0.0
+            - -metricsPort=9327
+            - -s3.port.iceberg=0
+            - -s3.port.lance=0
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+          ports:
+            - name: s3
+              containerPort: 8333
+            - name: metrics
+              containerPort: 9327
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: s3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: s3
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # gRPC unix sockets between the embedded servers.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+# The name the pipeline and Elasticsearch use: http://s3:8333.
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3
+spec:
+  selector:
+    app.kubernetes.io/name: seaweedfs
+  ports:
+    - name: s3
+      port: 8333
+      targetPort: s3
+    - name: metrics
+      port: 9327
+      targetPort: metrics
+---
+# Governing service of the StatefulSet (stable pod DNS); not used by clients.
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs-headless
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: seaweedfs
+  ports:
+    - name: s3
+      port: 8333
+      targetPort: s3

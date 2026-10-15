@@ -1,0 +1,43 @@
+# JSON 6902 patch: node sets are addressed by index, so each pair starts with a `test` on the
+# name and the patch fails loudly if the order in base/elasticsearch/elasticsearch.yaml changes.
+# Both node sets need the client settings: masters write the repository metadata and every
+# node verifies the repository when it is registered.
+- op: add
+  path: /spec/secureSettings
+  value:
+    - secretName: s3-credentials
+      entries:
+        - key: AWS_ACCESS_KEY_ID
+          path: s3.client.default.access_key
+        - key: AWS_SECRET_ACCESS_KEY
+          path: s3.client.default.secret_key
+- op: test
+  path: /spec/nodeSets/0/name
+  value: master
+- op: add
+  path: /spec/nodeSets/0/config/s3.client.default.endpoint
+  value: s3:8333
+- op: add
+  path: /spec/nodeSets/0/config/s3.client.default.protocol
+  value: http
+- op: add
+  path: /spec/nodeSets/0/config/s3.client.default.path_style_access
+  value: true
+- op: add
+  path: /spec/nodeSets/0/config/s3.client.default.region
+  value: us-east-1
+- op: test
+  path: /spec/nodeSets/1/name
+  value: data
+- op: add
+  path: /spec/nodeSets/1/config/s3.client.default.endpoint
+  value: s3:8333
+- op: add
+  path: /spec/nodeSets/1/config/s3.client.default.protocol
+  value: http
+- op: add
+  path: /spec/nodeSets/1/config/s3.client.default.path_style_access
+  value: true
+- op: add
+  path: /spec/nodeSets/1/config/s3.client.default.region
+  value: us-east-1

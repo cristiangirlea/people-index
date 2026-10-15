@@ -1,0 +1,26 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: elasticsearch-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch-exporter
+  endpoints:
+    - port: metrics
+      interval: 30s
+      scrapeTimeout: 25s
+---
+# The in-cluster object store (SeaweedFS, metrics on the `s3` Service). Selects nothing where
+# the store is external.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: object-store
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: seaweedfs
+  endpoints:
+    - port: metrics
+      interval: 30s

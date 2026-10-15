@@ -1,0 +1,38 @@
+# Metrics and alerts. Needs the prometheus-operator CRDs (ServiceMonitor, PodMonitor,
+# PrometheusRule), e.g. from kube-prometheus-stack, before it is applied.
+#
+# - elasticsearch-exporter: cluster, node, index, shard and snapshot metrics, logged in as the
+#   file-realm user `exporter` (role people-index-monitor: monitor, monitor_snapshot, and
+#   monitor + view_index_metadata on indices). The overlay that includes this component
+#   generates `es-exporter-credentials` (see overlays/production-example).
+# - ServiceMonitors for the exporter and the object store, a PodMonitor for every pipeline
+#   pod's :9464 endpoint (coordinator, workers, datagen).
+# - A PrometheusRule with the Elasticsearch alerts that matter during a load.
+# - A NetworkPolicy that admits scrapes from the `monitoring` namespace only. If Prometheus
+#   runs elsewhere, patch its namespaceSelector. If your Prometheus selects monitors by a label
+#   (kube-prometheus-stack: `release: <name>`), add it with a `labels:` entry in the overlay.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - elasticsearch-exporter.yaml
+  - servicemonitors.yaml
+  - podmonitor.yaml
+  - prometheusrule.yaml
+  - networkpolicy.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  # Role definitions are not secret, but ECK reads them only from a Secret.
+  - name: people-index-es-monitor-role
+    files:
+      - roles.yml=monitor-role.yml
+
+patches:
+  - target:
+      group: elasticsearch.k8s.elastic.co
+      kind: Elasticsearch
+      name: es
+    path: elasticsearch-patch.yaml

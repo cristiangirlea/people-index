@@ -1,0 +1,51 @@
+# Laptop sizing. JSON 6902: node sets and env entries are addressed by index, each guarded by a
+# `test` so a reordering in base fails the build instead of patching the wrong thing.
+#
+# node.store.allow_mmap: false lets Elasticsearch start without raising vm.max_map_count on
+# the Docker host (k3d nodes share its kernel); it costs some search speed, which is fine here.
+- op: test
+  path: /spec/nodeSets/0/name
+  value: master
+- op: add
+  path: /spec/nodeSets/0/config/node.store.allow_mmap
+  value: false
+- op: test
+  path: /spec/nodeSets/0/podTemplate/spec/containers/0/env/1/name
+  value: ES_JAVA_OPTS
+- op: replace
+  path: /spec/nodeSets/0/podTemplate/spec/containers/0/env/1/value
+  value: "-Xms512m -Xmx512m"
+- op: replace
+  path: /spec/nodeSets/0/podTemplate/spec/containers/0/resources
+  value:
+    requests:
+      cpu: 200m
+      memory: 1Gi
+    limits:
+      memory: 1Gi
+- op: replace
+  path: /spec/nodeSets/0/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 1Gi
+- op: test
+  path: /spec/nodeSets/1/name
+  value: data
+- op: add
+  path: /spec/nodeSets/1/config/node.store.allow_mmap
+  value: false
+- op: test
+  path: /spec/nodeSets/1/podTemplate/spec/containers/0/env/1/name
+  value: ES_JAVA_OPTS
+- op: replace
+  path: /spec/nodeSets/1/podTemplate/spec/containers/0/env/1/value
+  value: "-Xms768m -Xmx768m"
+- op: replace
+  path: /spec/nodeSets/1/podTemplate/spec/containers/0/resources
+  value:
+    requests:
+      cpu: 500m
+      memory: 1536Mi
+    limits:
+      memory: 1536Mi
+- op: replace
+  path: /spec/nodeSets/1/volumeClaimTemplates/0/spec/resources/requests/storage
+  value: 5Gi

@@ -1,0 +1,149 @@
+# An example production overlay: a bigger cluster, an external S3 bucket instead of the
+# in-cluster store, monitoring and snapshots. Copy it, then change what the comments point at
+# (region, endpoint, bucket, storage class, sizes). CI renders and schema-checks it, so it
+# stays a working starting point.
+#
+# Sizing, in short (docs/ARCHITECTURE.md has the knobs):
+# - Data nodes: 6 across 3 zones, 16 GiB heap of 32 GiB memory each (heap at most half the
+#   memory and under ~31 GiB so the JVM keeps compressed pointers; the rest is page cache).
+# - Shards: PI_INDEX_SHARDS defaults to 2 primaries per data node, so 12 here, and with
+#   PI_INDEX_REPLICAS=1 that is 24 shards, 4 per node. Aim for 10-50 GB per shard: an index of
+#   ~300 GB is ~25 GB per primary. A much bigger index wants PI_INDEX_SHARDS set explicitly (a
+#   multiple of the data-node count keeps the nodes even); add data nodes before shards.
+# - Load pressure is workers x PI_SENDERS_PER_WORKER concurrent bulk requests (jobs.vars:
+#   12 x 2 = 24, 4 per data node). Raise it while the write thread pool shows no rejections
+#   (the ElasticsearchBulkRejections alert) and heap stays under the ElasticsearchHeapHigh line.
+# - Memory-mapped storage stays on (the default), so every node that runs Elasticsearch needs
+#   vm.max_map_count >= 1048576, set in the node image or by node tuning, not by a privileged
+#   init container.
+#
+# Credentials: the env files in secrets/ (git-ignored) feed the generators below. In a real
+# cluster prefer an operator-managed source (External Secrets, Sealed Secrets) that creates the
+# same Secret names, and IAM roles for service accounts instead of S3 keys where the cloud
+# offers them.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Set here as well as in base: base's transformers do not reach what components add.
+namespace: people-index
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: people-index
+    includeSelectors: false
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/monitoring
+  - ../../components/snapshots
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: pipeline-es-credentials
+    type: kubernetes.io/basic-auth
+    literals:
+      - username=pipeline
+      - roles=people-index-writer
+    envs:
+      - secrets/pipeline-es.env
+  - name: es-exporter-credentials
+    type: kubernetes.io/basic-auth
+    literals:
+      - username=exporter
+      - roles=people-index-monitor
+    envs:
+      - secrets/es-exporter.env
+  - name: s3-credentials
+    envs:
+      - secrets/s3.env
+
+patches:
+  # No in-cluster object store: remove it, its bucket Job and the policies that admit traffic
+  # to it.
+  - target:
+      kind: StatefulSet
+      name: seaweedfs
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: seaweedfs
+  - target:
+      kind: Service
+      name: s3
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: s3
+  - target:
+      kind: Service
+      name: seaweedfs-headless
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: seaweedfs-headless
+  - target:
+      kind: Job
+      name: s3-bucket-init
+    patch: |-
+      $patch: delete
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: s3-bucket-init
+  - target:
+      kind: ConfigMap
+      name: s3-bucket-init
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: s3-bucket-init
+  - target:
+      kind: NetworkPolicy
+      name: s3-ingress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: s3-ingress
+  - target:
+      kind: NetworkPolicy
+      name: s3-ingress-from-elasticsearch
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: s3-ingress-from-elasticsearch
+  - target:
+      kind: ServiceMonitor
+      name: object-store
+    patch: |-
+      $patch: delete
+      apiVersion: monitoring.coreos.com/v1
+      kind: ServiceMonitor
+      metadata:
+        name: object-store
+  - target:
+      kind: ConfigMap
+      name: people-index-config
+    path: config-patch.yaml
+  - target:
+      kind: NetworkPolicy
+      name: pipeline-egress
+    path: pipeline-egress-patch.yaml
+  - target:
+      group: elasticsearch.k8s.elastic.co
+      kind: Elasticsearch
+      name: es
+    path: elasticsearch-patch.yaml

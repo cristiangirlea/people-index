@@ -1,0 +1,62 @@
+# Alerts on the Elasticsearch side of a load. Thresholds follow Elasticsearch's own defaults:
+# at the 85% low disk watermark it stops allocating shards to a node, and a heap above 90% for
+# long means GC pressure.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: people-index-elasticsearch
+spec:
+  groups:
+    - name: people-index.elasticsearch
+      rules:
+        - alert: ElasticsearchExporterDown
+          expr: up{job="elasticsearch-exporter"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: elasticsearch-exporter cannot be scraped, so the other alerts here are blind.
+        - alert: ElasticsearchClusterRed
+          expr: elasticsearch_cluster_health_status{color="red"} == 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: A primary shard is unassigned; writes to it fail and publish will refuse the alias move.
+        - alert: ElasticsearchClusterYellow
+          expr: elasticsearch_cluster_health_status{color="yellow"} == 1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Replicas unassigned for 30 minutes (normal for a short while after publish restores replicas).
+        - alert: ElasticsearchDiskLow
+          expr: |
+            1 - (elasticsearch_filesystem_data_available_bytes / elasticsearch_filesystem_data_size_bytes) > 0.80
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.name }} is above 80% disk; at 85% Elasticsearch stops allocating shards to it."
+        - alert: ElasticsearchHeapHigh
+          expr: |
+            elasticsearch_jvm_memory_used_bytes{area="heap"} / elasticsearch_jvm_memory_max_bytes{area="heap"} > 0.90
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.name }} heap above 90% for 15 minutes; lower the workers or PI_SENDERS_PER_WORKER."
+        - alert: ElasticsearchBulkRejections
+          expr: increase(elasticsearch_thread_pool_rejected_count{type="write"}[5m]) > 0
+          for: 10m
+          labels:
+            severity: info
+          annotations:
+            summary: The write thread pool keeps rejecting bulk requests (429s the loader retries); the cluster is the bottleneck.
+        - alert: ElasticsearchNoRecentSnapshot
+          expr: time() - elasticsearch_snapshot_stats_latest_snapshot_timestamp_seconds > 2 * 86400
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "No successful snapshot in repository {{ $labels.repository }} for two days."

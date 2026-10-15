@@ -4,10 +4,25 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
+description = "Object store wrapper with conditional writes and the run storage layout."
 
 [lints]
 workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+futures = { workspace = true }
+object_store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# StreamReader turns an object body into an AsyncBufRead for line and gzip readers.
+tokio-util = { version = "0.7.18", features = ["io"] }
 
 [dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }

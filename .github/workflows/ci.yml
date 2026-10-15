@@ -1,0 +1,196 @@
+# CI for a public repository: GitHub-hosted runners only. Every third-party action is pinned to a
+# full commit SHA (the tag is in the comment); Dependabot or a manual bump updates both together.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly, so a new RustSec advisory against an unchanged lockfile is still noticed.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # The toolchain CI and the Dockerfile build with; the MSRV job checks rust-version separately.
+  RUST_TOOLCHAIN: "1.98.1"
+  RUST_MSRV: "1.90"
+
+jobs:
+  rust:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Pull requests read the cache main wrote; only main writes it, so caches don't churn.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+
+  msrv:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: check at rust-version
+        run: cargo check --workspace --all-targets --locked
+
+  deploy:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+      KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install kubeconform (checksum verified)
+        run: |
+          curl -fsSL -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          kubeconform -v
+      - name: kustomize build | kubeconform, compose config
+        run: bash scripts/check-deploy.sh
+      - name: scrub
+        # The word list lives outside the repository; without it the script says so and passes.
+        run: bash scripts/scrub-check.sh
+
+  lint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+      - name: shellcheck
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh' '.githooks/*')
+          shellcheck --severity=warning "${scripts[@]}"
+      - name: hadolint
+        run: docker run --rm -i hadolint/hadolint:v2.15.1 hadolint --failure-threshold warning - < Dockerfile
+
+  image:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: docker build (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          tags: people-index:ci
+          cache-from: type=gha,scope=image
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=image,mode=max' || '' }}
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    # A fresh advisory against an untouched dependency must not block an unrelated pull request;
+    # it still fails on main, on the weekly schedule, and shows on every pull request.
+    continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
+
+  e2e:
+    # The whole stack (three Elasticsearch nodes, the S3 store, coordinator, workers) on one
+    # runner with a small generated data set. Too heavy for every pull request.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    needs: [rust, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WORKERS: "2"
+      WORKER_CPUS: "1"
+      WORKER_CONCURRENCY: "1"
+      WORKER_MEMORY: 1g
+      ES_HEAP: 512m
+      ES_MEM_LIMIT: 1g
+      DATAGEN_PERSONS: "20000"
+      DATAGEN_ORGANIZATIONS: "5000"
+      DATAGEN_FILES: "4"
+      PI_MIN_PARTITIONS: "8"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: kernel setting Elasticsearch requires
+        run: sudo sysctl -w vm.max_map_count=262144
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: build people-index:local
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: people-index:local
+          cache-from: type=gha,scope=image
+      - name: datagen, run, verify
+        run: make compose-run
+      - name: collect logs
+        if: failure()
+        run: |
+          mkdir -p e2e-logs
+          make compose-logs > e2e-logs/compose.log 2>&1 || true
+          docker compose -f deploy/compose/compose.yaml ps -a > e2e-logs/ps.txt 2>&1 || true
+      - name: upload logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-logs
+          path: e2e-logs/
+          retention-days: 7
+      - name: tear down
+        if: always()
+        run: make compose-clean

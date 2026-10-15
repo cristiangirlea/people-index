@@ -1,0 +1,45 @@
+# cargo-deny: what the dependency graph may contain. CI runs `cargo deny check` (job audit);
+# `make check` runs it too when cargo-deny is installed.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories, unmaintained and unsound notices included. An exception goes in `ignore`
+# with the advisory id and the reason, never as a blanket setting.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Permissive licenses only: the project is MIT and must stay redistributable as a binary image.
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Crates with publish = false (the workspace members) are checked by their own license field only.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies carry no version; they are not wildcards from a registry.
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

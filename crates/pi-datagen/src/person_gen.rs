@@ -170,7 +170,7 @@ impl<'w, 'c> PersonSource<'w, 'c> {
         let world = self.world;
         let (organization_id, organization_name, organization_domain) = match *employer {
             Employer::None => {
-                let name = (*pick_one(rng, FREE_TEXT_EMPLOYERS)).to_owned();
+                let name = (pick_one(rng, FREE_TEXT_EMPLOYERS)).to_owned();
                 (None, name, None)
             }
             Employer::Resolved(index) => {
@@ -198,7 +198,7 @@ impl<'w, 'c> PersonSource<'w, 'c> {
         };
         let start = rng.random_range(ROLE_DAYS);
         let end_date = (!current).then(|| date(start + rng.random_range(60..3_000u64)));
-        let (city, _, country) = *pick_one(rng, PLACES);
+        let (city, _, country) = pick_one(rng, PLACES);
         let description = format!(
             "{title} responsible for {} and {}.",
             pick_one(rng, SKILLS).to_lowercase(),
@@ -217,7 +217,7 @@ impl<'w, 'c> PersonSource<'w, 'c> {
             description,
             x_team: rng
                 .random_bool(world.cfg.extra_field_rate)
-                .then(|| *pick_one(rng, &["core", "platform", "growth", "field", "research"])),
+                .then(|| pick_one(rng, &["core", "platform", "growth", "field", "research"])),
         }
     }
 }
@@ -235,8 +235,8 @@ impl RecordSource for PersonSource<'_, '_> {
         let cfg = world.cfg;
         let id = world.ids.person_id(index);
         let (first_name, last_name) = person_name(rng);
-        let (city, region, country) = *pick_one(rng, PLACES);
-        let industry = *pick_one(rng, INDUSTRIES);
+        let (city, region, country) = pick_one(rng, PLACES);
+        let industry = pick_one(rng, INDUSTRIES);
 
         let role_count = weighted_index(rng, &world.roles_cumulative);
         let mut roles = Vec::with_capacity(role_count);

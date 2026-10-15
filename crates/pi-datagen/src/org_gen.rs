@@ -115,11 +115,11 @@ impl RecordSource for OrgSource<'_, '_> {
         let cfg = world.cfg;
         world.namer.name(index, version, &mut self.name);
         let id = world.ids.org_id(index);
-        let (city, _, country) = *pick_one(rng, PLACES);
+        let (city, _, country) = pick_one(rng, PLACES);
         // Most organizations are small: weight the size ranges towards the first ones.
         let size = (rng.random_range(0..SIZE_RANGES.len()) * rng.random_range(0..=100usize)) / 100;
         let (size_range, low, high) = SIZE_RANGES[size];
-        let industry = *pick_one(rng, INDUSTRIES);
+        let industry = pick_one(rng, INDUSTRIES);
         let keywords = pick_distinct(rng, KEYWORDS, 1, 5);
         let technologies = pick_distinct(rng, TECHNOLOGIES, 0, 6);
         let founded_year = rng.random_range(1950..=2025u16);
@@ -136,7 +136,7 @@ impl RecordSource for OrgSource<'_, '_> {
             is_headquarters: true,
         }];
         for _ in 0..rng.random_range(0..3u8) {
-            let (city, _, country) = *pick_one(rng, PLACES);
+            let (city, _, country) = pick_one(rng, PLACES);
             addresses.push(address(rng, city, country));
             locations.push(Location {
                 city,

@@ -2,9 +2,11 @@
 
 use rand::{Rng, RngExt};
 
-/// One element of a non-empty `list`.
-pub(crate) fn pick_one<'a, T, R: Rng + ?Sized>(rng: &mut R, list: &'a [T]) -> &'a T {
-    &list[rng.random_range(0..list.len())]
+/// One element of a non-empty `list`, by value. Returning `T` rather than `&T` lets the
+/// element type come from the slice alone: with `&T`, rustc 1.90 (the minimum supported
+/// version) infers `T = str` from a `&str` destination and rejects `&[&str]` lists.
+pub(crate) fn pick_one<T: Copy, R: Rng + ?Sized>(rng: &mut R, list: &[T]) -> T {
+    list[rng.random_range(0..list.len())]
 }
 
 /// Between `min` and `max` distinct elements of `list`, in draw order.
@@ -23,7 +25,7 @@ pub(crate) fn pick_distinct<T: Copy + PartialEq, R: Rng + ?Sized>(
         if picked.len() == want {
             break;
         }
-        let item = *pick_one(rng, list);
+        let item = pick_one(rng, list);
         if !picked.contains(&item) {
             picked.push(item);
         }

@@ -1,13 +1,24 @@
 [package]
 name = "pi-model"
+description = "people-index schema: envelopes, ids, partitioner, segment rows and the document builder (pure, no I/O)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
+repository.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
+serde = { workspace = true }
+# Bodies are byte strings: serde_bytes lets postcard copy them in one piece instead of byte by byte.
+serde_bytes = "0.11.19"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+postcard = { workspace = true }
+proptest = { workspace = true }

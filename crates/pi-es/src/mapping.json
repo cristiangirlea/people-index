@@ -1,0 +1,86 @@
+{
+  "dynamic": false,
+  "properties": {
+    "id": {"type": "long"},
+    "first_name": {
+      "type": "text",
+      "copy_to": "full_name",
+      "fields": {"keyword": {"type": "keyword", "ignore_above": 512}}
+    },
+    "last_name": {
+      "type": "text",
+      "copy_to": "full_name",
+      "fields": {"keyword": {"type": "keyword", "ignore_above": 512}}
+    },
+    "full_name": {"type": "text"},
+    "headline": {"type": "text"},
+    "summary": {"type": "text", "index": false},
+    "country": {"type": "keyword"},
+    "region": {"type": "keyword"},
+    "city": {"type": "keyword"},
+    "industry": {"type": "keyword"},
+    "profile_url": {"type": "keyword", "index": false, "doc_values": false},
+    "skills": {"type": "keyword", "ignore_above": 512},
+    "connections": {"type": "long", "ignore_malformed": true},
+    "followers": {"type": "long", "ignore_malformed": true},
+    "open_to_work": {"type": "boolean"},
+    "roles": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "long", "index": false, "doc_values": false, "ignore_malformed": true},
+        "title": {
+          "type": "text",
+          "fields": {"keyword": {"type": "keyword", "ignore_above": 1024}}
+        },
+        "organization_id": {"type": "long", "ignore_malformed": true},
+        "organization_name": {
+          "type": "text",
+          "fields": {"keyword": {"type": "keyword", "ignore_above": 1024}}
+        },
+        "organization_domain": {"type": "keyword"},
+        "organization_resolved": {"type": "boolean"},
+        "employment_type": {"type": "keyword"},
+        "start_date": {
+          "type": "date",
+          "format": "strict_date_optional_time||strict_year_month||strict_year",
+          "ignore_malformed": true
+        },
+        "end_date": {
+          "type": "date",
+          "format": "strict_date_optional_time||strict_year_month||strict_year",
+          "ignore_malformed": true
+        },
+        "location": {"type": "keyword"},
+        "description": {"type": "text", "index": false}
+      }
+    },
+    "organizations": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "long", "ignore_malformed": true},
+        "name": {
+          "type": "text",
+          "fields": {"keyword": {"type": "keyword", "ignore_above": 1024}}
+        },
+        "domain": {"type": "keyword"},
+        "industry": {"type": "keyword"},
+        "country": {"type": "keyword"},
+        "city": {"type": "keyword"},
+        "size_range": {"type": "keyword"},
+        "employee_count": {"type": "long", "ignore_malformed": true},
+        "founded_year": {"type": "integer", "ignore_malformed": true},
+        "keywords": {"type": "keyword", "ignore_above": 512},
+        "technologies": {"type": "keyword", "ignore_above": 512},
+        "description": {"type": "text", "index": false},
+        "addresses": {"type": "object", "enabled": false},
+        "locations": {"type": "object", "enabled": false},
+        "funding_rounds": {"type": "object", "enabled": false}
+      }
+    },
+    "unresolved_organization_ids": {"type": "long", "ignore_malformed": true},
+    "memberships": {"type": "object", "enabled": false},
+    "educations": {"type": "object", "enabled": false},
+    "certifications": {"type": "object", "enabled": false},
+    "languages": {"type": "object", "enabled": false}
+  }
+}

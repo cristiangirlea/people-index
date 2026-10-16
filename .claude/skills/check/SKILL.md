@@ -10,5 +10,6 @@ Run each from the repository root and report pass or fail, with the first error 
 3. `cargo test --workspace --locked`
 4. `scripts/check-deploy.sh`
 5. `scripts/scrub-check.sh`
+6. `scripts/test-scrub-check.sh`
 
 Do not fix anything unless asked; say what failed and where.

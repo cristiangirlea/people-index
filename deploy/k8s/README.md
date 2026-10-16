@@ -86,8 +86,8 @@ documents are missing.
   `people-index.io/s3-client: "true"` reaches the store on 8333. The pipeline's own egress is
   limited to Elasticsearch, the store and DNS (production: HTTPS outside private ranges, the
   metadata service excluded).
-- Elasticsearch users are least-privilege file-realm users: `pipeline` (cluster `monitor` and
-  `manage_index_templates`, all on `persons*`) and, with monitoring, `exporter` (read-only).
+- Elasticsearch users are least-privilege file-realm users: `pipeline` (cluster `monitor`, all
+  on `persons` and `persons-*`) and, with monitoring, `exporter` (read-only).
   Role definitions are in `base/elasticsearch/roles.yml` and `components/monitoring/monitor-role.yml`;
   both were exercised against Elasticsearch 9.5.5.
 - Credentials never enter git: overlays generate Secrets from `secrets/*.env` files that

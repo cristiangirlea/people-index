@@ -19,10 +19,10 @@ them all.
 | synthetic data | service `datagen` (profile `datagen`) | Job `pi-datagen-<id>` |
 | metrics | Prometheus (profile `metrics`) | `deploy/k8s/components/monitoring` (Prometheus Operator) |
 
-Role `people-index-writer` grants cluster `monitor` and `manage_index_templates`, and every
-privilege on `persons*` (the alias and its `persons-<run_id>` indexes) and nothing else. If you
-change `PI_ALIAS`, the role's index pattern follows it in compose (`es-users` reads `PI_ALIAS`);
-on Kubernetes change `deploy/k8s/base/elasticsearch/roles.yml` too.
+Role `people-index-writer` grants cluster `monitor` and every privilege on `persons` (the alias)
+and `persons-*` (its `persons-<run_id>` indexes) and nothing else; `roles.yml` lists the calls
+this covers. If you change `PI_ALIAS`, the role's index names follow it in compose (`es-users`
+reads `PI_ALIAS`); on Kubernetes change `deploy/k8s/base/elasticsearch/roles.yml` too.
 
 The store must refuse a conditional write that does not hold (HTTP 412 for `If-None-Match: *` on
 an existing key and for a stale `If-Match`): commits and leases depend on it. SeaweedFS 4.48

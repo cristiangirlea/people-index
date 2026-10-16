@@ -1,0 +1,53 @@
+# Weekly, grouped version updates: one pull request per ecosystem.
+#
+# Images are pinned as name:tag@sha256:<digest> (scripts/check-deploy.sh enforces it); Dependabot
+# bumps tag and digest together. It cannot follow everything:
+#   - the ECK operator image (`images:` in deploy/k8s/eck/kustomization.yaml), the lint images
+#     in .github/workflows/ci.yml (`docker run`) and the Dockerfile's `# syntax=` frontend are
+#     bumped by hand;
+#   - compose and deploy/k8s/base must name the same image, and Elasticsearch's spec.version
+#     must be its image tag (check-deploy.sh). Dependabot bumps compose and the manifests in
+#     separate pull requests and never touches spec.version, so such a bump fails CI until it
+#     carries the other file's change (and spec.version) by hand: merge it as one change;
+#   - a rust image bump in the Dockerfile fails check-deploy.sh until RUST_TOOLCHAIN in ci.yml is
+#     the same version, so the two always move together.
+version: 2
+updates:
+  - package-ecosystem: docker
+    # The Dockerfile, and the Kubernetes manifests that name an image.
+    directories:
+      - /
+      - /deploy/k8s/base/elasticsearch
+      - /deploy/k8s/base/s3
+      - /deploy/k8s/components/monitoring
+      - /deploy/k8s/components/snapshots
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker-compose
+    directories:
+      - /deploy/compose
+    schedule:
+      interval: weekly
+    groups:
+      docker-compose:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]

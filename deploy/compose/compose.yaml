@@ -44,7 +44,7 @@ x-es-env: &es-env
   xpack.security.transport.ssl.verification_mode: certificate
 
 x-es-node: &es-node
-  image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+  image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
   depends_on:
     certs:
       condition: service_completed_successfully
@@ -108,7 +108,7 @@ x-pipeline: &pipeline
 
 services:
   certs:
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
     user: "0"
     entrypoint: ["bash", "/scripts/certs.sh"]
     volumes:
@@ -170,7 +170,7 @@ services:
       - es03-data:/usr/share/elasticsearch/data
 
   es-users:
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
     entrypoint: ["bash", "/scripts/es-users.sh"]
     depends_on:
       es01: { condition: service_healthy }
@@ -188,7 +188,7 @@ services:
     logging: *logging
 
   s3:
-    image: chrislusf/seaweedfs:4.48
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
     hostname: s3
     # One process runs master, volume, filer and the S3 gateway; the image's entrypoint adds
     # -dir=/data and drops to the seaweed user. AWS_* in the environment become the admin
@@ -211,7 +211,7 @@ services:
       start_period: 5s
 
   s3-init:
-    image: amazon/aws-cli:2.37.4
+    image: amazon/aws-cli:2.37.4@sha256:fdd8d1fcbea9c371678dee5a40df8b178c7a781b4586605756ee28114c97ead6
     entrypoint: ["bash", "/scripts/s3-init.sh"]
     depends_on:
       s3: { condition: service_healthy }
@@ -291,7 +291,7 @@ services:
       - --digest
 
   prometheus:
-    image: prom/prometheus:v3.15.0
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     profiles: [metrics]
     command:
       - --config.file=/etc/prometheus/prometheus.yml

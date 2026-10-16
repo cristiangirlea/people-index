@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Validates the deployment without a cluster:
+#   - every image in the Dockerfile (its `# syntax=` frontend included), deploy/compose,
+#     deploy/k8s (rendered) and the CI workflow's `docker run` lines is pinned as
+#     name:tag@sha256:<digest> (people-index:local and the Job templates' ${IMAGE} excepted),
+#     and the Dockerfile's rust tag is CI's RUST_TOOLCHAIN;
+#   - an image in both compose and deploy/k8s/base is the same reference in both, and the
+#     Elasticsearch resource's image tag is its spec.version;
 #   - the ECK release files still match deploy/k8s/eck/SHA256SUMS;
 #   - deploy/k8s/eck, base and every overlay render with kustomize, and every object passes
 #     kubeconform -strict against the Kubernetes schemas and, for custom resources (ECK,
-#     prometheus-operator), the datreeio CRDs-catalog schemas;
+#     prometheus-operator), the datreeio CRDs-catalog schemas at a pinned commit;
 #   - the run and datagen Job templates render for every overlay and pass the same check;
 #   - deploy/k3d/cluster.yaml passes k3d's own config schema;
 #   - the shell scripts parse (and pass shellcheck when it is installed);
@@ -22,7 +28,10 @@ kubeconform_version="v0.8.0"
 # Kubernetes version of the schemas: the k3s release deploy/k3d/cluster.yaml pins.
 kubernetes_version="1.35.0"
 k3d_schema_url="https://raw.githubusercontent.com/k3d-io/k3d/v5.9.0/pkg/config/v1alpha5/schema.json"
-crd_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+# The CRDs-catalog at a fixed commit, so the schemas cannot change under an unchanged tree. To
+# move it: gh api repos/datreeio/CRDs-catalog/commits/main --jq .sha
+crd_catalog_commit="63669a570e231d4f1f8396d229a1de512bcf0a34"
+crd_catalog="https://raw.githubusercontent.com/datreeio/CRDs-catalog/$crd_catalog_commit/"'{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 # Kinds rendered here that have no schema anywhere, passed to -skip (by kind, not
 # -ignore-missing-schemas, so a new kind without a schema still fails). Only
 # CustomResourceDefinition: kubernetes-json-schema does not publish it (its OpenAPI schema is
@@ -108,6 +117,27 @@ find_kubeconform() {
   echo "$bin"
 }
 
+# Image pinning. A reference passes as name:tag@sha256:<64 hex>: the tag for people, the digest
+# for the bytes. The tag part cannot hold a `/`, so registry:port/name without a tag fails.
+pinned_ref='^[^[:space:]@]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$'
+unpinned=()
+check_ref() {
+  case "$2" in
+    # Built from this repository, never pulled; the Job templates' placeholder (jobs.vars).
+    people-index:local | "\${IMAGE}") return ;;
+  esac
+  [[ "$2" =~ $pinned_ref ]] || unpinned+=("$1: $2")
+}
+# The value of every `image:` key in YAML read from stdin, quotes dropped.
+yaml_images() {
+  sed -nE "s/^[[:space:]-]*image:[[:space:]]*[\"']?([^\"'[:space:]#]+).*/\1/p"
+}
+report_unpinned() {
+  ((${#unpinned[@]} == 0)) && return
+  printf 'check-deploy: not pinned as name:tag@sha256:<digest>: %s\n' "${unpinned[@]}" >&2
+  exit 1
+}
+
 kubeconform="$(find_kubeconform)"
 validate() {
   local args=(-strict -summary -kubernetes-version "$kubernetes_version"
@@ -119,6 +149,43 @@ validate() {
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+
+# 0. Images are pinned by digest outside deploy/k8s (Dockerfile, compose, k3d, CI) (checked after rendering, in step 3), and
+#    the image builds with the toolchain CI tests.
+stages=()
+while read -r keyword ref as stage _; do
+  [[ "$keyword" == FROM ]] || continue
+  in_stage=false
+  for name in "${stages[@]}"; do [[ "$ref" == "$name" ]] && in_stage=true; done
+  "$in_stage" || check_ref Dockerfile "$ref"
+  [[ "${as,,}" == as && -n "$stage" ]] && stages+=("$stage")
+done <"$root/Dockerfile"
+# The BuildKit frontend named by the `# syntax=` parser directive (leading comment lines only).
+syntax_ref="$(sed -nE '/^#[[:space:]]*[A-Za-z]+[[:space:]]*=/!q
+  s/^#[[:space:]]*syntax[[:space:]]*=[[:space:]]*([^[:space:]]+).*/\1/p' "$root/Dockerfile")"
+[[ -z "$syntax_ref" ]] || check_ref "Dockerfile (# syntax=)" "$syntax_ref"
+# Compose and Kubernetes run the same images: name -> ref, compared after rendering base.
+declare -A compose_refs=()
+while read -r ref; do
+  check_ref deploy/compose/compose.yaml "$ref"
+  compose_refs["${ref%%[:@]*}"]="$ref"
+done < <(yaml_images <"$root/deploy/compose/compose.yaml")
+# The k3d node image (top-level `image:` of the cluster config).
+while read -r ref; do
+  check_ref deploy/k3d/cluster.yaml "$ref"
+done < <(sed -nE 's/^image:[[:space:]]*([^[:space:]#]+).*/\1/p' "$root/deploy/k3d/cluster.yaml")
+# In `docker run` lines, every word that looks like name:tag or name@digest.
+while read -r ref; do
+  check_ref .github/workflows/ci.yml "$ref"
+done < <(sed -nE 's/^[[:space:]]*(run:[[:space:]]*)?docker run( .*)/\2/p' "$root/.github/workflows/ci.yml" |
+  grep -oE '[[:space:]][a-z0-9][a-z0-9._/-]*[:@][^[:space:]]*' | sed -E 's/^[[:space:]]+//')
+report_unpinned
+docker_rust="$(sed -nE 's/^FROM rust:([0-9][0-9.]*)-.*/\1/p' "$root/Dockerfile")"
+ci_rust="$(sed -nE 's/^[[:space:]]*RUST_TOOLCHAIN:[[:space:]]*"?([0-9][0-9.]*)"?.*/\1/p' \
+  "$root/.github/workflows/ci.yml")"
+[[ -n "$docker_rust" && "$docker_rust" == "$ci_rust" ]] ||
+  fail "Dockerfile builds with rust '${docker_rust}', CI with RUST_TOOLCHAIN '${ci_rust}': make them equal"
+step "images pinned by digest; Dockerfile and CI build with rust $ci_rust"
 
 # 1. The ECK release files are what SHA256SUMS says.
 while read -r want url; do
@@ -146,6 +213,26 @@ for dir in eck base "${overlays[@]}"; do
   step "kustomize $dir"
   kustomize_build "$work/k8s/$dir" >"$work/rendered.yaml" || fail "kustomize failed for deploy/k8s/$dir"
   validate <"$work/rendered.yaml" || fail "deploy/k8s/$dir does not validate"
+  while read -r ref; do
+    check_ref "deploy/k8s/$dir" "$ref"
+    # Dependabot bumps compose and the manifests in separate pull requests; keep them equal.
+    name="${ref%%[:@]*}"
+    if [[ "$dir" == base && -n "${compose_refs[$name]:-}" && "${compose_refs[$name]}" != "$ref" ]]; then
+      fail "deploy/k8s/base runs $ref, deploy/compose/compose.yaml ${compose_refs[$name]}: make them equal"
+    fi
+  done < <(yaml_images <"$work/rendered.yaml")
+  report_unpinned
+  # ECK acts on spec.version, the pods run spec.image: the image tag must be that version.
+  es_spec="$(awk '/^---/ { es = 0 } /^kind: Elasticsearch$/ { es = 1 }
+    es && /^  (version|image):/ { print $1, $2 }' "$work/rendered.yaml")"
+  es_version="$(sed -nE 's/^version: *//p' <<<"$es_spec")"
+  es_image="$(sed -nE 's/^image: *//p' <<<"$es_spec")"
+  if [[ -n "$es_version$es_image" ]]; then
+    es_tag="${es_image%@*}"
+    es_tag="${es_tag##*:}"
+    [[ "$es_tag" == "$es_version" ]] ||
+      fail "deploy/k8s/$dir: Elasticsearch spec.version '$es_version' but spec.image '$es_image': make them equal"
+  fi
 done
 
 # 4. The Job templates render for every overlay and validate.

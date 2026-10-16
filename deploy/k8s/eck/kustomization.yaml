@@ -6,11 +6,18 @@
 # the annotation client-side apply keeps):
 #   kubectl --context k3d-people-index apply --server-side -k deploy/k8s/eck
 #
-# Upgrading: change the version in both URLs, refresh SHA256SUMS
-# (`curl -sL <url> | sha256sum`), and read the ECK release notes for the supported
-# Elasticsearch versions.
+# Upgrading: change the version in both URLs and in `images`, refresh SHA256SUMS
+# (`curl -sL <url> | sha256sum`) and the operator image digest
+# (`docker buildx imagetools inspect docker.elastic.co/eck/eck-operator:<version>`), and read
+# the ECK release notes for the supported Elasticsearch versions.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - https://download.elastic.co/downloads/eck/3.5.0/crds.yaml
   - https://download.elastic.co/downloads/eck/3.5.0/operator.yaml
+# operator.yaml names the operator image by tag; this pins it by digest (kustomize renders
+# name:tag@digest).
+images:
+  - name: docker.elastic.co/eck/eck-operator
+    newTag: 3.5.0
+    digest: sha256:b6f261372d9d9af7b00aab03efea25263314d16063c4d440ac322e52c2fdf314

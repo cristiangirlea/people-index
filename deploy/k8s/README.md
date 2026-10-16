@@ -116,8 +116,11 @@ index) can be recreated, and production uses a managed object store.
 
 ## Checks
 
-`scripts/check-deploy.sh` (CI) verifies the ECK files against `eck/SHA256SUMS`, renders `eck`,
+`scripts/check-deploy.sh` (CI) checks that every image (Dockerfile, compose, the rendered
+manifests, CI's lint images) is pinned as `name:tag@sha256:<digest>` and that the Dockerfile's
+Rust is CI's `RUST_TOOLCHAIN`, verifies the ECK files against `eck/SHA256SUMS`, renders `eck`,
 `base`, every overlay and the Job templates, validates all of it with kubeconform `-strict`
-(Kubernetes schemas plus the datreeio CRDs-catalog for the custom resources), validates the k3d
+(Kubernetes schemas plus the datreeio CRDs-catalog, at a pinned commit, for the custom
+resources), validates the k3d
 config against k3d's schema, parses the shell scripts (and runs shellcheck when installed), and
 runs `docker compose config -q` on `deploy/compose/compose.yaml`. It needs no cluster.

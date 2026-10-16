@@ -118,6 +118,9 @@ pub struct PipelineArgs {
     /// Rows a partitioned writer buffers per task before writing out its largest partition.
     #[arg(long, env = "PI_BUFFER_BYTES", value_parser = parse_byte_size_usize, default_value = "256MiB")]
     pub buffer_bytes: usize,
+    /// Memory a join or assemble task plans to hold per pass; a larger partition runs in passes.
+    #[arg(long, env = "PI_TASK_MEMORY_BYTES", value_parser = parse_byte_size, default_value = "512MiB")]
+    pub task_memory_bytes: u64,
     /// Segment uploads in flight per task.
     #[arg(long, env = "PI_UPLOAD_CONCURRENCY", default_value_t = pi_stages::DEFAULT_UPLOAD_CONCURRENCY)]
     pub upload_concurrency: usize,
@@ -130,6 +133,10 @@ pub struct PipelineArgs {
     /// Bulk requests in flight per load task.
     #[arg(long, env = "PI_SENDERS_PER_WORKER", default_value_t = 2)]
     pub senders_per_worker: usize,
+    /// Decoded documents a load task holds waiting for the bulk indexer (default: twice the
+    /// bulk request size). A larger document still passes, alone.
+    #[arg(long, env = "PI_LOAD_BUFFER_BYTES", value_parser = parse_byte_size_usize)]
+    pub load_buffer_bytes: Option<usize>,
     /// Primary shards (default: 2 per data node).
     #[arg(long, env = "PI_INDEX_SHARDS")]
     pub index_shards: Option<u32>,
@@ -337,6 +344,8 @@ mod tests {
             "1GiB",
             "--lease-ttl",
             "30s",
+            "--load-buffer-bytes",
+            "4MiB",
             "--metrics-addr",
             "off",
         ])
@@ -350,5 +359,10 @@ mod tests {
         assert_eq!(run.exec.lease_ttl, Duration::from_secs(30));
         assert_eq!(run.metrics.addr().unwrap(), None);
         assert_eq!(run.pipeline.min_partitions, 16);
+        assert_eq!(run.pipeline.load_buffer_bytes, Some(4 << 20));
+        assert_eq!(
+            run.pipeline.task_memory_bytes,
+            pi_stages::DEFAULT_TASK_MEMORY_BYTES
+        );
     }
 }

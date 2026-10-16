@@ -21,6 +21,9 @@ pub const ORGANIZATIONS: &str = "organizations";
 pub const EDGES_RESOLVED: &str = "edges_resolved";
 /// Edges whose organization did not resolve.
 pub const EDGES_UNRESOLVED: &str = "edges_unresolved";
+/// Passes a `join` or `assemble` task ran over its partition (1 unless the partition was
+/// estimated larger than `task_memory_bytes`).
+pub const PASSES: &str = "passes";
 /// Person rows read by `assemble`.
 pub const PERSON_ROWS: &str = "person_rows";
 /// Joined rows read by `assemble`.

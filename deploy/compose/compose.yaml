@@ -88,6 +88,12 @@ x-pipeline-env: &pipeline-env
   PI_BULK_MAX_BYTES: ${PI_BULK_MAX_BYTES:-8388608}
   PI_SENDERS_PER_WORKER: ${PI_SENDERS_PER_WORKER:-2}
   PI_MAX_MALFORMED: ${PI_MAX_MALFORMED:-1000}
+  # Per-task memory (docs/OPERATIONS.md, Sizing): about 384 MiB + 128 MiB + 8 x 32 MiB +
+  # 32 MiB = 800 MiB, within WORKER_MEMORY / WORKER_CONCURRENCY (2g / 2) and the 1g
+  # coordinator, which runs single-task stages (an extract stage with one file) itself.
+  PI_TASK_MEMORY_BYTES: ${PI_TASK_MEMORY_BYTES:-384MiB}
+  PI_BUFFER_BYTES: ${PI_BUFFER_BYTES:-128MiB}
+  PI_SEGMENT_TARGET_BYTES: ${PI_SEGMENT_TARGET_BYTES:-32MiB}
   PI_METRICS_ADDR: 0.0.0.0:9464
   PI_LOG_FORMAT: ${PI_LOG_FORMAT:-json}
   RUST_LOG: ${RUST_LOG:-info}

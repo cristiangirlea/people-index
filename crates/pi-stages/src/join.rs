@@ -3,8 +3,14 @@
 //! One task per organization partition `p`: the partition's organizations go into a hash map
 //! (deduplicated last-wins by `Seq`), then the partition's edges stream past it, each becoming
 //! a `JoinedRow` (the organization body, or `None` when the id did not resolve) routed to the
-//! person partition `q` of its person. Memory is one organization partition plus the output
-//! buffer, never the whole organization table.
+//! person partition `q` of its person.
+//!
+//! When the partition's organizations are estimated larger than `task_memory_bytes`, the task
+//! runs `k` passes (a grace hash join, [`pi_model::Passes`]): pass `i` holds only the
+//! organizations of pass `i` and streams the edges of the same pass, re-reading the segments
+//! each time. Memory is one pass of one organization partition plus the output buffer, never
+//! the whole organization table; the joined rows are the same for any `k`, only their order
+//! inside the output segments differs.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,15 +22,16 @@ use pi_coord::{
     AttemptId, CancellationToken, Cancelled, RunContext, Stage, StageName, TaskReport, TaskSpec,
     permanent,
 };
-use pi_model::{EdgeRow, JoinedRow, LastWins, OrgRow, Partitioner};
+use pi_model::{EdgeRow, JoinedRow, LastWins, OrgRow, Partitioner, Passes};
 use pi_segment::SegmentConfig;
 use pi_store::Dataset;
 
 use crate::channel::{Inbox, Outbox, input_channel, upload_channel};
-use crate::commits::{CommitCache, check_malformed, partition_outputs};
+use crate::commits::{CommitCache, check_malformed, partition_outputs, partition_size};
 use crate::config::StagesConfig;
 use crate::counters;
 use crate::feeder::feed_objects;
+use crate::passes::{join_estimate, plan_passes};
 use crate::pipeline::run_pipeline;
 use crate::plan_file::{Feed, Plan};
 use crate::segments_in::for_each_row;
@@ -80,6 +87,23 @@ pub(crate) fn next_object(
     inbox.next_blocking().map_err(anyhow::Error::new)
 }
 
+/// Fails when the feeder sent more than the job asked for.
+pub(crate) fn expect_end(inbox: &mut Inbox<(String, Bytes)>) -> anyhow::Result<()> {
+    match next_object(inbox)? {
+        Some((key, _)) => Err(anyhow::anyhow!(
+            "unexpected input {key} after the last pass"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The input of `passes` passes over the same segments: `per_pass`, once per pass.
+pub(crate) fn repeat_for_passes(per_pass: &[String], passes: Passes) -> Vec<String> {
+    (0..passes.count())
+        .flat_map(|_| per_pass.iter().cloned())
+        .collect()
+}
+
 /// What the blocking side of a join task counted.
 #[derive(Debug, Default)]
 struct JoinCounts {
@@ -96,6 +120,8 @@ struct JoinJob {
     partition: u32,
     partitioner: Partitioner,
     org_segments: usize,
+    edge_segments: usize,
+    passes: Passes,
     namer: SegmentNamer,
     segment: SegmentConfig,
     buffer_bytes: usize,
@@ -105,19 +131,6 @@ struct JoinJob {
 impl JoinJob {
     fn run(self, mut inbox: Inbox<(String, Bytes)>, outbox: Outbox) -> anyhow::Result<JoinCounts> {
         let mut counts = JoinCounts::default();
-        let mut orgs: LastWins<u64, Vec<u8>> = LastWins::new();
-        for _ in 0..self.org_segments {
-            let (key, bytes) = next_object(&mut inbox)?
-                .ok_or_else(|| anyhow::anyhow!("the input ended before every org segment"))?;
-            self.check_cancel()?;
-            counts.org_rows += for_each_row::<OrgRow, _>(&key, bytes, |row| {
-                self.expect_partition(row.org_id, &key)?;
-                orgs.offer(row.org_id, row.seq, row.body);
-                Ok(())
-            })?;
-        }
-        counts.organizations = orgs.len() as u64;
-
         let mut out = PartitionedWriter::<JoinedRow>::new(
             self.partitioner.count(),
             self.buffer_bytes,
@@ -125,16 +138,49 @@ impl JoinJob {
             self.segment,
             outbox,
         );
-        while let Some((key, bytes)) = next_object(&mut inbox)? {
-            self.check_cancel()?;
-            let (resolved, unresolved) = (&mut counts.resolved, &mut counts.unresolved);
-            let edges = for_each_row::<EdgeRow, _>(&key, bytes, |edge| {
+        for pass in 0..self.passes.count() {
+            self.run_pass(pass, &mut inbox, &mut out, &mut counts)?;
+        }
+        expect_end(&mut inbox)?;
+        counts.written = out.finish()?;
+        Ok(counts)
+    }
+
+    /// One pass: the organizations of `pass` into memory, then the edges of `pass` past them.
+    fn run_pass(
+        &self,
+        pass: u32,
+        inbox: &mut Inbox<(String, Bytes)>,
+        out: &mut PartitionedWriter<JoinedRow>,
+        counts: &mut JoinCounts,
+    ) -> anyhow::Result<()> {
+        let mut orgs: LastWins<u64, Vec<u8>> = LastWins::new();
+        for _ in 0..self.org_segments {
+            let (key, bytes) = self.next(inbox)?;
+            for_each_row::<OrgRow, _>(&key, bytes, |row| {
+                self.expect_partition(row.org_id, &key)?;
+                if self.passes.pass_of(row.org_id) == pass {
+                    counts.org_rows += 1;
+                    orgs.offer(row.org_id, row.seq, row.body);
+                }
+                Ok(())
+            })?;
+        }
+        counts.organizations += orgs.len() as u64;
+
+        for _ in 0..self.edge_segments {
+            let (key, bytes) = self.next(inbox)?;
+            for_each_row::<EdgeRow, _>(&key, bytes, |edge| {
                 self.expect_partition(edge.org_id, &key)?;
+                if self.passes.pass_of(edge.org_id) != pass {
+                    return Ok(());
+                }
+                counts.edges += 1;
                 let body = orgs.get(&edge.org_id).map(|(_, body)| body.clone());
                 if body.is_some() {
-                    *resolved += 1;
+                    counts.resolved += 1;
                 } else {
-                    *unresolved += 1;
+                    counts.unresolved += 1;
                 }
                 let size = body.as_ref().map_or(0, Vec::len) + ROW_OVERHEAD;
                 out.push(
@@ -148,10 +194,13 @@ impl JoinJob {
                     size,
                 )
             })?;
-            counts.edges += edges;
         }
-        counts.written = out.finish()?;
-        Ok(counts)
+        Ok(())
+    }
+
+    fn next(&self, inbox: &mut Inbox<(String, Bytes)>) -> anyhow::Result<(String, Bytes)> {
+        self.check_cancel()?;
+        next_object(inbox)?.ok_or_else(|| anyhow::anyhow!("the input ended before the last pass"))
     }
 
     /// A row in the wrong partition means the extract and join disagree on the partitioner:
@@ -208,10 +257,18 @@ impl Stage for JoinStage {
             Dataset::Edges,
             p,
         )?;
+        let passes = plan_passes(
+            StageName::Join,
+            p,
+            join_estimate(partition_size(&org_commits, Dataset::Orgs, p)),
+            self.config.task_memory_bytes,
+        );
         let job = JoinJob {
             partition: p,
             partitioner: plan.partitioner()?,
             org_segments: org_keys.len(),
+            edge_segments: edge_keys.len(),
+            passes,
             namer: SegmentNamer::new(
                 ctx.layout.clone(),
                 StageName::Join,
@@ -223,7 +280,8 @@ impl Stage for JoinStage {
             buffer_bytes: self.config.buffer_bytes,
             cancel: ctx.cancel.clone(),
         };
-        let keys: Vec<String> = org_keys.into_iter().chain(edge_keys).collect();
+        let per_pass: Vec<String> = org_keys.into_iter().chain(edge_keys).collect();
+        let keys = repeat_for_passes(&per_pass, passes);
         let read = Arc::new(AtomicU64::new(0));
         let (tx, inbox) = input_channel(1);
         let (outbox, uploads) = upload_channel(1);
@@ -250,6 +308,8 @@ impl Stage for JoinStage {
         report.add(counters::EDGES_UNRESOLVED, counts.unresolved);
         report.add(counters::JOINED_ROWS, counts.written.records);
         report.add(counters::SEGMENTS, counts.written.segments);
+        report.add(counters::PASSES, u64::from(passes.count()));
+        report.partitions = counts.written.partitions;
         Ok(report)
     }
 }

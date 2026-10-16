@@ -167,6 +167,53 @@ async fn a_lost_renewal_response_does_not_cancel_the_holder() {
 }
 
 #[tokio::test]
+async fn a_poller_follows_a_lease_whose_holder_adopted_a_reread_version() {
+    // The two halves together: the holder's renewal response is lost and it adopts the version
+    // it re-reads, while a polling worker caches the lease by version. The poller must keep
+    // seeing the lease as live (the adopted renewals change its version, so it reads it again)
+    // and must take it over only once it has really expired.
+    let (store, faults) = FlakyStore::with_faults();
+    let a = manager(&store, "a", 300);
+    let b = manager(&store, "b", 300);
+    let asked = BTreeSet::from(["t".to_owned()]);
+    let guard = a.try_claim(StageName::Join, "t").await.unwrap().unwrap();
+    assert_eq!(
+        b.live_task_ids(StageName::Join, &asked).await.unwrap(),
+        asked
+    );
+
+    faults.lost_responses.store(1, Ordering::SeqCst);
+    assert!(fired(&faults.lost_responses).await, "a renewal ran");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!guard.is_lost(), "a lost response is not a takeover");
+    assert_eq!(
+        b.live_task_ids(StageName::Join, &asked).await.unwrap(),
+        asked,
+        "the adopted lease is still live for the poller"
+    );
+    assert!(
+        b.try_claim(StageName::Join, "t").await.unwrap().is_none(),
+        "the lease is still held"
+    );
+
+    // The holder stops renewing without releasing (a crash): past the lifetime the poller sees
+    // it expired and takes it over.
+    drop(guard);
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    assert!(
+        b.live_task_ids(StageName::Join, &asked)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an expired lease is not live"
+    );
+    assert!(
+        b.try_claim(StageName::Join, "t").await.unwrap().is_some(),
+        "the expired lease is taken over"
+    );
+}
+
+#[tokio::test]
 async fn a_refused_renewal_whose_reread_fails_is_retried() {
     let (store, faults) = FlakyStore::with_faults();
     let a = manager(&store, "a", 300);

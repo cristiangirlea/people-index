@@ -105,6 +105,10 @@ once the previous one has committed every task:
   item's status. It then checks rows read = sent = acknowledged = the documents `assemble`
   committed for that partition. Total pressure on the cluster is
   `concurrent load tasks × senders_per_worker`, the knob to size against the data nodes.
+  Decoded documents wait for the bulk indexer within a byte budget (`load_buffer_bytes`,
+  default `2 × bulk_max_bytes`): each takes its body length from the budget and gives it back
+  once it is in a bulk request buffer, and one larger than the whole budget passes alone. A
+  load task's memory is about `(senders_per_worker + 1) × bulk_max_bytes + load_buffer_bytes`.
 - `prepare-index` creates `<alias>-<run_id>` (lowercased) with `number_of_replicas: 0`,
   `refresh_interval: -1`, `translog.durability: async`, the codec, and `shards` primaries
   (default: 2 per data node, read from `_nodes`); an existing index counts as created, so a
@@ -277,6 +281,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_SEGMENT_TARGET_BYTES`, `PI_BUFFER_BYTES`, `PI_UPLOAD_CONCURRENCY` | segment size, partitioned-writer budget per task, uploads in flight per task | 64 MiB, 256 MiB, 2 |
 | `PI_MAX_DOCUMENT_BYTES` | larger documents are quarantined | 8 MiB (clamped) |
 | `PI_BULK_MAX_BYTES`, `PI_SENDERS_PER_WORKER` | load pressure | 8 MiB, 2 |
+| `PI_LOAD_BUFFER_BYTES` | decoded documents a load task holds waiting for the bulk indexer | 2 × `PI_BULK_MAX_BYTES` |
 | `PI_INDEX_SHARDS`, `PI_INDEX_REPLICAS`, `PI_INDEX_CODEC` | the index | 2 per data node, 1, `best_compression` |
 | `PI_PUBLISH_HEALTH`, `PI_HEALTH_TIMEOUT` | health publish waits for | `green`, `30m` |
 | `PI_METRICS_ADDR` | Prometheus endpoint, `off` to disable | `0.0.0.0:9464` |

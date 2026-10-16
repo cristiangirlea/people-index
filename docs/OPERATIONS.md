@@ -208,6 +208,13 @@ retries stay rare; back off when 429s become steady or the data nodes' write thr
 When workers are added for the CPU-heavy stages, lower `PI_SENDERS_PER_WORKER` so the total
 stays where the cluster is comfortable.
 
+**Load task memory.** A `load` task holds the bulk request it is filling and up to
+`PI_SENDERS_PER_WORKER` requests in flight, plus decoded documents waiting for the indexer
+within `PI_LOAD_BUFFER_BYTES` (default twice `PI_BULK_MAX_BYTES`): about
+`(PI_SENDERS_PER_WORKER + 1) × PI_BULK_MAX_BYTES + PI_LOAD_BUFFER_BYTES`, 40 MiB with the
+defaults, plus the document being decoded and a couple of segments being read. A document larger
+than the load buffer still passes, alone, so a small buffer slows the load but never stops it.
+
 **Elasticsearch.** Heap at most half of the node's memory (compose: `ES_HEAP` and
 `ES_MEM_LIMIT`), the rest is page cache for segments. On a nearly full disk the watermarks keep
 shards unassigned; free space, or for a throwaway dev stack set

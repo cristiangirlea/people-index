@@ -141,6 +141,52 @@ async fn load_sends_every_document_once_and_resends_rejected_items() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_with_a_buffer_smaller_than_one_document_sends_every_document() {
+    let data = generate(small_config()).await;
+    run_stages(&data.store, "run-b", config(2), &OFFLINE)
+        .await
+        .unwrap();
+    let docs = read_docs(&data.store, "run-b").await;
+    let ctx = RunContext::new("run-b", data.store.clone()).unwrap();
+    let plan = Plan::load(&ctx).await.unwrap();
+
+    let server = MockServer::start().await;
+    let bulk = Bulk {
+        calls: AtomicUsize::new(0),
+        reject_first: false,
+        seen: Mutex::new(BTreeMap::new()),
+    };
+    Mock::given(method("POST"))
+        .and(path(format!("/{}/_bulk", plan.index)))
+        .respond_with(bulk)
+        .mount(&server)
+        .await;
+
+    // One byte: every document is larger than the buffer, so each passes alone.
+    let mut cfg = es_config(&server, config(2));
+    cfg.load_buffer_bytes = Some(1);
+    let reports = run_stages(&data.store, "run-b", cfg, &[StageName::Load])
+        .await
+        .unwrap();
+    assert_eq!(reports[0].counter("docs_indexed"), docs.len() as u64);
+    let mut acknowledged: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+    for r in &server.received_requests().await.unwrap() {
+        let text = std::str::from_utf8(&r.body).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for pair in lines.chunks(2) {
+            let action: Value = serde_json::from_str(pair[0]).unwrap();
+            let id: u64 = action["index"]["_id"].as_str().unwrap().parse().unwrap();
+            assert!(
+                acknowledged
+                    .insert(id, pair[1].as_bytes().to_vec())
+                    .is_none()
+            );
+        }
+    }
+    assert_eq!(acknowledged, docs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
     reason = "one mock per cluster call, in request order"

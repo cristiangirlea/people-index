@@ -23,6 +23,9 @@ pub const DEFAULT_MAX_LINE_BYTES: usize = 8 << 20;
 pub const DEFAULT_BUFFER_BYTES: usize = 256 << 20;
 /// Default uploads in flight per task (`PI_UPLOAD_CONCURRENCY`).
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 2;
+/// The default load buffer, in bulk requests: `PI_LOAD_BUFFER_BYTES` defaults to this many
+/// times `bulk_max_bytes`.
+pub const DEFAULT_LOAD_BUFFER_BULKS: usize = 2;
 /// Room left in a bulk request for the action line next to the largest document.
 const BULK_ACTION_ROOM: usize = 4 << 10;
 
@@ -82,6 +85,10 @@ pub struct StagesConfig {
     pub upload_concurrency: usize,
     /// The largest document `assemble` writes; larger ones are quarantined.
     pub max_document_bytes: usize,
+    /// Decoded documents a `load` task holds waiting for the bulk indexer, in bytes
+    /// (`PI_LOAD_BUFFER_BYTES`); `None` means [`DEFAULT_LOAD_BUFFER_BULKS`] bulk requests. A
+    /// document larger than the buffer still passes, alone.
+    pub load_buffer_bytes: Option<usize>,
     /// Where the inputs live when not under `raw/` in the run's store (`PI_INPUT_URL`). The
     /// run layout must then be built with `with_input_root("")`.
     pub input_store: Option<Store>,
@@ -101,6 +108,7 @@ impl Default for StagesConfig {
             buffer_bytes: DEFAULT_BUFFER_BYTES,
             upload_concurrency: DEFAULT_UPLOAD_CONCURRENCY,
             max_document_bytes: pi_model::DEFAULT_MAX_DOCUMENT_BYTES,
+            load_buffer_bytes: None,
             input_store: None,
             es: EsStageConfig::default(),
         }
@@ -133,6 +141,10 @@ impl StagesConfig {
             self.es.bulk.max_bytes > BULK_ACTION_ROOM,
             "bulk_max_bytes must exceed {BULK_ACTION_ROOM} bytes"
         );
+        anyhow::ensure!(
+            self.load_buffer_bytes != Some(0),
+            "load_buffer_bytes must be positive"
+        );
         Ok(())
     }
 
@@ -142,6 +154,18 @@ impl StagesConfig {
     pub fn effective_max_document_bytes(&self) -> usize {
         self.max_document_bytes
             .min(self.es.bulk.max_bytes.saturating_sub(BULK_ACTION_ROOM))
+    }
+
+    /// The load buffer in bytes: the configured one, else [`DEFAULT_LOAD_BUFFER_BULKS`] times
+    /// `bulk_max_bytes`.
+    #[must_use]
+    pub fn effective_load_buffer_bytes(&self) -> usize {
+        self.load_buffer_bytes.unwrap_or_else(|| {
+            self.es
+                .bulk
+                .max_bytes
+                .saturating_mul(DEFAULT_LOAD_BUFFER_BULKS)
+        })
     }
 
     /// The store the inputs are read from.
@@ -163,6 +187,22 @@ mod tests {
         let mut small = cfg.clone();
         small.max_document_bytes = 1000;
         assert_eq!(small.effective_max_document_bytes(), 1000);
+    }
+
+    #[test]
+    fn the_load_buffer_follows_the_bulk_size_unless_set() {
+        let mut cfg = StagesConfig::default();
+        assert_eq!(
+            cfg.effective_load_buffer_bytes(),
+            DEFAULT_LOAD_BUFFER_BULKS * cfg.es.bulk.max_bytes
+        );
+        cfg.es.bulk.max_bytes = 1 << 20;
+        assert_eq!(cfg.effective_load_buffer_bytes(), 2 << 20);
+        cfg.load_buffer_bytes = Some(5000);
+        assert_eq!(cfg.effective_load_buffer_bytes(), 5000);
+        cfg.validate().unwrap();
+        cfg.load_buffer_bytes = Some(0);
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

@@ -114,6 +114,7 @@ pub fn stages_config(
         buffer_bytes: pipeline.buffer_bytes,
         upload_concurrency: pipeline.upload_concurrency,
         max_document_bytes: pipeline.max_document_bytes,
+        load_buffer_bytes: pipeline.load_buffer_bytes,
         input_store: stores.inputs.clone(),
         es: EsStageConfig {
             client: es_config(es)?,
@@ -208,12 +209,15 @@ mod tests {
             "default",
             "--senders-per-worker",
             "4",
+            "--load-buffer-bytes",
+            "1MiB",
         ]);
         let stores = Stores::open(&args.store).unwrap();
         let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
         assert_eq!(cfg.alias, "people");
         assert_eq!(cfg.es.codec, pi_es::Codec::Default);
         assert_eq!(cfg.es.bulk.senders, 4);
+        assert_eq!(cfg.effective_load_buffer_bytes(), 1 << 20);
         assert!(cfg.input_store.is_none());
         assert_eq!(stores.layout("r1").unwrap().raw_persons(), "raw/persons");
     }
@@ -243,6 +247,18 @@ mod tests {
     #[test]
     fn bad_codec_is_refused() {
         let args = run_args(&["--store-url", "memory://", "--index-codec", "zip"]);
+        let stores = Stores::open(&args.store).unwrap();
+        assert!(stages_config(&args.pipeline, &args.es, &stores).is_err());
+    }
+
+    #[test]
+    fn the_load_buffer_defaults_to_twice_the_bulk_size() {
+        let args = run_args(&["--store-url", "memory://", "--bulk-max-bytes", "1MiB"]);
+        let stores = Stores::open(&args.store).unwrap();
+        let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
+        assert_eq!(cfg.load_buffer_bytes, None);
+        assert_eq!(cfg.effective_load_buffer_bytes(), 2 << 20);
+        let args = run_args(&["--store-url", "memory://", "--load-buffer-bytes", "0"]);
         let stores = Stores::open(&args.store).unwrap();
         assert!(stages_config(&args.pipeline, &args.es, &stores).is_err());
     }

@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use common::{OFFLINE, config, generate, read_docs, run_stages, small_config};
 use pi_coord::{RunContext, StageName};
-use pi_stages::{Plan, StagesConfig, Summary};
+use pi_stages::{Plan, PublishRecord, StagesConfig, Summary};
 use serde_json::{Value, json};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 /// Accepts every bulk item, except that each document's first attempt is rejected with 429
@@ -313,4 +313,154 @@ async fn a_count_mismatch_never_moves_the_alias() {
     .unwrap_err();
     assert!(pi_coord::is_permanent(&err), "{err:#}");
     assert!(format!("{err:#}").contains("expected"), "{err:#}");
+}
+
+/// Mounts what `publish` asks before the alias: refresh, flush, count, settings, health.
+async fn mount_publish_checks(server: &MockServer, index: &str, documents: u64) {
+    for op in ["_refresh", "_flush"] {
+        Mock::given(method("POST"))
+            .and(path(format!("/{index}/{op}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"_shards": shards()})))
+            .mount(server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path(format!("/{index}/_count")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"count": documents, "_shards": shards()})),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/{index}/_settings")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/_cluster/health/{index}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": "green", "timed_out": false})),
+        )
+        .mount(server)
+        .await;
+}
+
+/// Answers `GET /_alias/persons` with `target`.
+async fn mount_alias_on(server: &MockServer, target: &str) {
+    Mock::given(method("GET"))
+        .and(path("/_alias/persons"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ target: {"aliases": {"persons": {}}} })),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun() {
+    let data = generate(small_config()).await;
+    run_stages(&data.store, "run-c", config(1), &OFFLINE)
+        .await
+        .unwrap();
+    let ctx = RunContext::new("run-c", data.store.clone()).unwrap();
+    let index = "persons-run-c";
+    let documents = data.expected.persons;
+
+    // First attempt: the alias moves, then the coordinator stops while the delete is in flight.
+    let server = MockServer::start().await;
+    mount_publish_checks(&server, index, documents).await;
+    mount_alias_on(&server, "persons-old").await;
+    Mock::given(method("POST"))
+        .and(path("/_aliases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/persons-old"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"acknowledged": true}))
+                .set_delay(Duration::from_secs(60)),
+        )
+        .mount(&server)
+        .await;
+    let store = data.store.clone();
+    let cfg = es_config(&server, config(1));
+    let first =
+        tokio::spawn(async move { run_stages(&store, "run-c", cfg, &[StageName::Publish]).await });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let requests = server.received_requests().await.unwrap();
+            if requests
+                .iter()
+                .any(|r| r.method.as_str() == "DELETE" && r.url.path() == "/persons-old")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first attempt reaches the delete");
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert!(
+        ctx.store
+            .head(&ctx.layout.summary())
+            .await
+            .unwrap()
+            .is_none(),
+        "the first attempt never finished"
+    );
+
+    // Second attempt: the alias already points at the run's index; only publish.json still
+    // names the old one.
+    server.reset().await;
+    mount_publish_checks(&server, index, documents).await;
+    mount_alias_on(&server, index).await;
+    Mock::given(method("POST"))
+        .and(path("/_aliases"))
+        .and(body_json(json!({"actions": [
+            {"add": {"index": index, "alias": "persons"}}
+        ]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/persons-old"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    run_stages(
+        &data.store,
+        "run-c",
+        es_config(&server, config(1)),
+        &[StageName::Publish],
+    )
+    .await
+    .unwrap();
+
+    let record: PublishRecord = ctx
+        .store
+        .get_json(&ctx.layout.publish_record())
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(record.previous, ["persons-old"]);
+    let summary: Summary = ctx
+        .store
+        .get_json(&ctx.layout.summary())
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(summary.publish.previous, ["persons-old"]);
+    assert_eq!(summary.publish.deleted, ["persons-old"]);
+    assert!(summary.publish.not_deleted.is_empty());
 }

@@ -107,6 +107,8 @@ jobs:
           shellcheck --severity=warning "${scripts[@]}"
       - name: hadolint
         run: docker run --rm -i hadolint/hadolint:v2.15.1 hadolint --failure-threshold warning - < Dockerfile
+      - name: scrub-check finds its list from any worktree
+        run: bash scripts/test-scrub-check.sh
 
   image:
     if: github.event_name != 'schedule'

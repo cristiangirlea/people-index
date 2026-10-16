@@ -99,6 +99,7 @@ check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub (and car
 	cargo test --workspace --locked
 	bash scripts/check-deploy.sh
 	bash scripts/scrub-check.sh
+	bash scripts/test-scrub-check.sh
 	@if command -v cargo-deny >/dev/null; then cargo deny check; else echo "cargo-deny not installed; skipped (CI runs it)"; fi
 
 .PHONY: scrub

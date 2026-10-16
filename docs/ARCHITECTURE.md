@@ -82,7 +82,7 @@ once the previous one has committed every task:
 | `assemble` | partition `q` | `persons/q`, `joined/q` | `docs/q=<q>/` segments of `DocRow`, quarantine |
 | `prepare-index` | run | cluster state | the run's index, load-time settings |
 | `load` | partition `q` | `docs/q` | bulk requests into the run's index |
-| `publish` | run | the run's index | count checked, settings restored, alias moved, `summary.json` |
+| `publish` | run | the run's index | count checked, settings restored, `publish.json`, alias moved, `summary.json` |
 
 - `p = xxh3_64(org_id as u64 little-endian) % P` and `q = xxh3_64(person_id LE) % P`
   (`xxhash-rust`, seed 0; `P` is a power of two, so the modulo is a mask). One `P` for both keys
@@ -131,10 +131,16 @@ once the previous one has committed every task:
 - `publish` refreshes and flushes while replicas are still 0 (so the complete-shard check covers
   every copy), checks that the index count equals the sum of `assemble`'s `documents` counters,
   then restores replicas (default 1), `refresh_interval: 1s` and request durability, waits for
-  the cluster health (`green` by default), moves the alias in one `_aliases` request, and
-  deletes the indexes the alias pointed at before. Any failure before the alias request leaves
-  the alias untouched; a count mismatch is a permanent failure of the run. A failed delete of an
-  old index is reported in `summary.json`, not a failure, since the alias has moved by then.
+  the cluster health (`green` by default), records the indexes the alias points at in
+  `publish.json` (create-if-absent; a later attempt reads the first attempt's list back), moves
+  the alias in one `_aliases` request, and deletes the recorded indexes and any others the alias
+  pointed at (never the run's own; a 404 counts as deleted). The removes carry
+  `"must_exist": false`, so a request resent after a lost answer is harmless, and a failed
+  request after which the alias points at the run's index alone counts as done. A publish
+  interrupted after the alias moved therefore still deletes the old indexes when it resumes.
+  Any failure before the alias request leaves the alias untouched; a count mismatch is a
+  permanent failure of the run. A failed delete of an old index is reported in `summary.json`,
+  not a failure, since the alias has moved by then.
   Publish then writes `summary.json` and deletes orphaned files (data and quarantine files no
   commit lists).
 
@@ -155,6 +161,7 @@ runs/<run_id>/<stage>/_commit/<task>.json
 runs/<run_id>/<stage>/_lease/<task>.json
 runs/<run_id>/<stage>/data/<dataset>/<p|q>=<n>/<task>-<attempt>-<n>.seg
 runs/<run_id>/quarantine/<task>-<attempt>.ndjson
+runs/<run_id>/publish.json             the indexes the alias served before (create-if-absent)
 runs/<run_id>/summary.json
 snapshots/                             reserved for Elasticsearch snapshots (k8s component)
 ```
@@ -173,6 +180,9 @@ snapshots/                             reserved for Elasticsearch snapshots (k8s
   creates it; workers and the coordinator stop when they see it; resuming a failed run clears it.
 - Quarantine: one NDJSON line per entry, `{feed, file, line, kind, reason, sample}` with a
   sample of at most 1 KiB; kinds `syntax | envelope | record | too_long | document_too_large`.
+- `publish.json`: `{alias, index, previous}`, the indexes the alias pointed at (the run's own
+  excluded) when the first publish attempt was about to move it; every attempt deletes
+  these after the swap.
 - `summary.json`: `{run_id, alias, index, partitions, started_at, finished_at, wall_ms,
   documents, persons_per_second, input_bytes, stages: [{stage, tasks, wall_ms, task_ms,
   bytes_in, bytes_out, counters}], publish: {docs, previous, deleted, not_deleted},

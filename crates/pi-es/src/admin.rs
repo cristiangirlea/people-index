@@ -188,13 +188,17 @@ impl IndexAdmin {
 
     /// Points `alias` at `index` and away from each of `previous` in one `_aliases` request:
     /// readers see the old index or the new one, never neither and never both.
+    ///
+    /// The removes carry `"must_exist": false`, so the request is safe to send twice: when the
+    /// first copy was applied but its answer lost (a 502, a reset), the retried copy finds the
+    /// alias already gone from the old indexes and still succeeds.
     pub async fn swap_alias(&self, alias: &str, index: &str, previous: &[String]) -> Result<()> {
         validate_index_name(alias)?;
         validate_index_name(index)?;
         let mut actions: Vec<Value> = Vec::with_capacity(previous.len() + 1);
         for old in previous.iter().filter(|old| old.as_str() != index) {
             validate_index_name(old)?;
-            actions.push(json!({"remove": {"index": old, "alias": alias}}));
+            actions.push(json!({"remove": {"index": old, "alias": alias, "must_exist": false}}));
         }
         actions.push(json!({"add": {"index": index, "alias": alias}}));
         let response = self

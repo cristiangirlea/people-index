@@ -98,6 +98,11 @@ pub enum EsError {
     #[error("expected counts: {0}")]
     Expected(String),
 
+    /// The record of the indexes the alias served before (written by the caller of `publish`)
+    /// could not be written or read back.
+    #[error("record of the previous indexes: {0}")]
+    Record(String),
+
     /// A background task panicked or was cancelled, or an earlier failure stopped the work.
     #[error("background task: {0}")]
     Task(String),

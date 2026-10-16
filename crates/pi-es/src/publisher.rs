@@ -2,6 +2,7 @@
 //! was. The alias moves only after every check has passed, in one atomic request; nothing
 //! before that point changes what readers see.
 
+use std::future::Future;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -49,7 +50,8 @@ pub struct PublishReport {
     pub alias: String,
     pub index: String,
     pub docs: u64,
-    /// Indices the alias pointed at before (the new index excluded).
+    /// Indices the alias pointed at before (the new index excluded): the ones the caller
+    /// recorded before the first swap, and any the alias points at now besides the new index.
     pub previous: Vec<String>,
     /// Previous indices deleted.
     pub deleted: Vec<String>,
@@ -80,8 +82,29 @@ impl Publisher {
     /// 5. delete the indices it served before.
     ///
     /// Any failure in 1 to 4 returns an error with the alias untouched. Safe to run again: the
-    /// checks repeat and moving an alias to where it already points changes nothing.
+    /// checks repeat and moving an alias to where it already points changes nothing. An attempt
+    /// interrupted between 4 and 5 forgets the old indices, though; [`Self::publish_recording`]
+    /// is the variant that survives that.
     pub async fn publish(&self, spec: &PublishSpec) -> Result<PublishReport> {
+        self.publish_recording(spec, |on_alias| async move { Ok(on_alias) })
+            .await
+    }
+
+    /// [`Self::publish`], with `record` called just before the alias moves. It gets the indices
+    /// the alias points at now (this index excluded) and returns the indices to delete once the
+    /// alias has moved. A caller that stores the list on the first attempt and hands the stored
+    /// list back on every later one makes the cleanup survive an interruption: an attempt that
+    /// resumes after the swap finds the alias on this index already, and only the record still
+    /// names what it served before. Whatever the alias points at now is deleted too.
+    pub async fn publish_recording<F, Fut>(
+        &self,
+        spec: &PublishSpec,
+        record: F,
+    ) -> Result<PublishReport>
+    where
+        F: FnOnce(Vec<String>) -> Fut,
+        Fut: Future<Output = Result<Vec<String>>>,
+    {
         validate_index_name(&spec.alias)?;
         validate_index_name(&spec.index)?;
         if spec.alias == spec.index {
@@ -113,13 +136,16 @@ impl Publisher {
         if targets.is_empty() && admin.exists(&spec.alias).await? {
             return Err(EsError::ConcreteIndexAtAlias(spec.alias.clone()));
         }
-        let previous: Vec<String> = targets
+        let on_alias: Vec<String> = targets
             .into_iter()
             .filter(|name| name != &spec.index)
             .collect();
-        admin
-            .swap_alias(&spec.alias, &spec.index, &previous)
-            .await?;
+        let mut previous = record(on_alias.clone()).await?;
+        previous.extend(on_alias.iter().cloned());
+        previous.retain(|name| name != &spec.index);
+        previous.sort();
+        previous.dedup();
+        self.move_alias(spec, &on_alias).await?;
         tracing::info!(alias = %spec.alias, index = %spec.index, docs, ?previous, "alias moved");
 
         let mut deleted = Vec::new();
@@ -141,5 +167,23 @@ impl Publisher {
             deleted,
             not_deleted,
         })
+    }
+
+    /// Moves the alias from `on_alias` to the index. A failed request whose effect is already
+    /// visible (the alias points at the index and nothing else) counts as done: that is a
+    /// resent request whose first copy was applied and whose answer was lost.
+    async fn move_alias(&self, spec: &PublishSpec, on_alias: &[String]) -> Result<()> {
+        let admin = &self.admin;
+        let Err(error) = admin.swap_alias(&spec.alias, &spec.index, on_alias).await else {
+            return Ok(());
+        };
+        match admin.alias_targets(&spec.alias).await {
+            Ok(targets) if targets == [spec.index.as_str()] => {
+                tracing::warn!(alias = %spec.alias, index = %spec.index, %error,
+                    "the alias request failed, but the alias already points at the index");
+                Ok(())
+            }
+            _ => Err(error),
+        }
     }
 }

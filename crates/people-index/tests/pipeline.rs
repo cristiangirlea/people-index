@@ -1,16 +1,63 @@
 //! The offline half of a run (plan to assemble) on a generated dataset in a local store:
 //! documents checked against `expected.json` and an independent reference join, identical for
-//! every partition count, idempotent, and unaffected by a duplicate attempt.
+//! every partition count and every pass count of `join` and `assemble`, idempotent, and
+//! unaffected by a duplicate attempt.
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::{
-    OFFLINE, Reference, check_run, config, executor, generate, read_docs, run_stages, small_config,
+    OFFLINE, Reference, check_run, config, counters, executor, generate, read_docs, run_stages,
+    small_config,
 };
 use pi_coord::{
     AttemptId, CommitLog, CommitOutcome, CommitRecord, Executor, RunContext, StageName,
 };
+use pi_stages::StagesConfig;
+use pi_store::Store;
 use time::OffsetDateTime;
+
+/// The commits of one stage of a run.
+async fn commits(store: &Store, run_id: &str, stage: StageName) -> Vec<CommitRecord> {
+    let ctx = RunContext::new(run_id, store.clone()).unwrap();
+    CommitLog::new(store.clone(), ctx.layout)
+        .list(stage)
+        .await
+        .unwrap()
+}
+
+/// The fewest raw bytes any partition of `orgs/` (what `join` holds) or `joined/` (what
+/// `assemble` holds) has in run `run_id`, from the sizes its commits recorded.
+async fn smallest_held_partition(store: &Store, run_id: &str, partitions: u32) -> u64 {
+    let mut sizes = BTreeMap::<String, u64>::new();
+    for (stage, dataset) in [
+        (StageName::ExtractOrgs, "orgs/"),
+        (StageName::Join, "joined/"),
+    ] {
+        for commit in commits(store, run_id, stage).await {
+            for (name, size) in &commit.report.partitions {
+                if name.starts_with(dataset) {
+                    *sizes.entry(name.clone()).or_default() += size.raw_bytes;
+                }
+            }
+        }
+    }
+    assert_eq!(sizes.len(), 2 * partitions as usize, "{run_id}: {sizes:?}");
+    *sizes.values().min().unwrap()
+}
+
+/// A stage's summed counters without the ones that depend on the pass count.
+async fn pass_independent_counters(
+    store: &Store,
+    run_id: &str,
+    stage: StageName,
+) -> BTreeMap<String, u64> {
+    let mut c = counters(store, run_id, stage).await;
+    c.remove("passes");
+    c.remove("segments");
+    c
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn documents_match_expected_counts_and_the_reference_for_every_partition_count() {
@@ -37,6 +84,47 @@ async fn documents_match_expected_counts_and_the_reference_for_every_partition_c
     // Byte-identical documents whatever the partition count.
     assert_eq!(runs[0], runs[1]);
     assert_eq!(runs[1], runs[2]);
+
+    // And whatever the pass count: a task memory budget of a third of the smallest partition's
+    // raw bytes makes every join and assemble task run at least three passes. Documents are
+    // compared by person id (their order inside a segment depends on the passes).
+    for partitions in [1u32, 4] {
+        let single = format!("run-p{partitions}");
+        let budget = smallest_held_partition(&data.store, &single, partitions).await / 3;
+        let run_id = format!("run-p{partitions}-passes");
+        let cfg = StagesConfig {
+            task_memory_bytes: budget,
+            ..config(partitions)
+        };
+        run_stages(&data.store, &run_id, cfg, &OFFLINE)
+            .await
+            .unwrap();
+        for stage in [StageName::Join, StageName::Assemble] {
+            let tasks = commits(&data.store, &run_id, stage).await;
+            assert_eq!(tasks.len(), partitions as usize);
+            for c in &tasks {
+                assert!(
+                    c.report.counter("passes") >= 3,
+                    "{run_id} {stage:?} {}: {} passes",
+                    c.task_id,
+                    c.report.counter("passes")
+                );
+            }
+            for c in commits(&data.store, &single, stage).await {
+                assert_eq!(
+                    c.report.counter("passes"),
+                    1,
+                    "{single}: one pass by default"
+                );
+            }
+            assert_eq!(
+                pass_independent_counters(&data.store, &run_id, stage).await,
+                pass_independent_counters(&data.store, &single, stage).await,
+                "{run_id} {stage:?}"
+            );
+        }
+        assert_eq!(check_run(&data, &run_id, &reference).await, runs[0]);
+    }
 
     // The quarantine names the origin of every malformed line.
     let ctx = RunContext::new("run-p4", data.store.clone()).unwrap();

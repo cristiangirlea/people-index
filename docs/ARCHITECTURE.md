@@ -89,8 +89,8 @@ once the previous one has committed every task:
   keeps the plan simple. Known value for tests: `xxh3_64(0u64 LE) = 0xC77B3ABB6F87ACD9`.
 - `plan` picks `P` from the total input bytes (compressed, as listed) and
   `partition_target_bytes` (default 256 MiB), at least `min_partitions` (default 16), rounded up
-  to a power of two. A task's memory is bounded by its partition, so more data means more
-  partitions, not bigger workers.
+  to a power of two. More data means more partitions, not bigger workers; what one task holds
+  is bounded by the settings below, not by how large its partition turned out.
 - `extract-*` stream one gzip file (every member's CRC and length checked) and write to up to
   `2 × P` partitions through one shared byte budget (`buffer_bytes`): when it is full, the
   largest partition is written out, so memory does not grow with `P`.
@@ -99,6 +99,21 @@ once the previous one has committed every task:
   newest record's rows) and reads the person segments twice: once to find each winner, once to
   build its document. Both are the two halves of a partitioned hash join: no node ever needs the
   whole organization table.
+- Both bound what they hold by `task_memory_bytes` (default 512 MiB) with a grace-hash-join
+  multi-pass. Before loading, a task estimates the side it holds from the per-partition sizes
+  the earlier stages committed (`report.partitions`, below): `join` from the `orgs/p` rows of
+  `extract-orgs`, `assemble` from the `joined/q` rows of `join` and the `persons/q` rows of
+  `extract-persons`. The estimate is the rows' encoded size before compression plus a fixed
+  overhead per row for the hash maps and vectors (128 bytes per organization, 96 per joined
+  row, 192 per person record; `crates/pi-stages/src/passes.rs` explains them). It then runs
+  `k = ceil(estimate / task_memory_bytes)` passes (at least 1, at most 1024, with a warning at
+  the cap): pass `i` holds only the ids with `xxh3_64(id LE, seed 1) % k == i` (organization
+  ids in `join`, person ids in `assemble`) and streams the other side filtered the same way,
+  re-reading the partition's segments once per pass. Every id falls in exactly one pass, so
+  the joined rows and the documents are the same for any `k`; only their order inside the
+  output segments differs, and nothing downstream depends on that order. The counter `passes`
+  records `k` per task. The estimate is a model, not a measurement: the overheads assume maps
+  and vectors up to half empty after growing.
 - `load` sends byte-bounded bulk requests (`bulk_max_bytes`, default 8 MiB) with
   `senders_per_worker` in flight per task (default 2), retries 429/502/503/504 and transport
   errors with jittered exponential backoff, resends only the failed items, and checks every
@@ -186,7 +201,9 @@ about one row past the target. Rows (`crates/pi-model`):
 A task writes its outputs under a fresh attempt id (a UUID v7) and returns a report; the
 executor then commits by creating `_commit/<task>.json` with a create-if-absent put
 (`PutMode::Create`): `{stage, task_id, attempt, worker, committed_at, report: {outputs,
-counters, bytes_in, bytes_out, duration_ms}}`. **Readers enumerate commits, never data
+counters, bytes_in, bytes_out, duration_ms, partitions}}`, where `partitions` (omitted when
+empty) maps each output partition, `orgs/p=3`, to `{rows, raw_bytes}`: the rows written there
+and their encoded size before compression, which `join` and `assemble` sum to size their passes. **Readers enumerate commits, never data
 prefixes**, so a crashed or duplicate attempt's files are invisible; the first commit wins and
 the loser's files are orphans that `publish` removes. A task that finds its commit already
 present is skipped. This makes every task safe to retry and safe to run twice at the same time.
@@ -279,6 +296,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_PARTITION_TARGET_BYTES`, `PI_MIN_PARTITIONS` | partitioning | 256 MiB, 16 |
 | `PI_MAX_MALFORMED`, `PI_MAX_LINE_BYTES` | per feed; longest input line | 1000, 8 MiB |
 | `PI_SEGMENT_TARGET_BYTES`, `PI_BUFFER_BYTES`, `PI_UPLOAD_CONCURRENCY` | segment size, partitioned-writer budget per task, uploads in flight per task | 64 MiB, 256 MiB, 2 |
+| `PI_TASK_MEMORY_BYTES` | what a `join` or `assemble` task holds per pass; a partition estimated larger runs in passes | 512 MiB |
 | `PI_MAX_DOCUMENT_BYTES` | larger documents are quarantined | 8 MiB (clamped) |
 | `PI_BULK_MAX_BYTES`, `PI_SENDERS_PER_WORKER` | load pressure | 8 MiB, 2 |
 | `PI_LOAD_BUFFER_BYTES` | decoded documents a load task holds waiting for the bulk indexer | 2 × `PI_BULK_MAX_BYTES` |

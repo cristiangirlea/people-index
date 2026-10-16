@@ -5,7 +5,7 @@
 //! exits when the run is published or failed. Any number of workers can follow the same run;
 //! leases keep them from duplicating work and commits keep a duplicate harmless.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
@@ -260,6 +260,13 @@ impl Loop<'_> {
                     && !self.in_flight.contains(&(stage_name, t.task_id.clone()))
             })
             .collect();
+        // One listing of the leases instead of a claim attempt (a create and a read) per task
+        // someone else is already working on.
+        if !candidates.is_empty() {
+            let ids: BTreeSet<String> = candidates.iter().map(|t| t.task_id.clone()).collect();
+            let live = coord.live_leases(self.ctx, stage_name, &ids).await?;
+            candidates.retain(|t| !live.contains(&t.task_id));
+        }
         // Workers start their scan at different offsets, so a fleet starting together does
         // not race for the same first tasks.
         if !candidates.is_empty() {

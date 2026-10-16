@@ -256,6 +256,12 @@ renewal landed but its response was lost), the holder goes on with the etag it r
 whose renewals fail for a whole ttl, or whose lease was taken or deleted, has its task
 cancelled. Leases avoid duplicate work; commits are what keep a duplicate harmless.
 
+A polling worker lists `_lease/` once per poll (next to `_commit/`) and tries to claim only the
+tasks whose lease is absent, released or past `expires_at + clock_skew`. It reads a lease body
+only when its listed etag changed since the last poll and judges an unchanged lease's expiry from
+the `expires_at` it already read, so a live lease costs no request on most polls (a renewal, every
+`lease_ttl / 3`, costs one read).
+
 Conditional updates need an S3-compatible store that answers 412 to a failed `If-None-Match: *`
 or a stale `If-Match`; the deployments use SeaweedFS 4.48, which does (see
 [ADR 0003](adr/0003-object-store-commits-and-leases.md)). The local filesystem store supports

@@ -47,11 +47,27 @@ shape (or a malformed value) can never fail a bulk item, and they cost nothing b
 
 ## Robust scalar types
 
-Numbers and dates carry `ignore_malformed: true`: the record is raw JSON from the feed, and a
-`"n/a"` in `followers` must not turn into a permanent bulk failure for the whole run. The
-malformed value stays in `_source`; only that field is not indexed for that document.
-`roles.start_date` and `end_date` accept full dates, `yyyy-MM` and `yyyy`, so range queries
-work on partial dates.
+A value Elasticsearch cannot read as its mapped type fails the bulk item with a mapper error,
+and a failed item fails the load task and with it the run. Two layers keep one bad record from
+doing that:
+
+- Extraction checks the JSON kind of every field this mapping parses (`pi_model::PERSON_FIELDS`,
+  `ROLE_FIELDS`, `ORGANIZATION_FIELDS`; docs/ARCHITECTURE.md, "The data") and quarantines a
+  record with the wrong kind (`"yes"` in `open_to_work`, `"n/a"` in `followers`, a string where
+  `roles` expects objects, an object in a `text`, `keyword` or `date` field) as `record`, naming
+  the field. `text`, `keyword` and `date` fields take any scalar or an array of scalars:
+  Elasticsearch reads a number or a boolean as text. The test
+  `extract_shapes_agree_with_the_mapping` in `mapping.rs` fails when a field is added here
+  without a table entry, or a type changes under one.
+- Numbers and dates, the top-level `id` included, carry `ignore_malformed: true` (checked by
+  `numbers_and_dates_ignore_malformed_values`) for the values of the right kind that still do
+  not parse: a number past the range of `long`, a date string in another format. The value
+  stays in `_source`; only that field is not indexed for that document.
+
+`boolean` has no `ignore_malformed` here; the extract check accepts only what it parses (`true`,
+`false`, `"true"`, `"false"`, `""`). `roles.start_date` and `end_date` accept full dates,
+`yyyy-MM` and `yyyy` (a JSON number such as `2020` is read as text, so as a year), so range
+queries work on partial dates.
 
 ## `roles` and `organizations` are `object`, not `nested`
 

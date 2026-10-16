@@ -19,7 +19,8 @@ Both feeds are gzipped NDJSON (`*.ndjson.gz`), one envelope per line:
 ```
 
 `id` is a non-negative 64-bit integer, or a string of decimal digits that is one; it is the
-person or organization id (the record's own `id` field is carried through but not read).
+person or organization id (the record's own `id` field is carried through, never used as the
+id; like any mapped field it is only type-checked, see below).
 `record` must be an object. Anything else on a line is *malformed*: counted, quarantined with
 its origin, and the run fails past `max_malformed` per feed. Malformed includes an empty or
 whitespace-only line, a duplicate `id` or `record` key in the envelope, and a line longer than
@@ -38,6 +39,22 @@ number or null (never a string).
 
 Unknown fields are carried through untouched (the record is kept as raw JSON; only the fields
 the join needs are parsed).
+
+**Mapped fields must have the JSON kind their mapping expects**, or the record is malformed
+(kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
+or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must
+cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELDS`,
+`ROLE_FIELDS`, `ORGANIZATION_FIELDS`), checked by `extract-persons` (the record and every role)
+and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. `long` and
+`integer` fields take a number or a string holding one, `boolean` fields `true`, `false`,
+`"true"`, `"false"` or `""`, `text`, `keyword` and `date` fields (the lists `skills`,
+`keywords` and `technologies` included) any scalar, which Elasticsearch reads as text (`"city":
+10001`, `"start_date": 2020`), or an array of scalars, but no object at any depth, and `roles`
+an array of objects. `null` is allowed everywhere. Disabled objects (`memberships`, `addresses`, ...) take anything, and the
+names the builder writes (`organizations`, `unresolved_organization_ids`,
+`roles[].organization_resolved`) are replaced, so neither is checked. A value of the right kind
+that still does not parse (a number out of range, a date in another format) is not indexed for
+that field and stays in `_source` (`ignore_malformed`).
 
 ## The output document
 

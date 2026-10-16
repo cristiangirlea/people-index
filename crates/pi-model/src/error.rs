@@ -14,7 +14,8 @@ pub enum MalformedKind {
     Syntax,
     /// JSON, but not an envelope: not an object, `id` or `record` missing, duplicated or invalid.
     Envelope,
-    /// A valid envelope whose record cannot be joined: `roles` or a role's `organization_id`.
+    /// A valid envelope whose record cannot be joined or indexed: `roles`, a role's
+    /// `organization_id`, or a mapped field of the wrong JSON kind.
     Record,
 }
 

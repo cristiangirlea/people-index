@@ -1,7 +1,8 @@
 //! pi-model: the schema and the pure rules of people-index (docs/ARCHITECTURE.md).
 //!
 //! Nothing here does I/O. The extract stages turn lines into rows with [`parse_org_line`] and
-//! [`parse_person_line`] (or quarantine a [`MalformedRecord`]); every stage routes ids with a
+//! [`parse_person_line`] (or quarantine a [`MalformedRecord`], including a mapped field of the
+//! wrong JSON kind: [`FieldShape`]); every stage routes ids with a
 //! [`Partitioner`]; `join` and `assemble` deduplicate with [`LastWins`] and group joined rows
 //! with [`JoinedGroups`]; `assemble` writes documents with [`DocumentBuilder`].
 
@@ -19,6 +20,7 @@ mod raw;
 mod roles;
 mod rows;
 mod seq;
+mod shape;
 
 pub use builder::{
     BuildError, BuiltDocument, DEFAULT_MAX_DOCUMENT_BYTES, DocumentBuilder, DocumentStats,
@@ -33,3 +35,6 @@ pub use lookup::{OrgLookup, Resolution};
 pub use partition::{PartitionError, Partitioner, partition_count};
 pub use rows::{DocRow, EdgeRow, JoinedRow, OrgRow, PersonRow};
 pub use seq::Seq;
+pub use shape::{
+    BUILDER_OWNED, FieldShape, JsonKind, ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS,
+};

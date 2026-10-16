@@ -122,3 +122,45 @@ async fn no_person_files_fail_the_plan() {
         .unwrap_err();
     assert!(is_permanent(&err), "{err:#}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_input_replaced_after_the_plan_fails_for_good() {
+    let text = "{\"id\":5,\"record\":{}}\n";
+    let (_dir, store) = store_with(gzip(text)).await;
+    run_stages(&store, "run-v", config(1), &[StageName::Plan])
+        .await
+        .unwrap();
+    let (plan, _) = store
+        .get_json::<serde_json::Value>("runs/run-v/plan.json")
+        .await
+        .unwrap()
+        .unwrap();
+    let planned = &plan["persons"][0]["version"]["e_tag"];
+    assert!(planned.is_string(), "plan.json records the etag: {plan}");
+
+    // Same records, new bytes: the run must not read them under its old plan.
+    let key = "raw/persons/part-00000.ndjson.gz";
+    store
+        .put(key, Bytes::from(gzip(&text.repeat(2))))
+        .await
+        .unwrap();
+    let err = run_stages(
+        &store,
+        "run-v",
+        config(1),
+        &[StageName::ExtractOrgs, StageName::ExtractPersons],
+    )
+    .await
+    .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(is_permanent(&err), "{msg}");
+    assert!(msg.contains(key), "{msg}");
+    assert!(msg.contains("changed since the run was planned"), "{msg}");
+    assert!(msg.contains(planned.as_str().unwrap()), "{msg}");
+
+    // A new run plans the new bytes and goes through.
+    run_stages(&store, "run-v2", config(1), &OFFLINE)
+        .await
+        .unwrap();
+    assert_eq!(common::read_docs(&store, "run-v2").await.len(), 1);
+}

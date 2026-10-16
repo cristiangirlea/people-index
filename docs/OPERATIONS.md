@@ -155,8 +155,12 @@ committed; a failed run never moves the alias, so the previous index keeps servi
 - To find a run id: `make compose-runs` (compose), `make logs` (k3d), or the `runs/` prefix of
   the store.
 
-Data generation is seeded, so rerunning `datagen` with the same arguments rewrites identical
-files; do not change `raw/` under a run that is being resumed.
+A run reads exactly the input files it planned: `plan.json` records each file's version, and
+an extract task whose file was replaced or removed since then fails the run for good, naming the
+file and both versions. To run on new inputs, start a new run. Rewriting a file with identical
+content counts as a change too on stores whose etag is not a content hash (the local
+filesystem's includes the modification time), so do not rerun `datagen` under a run that is
+being resumed.
 
 ## Metrics, logs and the run summary
 

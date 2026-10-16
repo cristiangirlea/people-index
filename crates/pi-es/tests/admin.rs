@@ -138,8 +138,8 @@ async fn alias_swap_is_one_atomic_request() {
     Mock::given(method("POST"))
         .and(path("/_aliases"))
         .and(body_json(json!({"actions": [
-            {"remove": {"index": "persons-old1", "alias": "persons"}},
-            {"remove": {"index": "persons-old2", "alias": "persons"}},
+            {"remove": {"index": "persons-old1", "alias": "persons", "must_exist": false}},
+            {"remove": {"index": "persons-old2", "alias": "persons", "must_exist": false}},
             {"add": {"index": "persons-new", "alias": "persons"}}
         ]})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))

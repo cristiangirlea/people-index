@@ -94,10 +94,12 @@ pub(crate) async fn run_extract(
         .input
         .clone()
         .ok_or_else(|| permanent(anyhow::anyhow!("task {} names no input file", task.task_id)))?;
-    let file_index = plan
+    let (file_index, planned) = plan
         .files(feed)
         .iter()
-        .position(|f| f.key == key)
+        .enumerate()
+        .find(|(_, f)| f.key == key)
+        .map(|(i, f)| (i, f.version.clone()))
         .ok_or_else(|| {
             permanent(anyhow::anyhow!(
                 "{key} is not a {} input of the plan",
@@ -136,7 +138,13 @@ pub(crate) async fn run_extract(
     };
     let input_store = config.input_store(&ctx.store).clone();
     let (counts, uploaded) = run_pipeline(
-        feed_object_stream(input_store, key.clone(), feed_tx, Arc::clone(&read)),
+        feed_object_stream(
+            input_store,
+            key.clone(),
+            planned,
+            feed_tx,
+            Arc::clone(&read),
+        ),
         ctx.store.clone(),
         uploads,
         config.upload_concurrency,

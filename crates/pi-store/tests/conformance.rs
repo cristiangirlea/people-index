@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use pi_store::{Backend, CreateOutcome, ObjectVersion, Store, StoreError, StoreOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -263,6 +263,54 @@ async fn streaming(f: Fixture) {
     assert_eq!(via_reader, body);
 }
 
+async fn collect(stream: pi_store::ByteStream) -> Result<Vec<u8>, StoreError> {
+    let chunks: Vec<Bytes> = stream.try_collect().await?;
+    Ok(chunks.concat())
+}
+
+async fn get_if_match(f: Fixture) {
+    let key = f.key("raw/persons/part-00000.ndjson.gz");
+    f.store.put(&key, "first").await.unwrap();
+    // The version a listing reports is what plan.json records.
+    let listed = f.store.list(&f.key("raw")).await.unwrap();
+    let planned = listed[0].version.clone();
+    assert!(!planned.is_empty(), "a listing must return a version");
+    let body = collect(f.store.get_stream_if_match(&key, &planned).await.unwrap()).await;
+    assert_eq!(
+        body.unwrap(),
+        b"first",
+        "an unchanged object reads as usual"
+    );
+
+    // Replaced (a different body, so even a coarse clock changes the local etag): refused.
+    f.store.put(&key, "second, longer").await.unwrap();
+    let now = f.store.head(&key).await.unwrap().unwrap().version;
+    assert_ne!(now, planned, "a replacement must change the version");
+    assert!(matches!(
+        f.store.get_stream_if_match(&key, &planned).await,
+        Err(StoreError::PreconditionFailed { .. })
+    ));
+    assert!(
+        collect(f.store.get_stream_if_match(&key, &now).await.unwrap())
+            .await
+            .is_ok()
+    );
+
+    // An empty version never turns into an unconditional read.
+    assert!(matches!(
+        f.store
+            .get_stream_if_match(&key, &ObjectVersion::default())
+            .await,
+        Err(StoreError::PreconditionFailed { .. })
+    ));
+    // Gone is not found, not a precondition failure.
+    f.store.delete(&key).await.unwrap();
+    assert!(matches!(
+        f.store.get_stream_if_match(&key, &now).await,
+        Err(StoreError::NotFound { .. })
+    ));
+}
+
 async fn json_helpers(f: Fixture) {
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
     struct Doc {
@@ -314,13 +362,13 @@ macro_rules! conformance {
 
 conformance!(memory: put_get_roundtrip, missing_objects, create_if_absent_once,
     create_if_absent_race, update_if_match, update_if_match_race, listing, streaming,
-    json_helpers);
+    get_if_match, json_helpers);
 conformance!(local: put_get_roundtrip, missing_objects, create_if_absent_once,
     create_if_absent_race, update_if_match, update_if_match_race, listing, streaming,
-    json_helpers);
+    get_if_match, json_helpers);
 conformance!(s3: put_get_roundtrip, missing_objects, create_if_absent_once,
     create_if_absent_race, update_if_match, update_if_match_race, listing, streaming,
-    json_helpers);
+    get_if_match, json_helpers);
 
 #[test]
 fn open_picks_the_backend_from_the_url() {

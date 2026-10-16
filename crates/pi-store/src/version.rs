@@ -1,5 +1,7 @@
 //! Object versions: what a conditional update must present to win.
 
+use std::fmt;
+
 use object_store::{PutResult, UpdateVersion};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +32,18 @@ impl ObjectVersion {
     }
 }
 
+/// `etag "abc"`, `etag "abc", version v1`, or `none`, for errors and logs.
+impl fmt::Display for ObjectVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.e_tag, &self.version) {
+            (Some(e_tag), Some(version)) => write!(f, "etag {e_tag}, version {version}"),
+            (Some(e_tag), None) => write!(f, "etag {e_tag}"),
+            (None, Some(version)) => write!(f, "version {version}"),
+            (None, None) => f.write_str("none"),
+        }
+    }
+}
+
 impl From<PutResult> for ObjectVersion {
     fn from(value: PutResult) -> Self {
         Self {
@@ -45,5 +59,30 @@ impl From<&object_store::ObjectMeta> for ObjectVersion {
             e_tag: meta.e_tag.clone(),
             version: meta.version.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_what_the_store_returned() {
+        let both = ObjectVersion {
+            e_tag: Some("\"abc\"".into()),
+            version: Some("v1".into()),
+        };
+        assert_eq!(both.to_string(), "etag \"abc\", version v1");
+        let etag = ObjectVersion {
+            version: None,
+            ..both.clone()
+        };
+        assert_eq!(etag.to_string(), "etag \"abc\"");
+        let version = ObjectVersion {
+            e_tag: None,
+            ..both
+        };
+        assert_eq!(version.to_string(), "version v1");
+        assert_eq!(ObjectVersion::default().to_string(), "none");
     }
 }

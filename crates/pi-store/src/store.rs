@@ -19,7 +19,7 @@ use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
+use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio_util::io::StreamReader;
@@ -381,10 +381,39 @@ impl Store {
 
     /// Streams an object's body in chunks, without buffering it whole.
     pub async fn get_stream(&self, key: &str) -> StoreResult<ByteStream> {
+        self.stream_opts(key, GetOptions::default()).await
+    }
+
+    /// Streams an object's body only if its current version is `expected` (an `If-Match` on
+    /// the etag, and the version id when there is one). Returns
+    /// [`StoreError::PreconditionFailed`] when the object changed since that version was
+    /// read, [`StoreError::NotFound`] when it is gone. Works on every backend: the local
+    /// filesystem's etag is its inode, modification time and size.
+    pub async fn get_stream_if_match(
+        &self,
+        key: &str,
+        expected: &ObjectVersion,
+    ) -> StoreResult<ByteStream> {
+        if expected.is_empty() {
+            // Without an etag or version nothing can be checked; refusing keeps a missing etag
+            // from turning into an unconditional read.
+            return Err(StoreError::PreconditionFailed {
+                key: key.to_owned(),
+            });
+        }
+        let opts = GetOptions {
+            if_match: expected.e_tag.clone(),
+            version: expected.version.clone(),
+            ..GetOptions::default()
+        };
+        self.stream_opts(key, opts).await
+    }
+
+    async fn stream_opts(&self, key: &str, opts: GetOptions) -> StoreResult<ByteStream> {
         let path = object_path(key)?;
         let result = self
             .inner
-            .get(&path)
+            .get_opts(&path, opts)
             .await
             .map_err(|e| StoreError::from_backend(key, e))?;
         let owned_key = key.to_owned();

@@ -147,6 +147,29 @@ pub struct TaskReport {
     /// Wall time of the attempt; the executor fills it in when the stage leaves it zero.
     #[serde(default, rename = "duration_ms", with = "duration_ms")]
     pub duration: Duration,
+    /// What the task wrote to each output partition, keyed by the partition's directory below
+    /// the stage's data prefix (`orgs/p=3`). A later stage that holds a partition in memory
+    /// sums these over the commits to size its passes without reading the data. A map rather
+    /// than counters, so the partition count never becomes a metric label.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partitions: BTreeMap<String, PartitionSize>,
+}
+
+/// Rows and encoded bytes (before compression) written to one partition.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionSize {
+    /// Rows written.
+    pub rows: u64,
+    /// Their encoded size before compression.
+    pub raw_bytes: u64,
+}
+
+impl PartitionSize {
+    /// Adds another count to this one.
+    pub fn add(&mut self, other: PartitionSize) {
+        self.rows += other.rows;
+        self.raw_bytes += other.raw_bytes;
+    }
 }
 
 impl TaskReport {
@@ -222,7 +245,22 @@ mod tests {
         assert_eq!(r.counter("absent"), 0);
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["duration_ms"], 1500);
+        assert!(v.get("partitions").is_none(), "an empty map is omitted");
         assert_eq!(serde_json::from_value::<TaskReport>(v).unwrap(), r);
+        r.partitions.insert(
+            "orgs/p=3".into(),
+            PartitionSize {
+                rows: 2,
+                raw_bytes: 40,
+            },
+        );
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["partitions"]["orgs/p=3"]["raw_bytes"], 40);
+        assert_eq!(serde_json::from_value::<TaskReport>(v).unwrap(), r);
+        let mut size = PartitionSize::default();
+        size.add(r.partitions["orgs/p=3"]);
+        size.add(r.partitions["orgs/p=3"]);
+        assert_eq!((size.rows, size.raw_bytes), (4, 80));
         let spec = TaskSpec::single(StageName::Plan);
         let v = serde_json::to_value(&spec).unwrap();
         assert!(v.get("partition").is_none(), "absent options are omitted");

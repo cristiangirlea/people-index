@@ -189,15 +189,41 @@ What to watch during a load: a rising rate of bulk retries means the cluster is 
 
 **Partitions.** `plan` picks `P` from the total input bytes divided by
 `PI_PARTITION_TARGET_BYTES` (256 MiB), at least `PI_MIN_PARTITIONS` (16), rounded up to a power
-of two. The input bytes are the gzipped sizes, so a partition decoded in memory is several times
-its target. A `join` or `assemble` task holds one partition in memory and an extract task holds
-up to `PI_BUFFER_BYTES` (256 MiB) of rows before writing out, so a worker's memory is roughly
-`PI_CONCURRENCY × max(one partition decoded, PI_BUFFER_BYTES)` plus a few segments in flight,
-independent of the total input. None of this has been measured yet: watch the first runs and
-lower `PI_BUFFER_BYTES` or the partition target when workers approach their memory limit (the
-local k3d workers have 1 GiB for two tasks each).
-More data gives more partitions, not bigger workers. Lower the target when workers run close to
-their memory limit; raise `PI_MIN_PARTITIONS` when there are more worker slots than tasks.
+of two. The input bytes are the gzipped sizes, so a partition decoded is several times its
+target, and organization popularity decides how large the joined rows of a partition get. That
+no longer decides memory: it decides how many passes `join` and `assemble` need. More data gives
+more partitions, not bigger workers; raise `PI_MIN_PARTITIONS` when there are more worker slots
+than tasks, or when the `passes` counter of `join` or `assemble` in `summary.json` (summed over
+the stage's tasks) is well above the stage's task count, since every extra pass re-reads the
+partition.
+
+**Memory per task.** Each part is bounded by a setting:
+
+- `join` and `assemble` hold at most about `PI_TASK_MEMORY_BYTES` (512 MiB) of the partition
+  side they keep in memory. Each estimates that side from the sizes the earlier stages committed
+  (the rows' encoded bytes before compression, plus a fixed overhead per row for the hash maps:
+  128 bytes per organization, 96 per joined row, 192 per person record) and runs
+  `ceil(estimate / PI_TASK_MEMORY_BYTES)` passes, each holding one share of the ids. The
+  overheads are modelled, not measured.
+- extract tasks and `join` buffer up to `PI_BUFFER_BYTES` (256 MiB) of output rows before
+  writing out a partition.
+- Every task has up to 4 input segments (2 prefetched, 1 queued, 1 decoding) and
+  `2 + PI_UPLOAD_CONCURRENCY` output segments (1 being written, 1 queued, the uploads) in
+  memory, each up to about `PI_SEGMENT_TARGET_BYTES` (64 MiB): 8 segments at the default
+  upload concurrency of 2.
+- Plus about 32 MiB of read buffers, zstd and gzip state, and the runtime.
+
+So one task needs about `PI_TASK_MEMORY_BYTES + PI_BUFFER_BYTES + 8 × PI_SEGMENT_TARGET_BYTES +
+32 MiB` (the defaults: 512 + 256 + 512 + 32 MiB, about 1.3 GiB), a worker
+`PI_CONCURRENCY` times that, and the coordinator one task (it runs every stage with one task or
+fewer itself, including an extract stage with one input file). The deployments set the three
+knobs to fit: the k3d base ConfigMap 192 MiB / 64 MiB / 16 MiB (about 416 MiB per task, for
+1 GiB workers running two tasks and a 512 MiB coordinator), the production example 1 GiB /
+256 MiB / 64 MiB (about 1.8 GiB, for 4 GiB workers running two), compose 384 MiB / 128 MiB /
+32 MiB (about 800 MiB, for 2 GiB workers running two and a 1 GiB coordinator). Change
+`WORKER_MEMORY`, `WORKER_CONCURRENCY` or `COORDINATOR_MEMORY` and these together. The rule is a
+model built from the code, not a profile: watch the first runs' memory and lower
+`PI_TASK_MEMORY_BYTES` or the segment size if workers come close to their limit.
 
 **Shards.** The default, 2 primaries per data node, lets every data node index in parallel
 without oversharding a small cluster. Aim for primaries of 10 to 50 GB at the final size; set
@@ -211,6 +237,13 @@ finished segments.
 retries stay rare; back off when 429s become steady or the data nodes' write thread pools queue.
 When workers are added for the CPU-heavy stages, lower `PI_SENDERS_PER_WORKER` so the total
 stays where the cluster is comfortable.
+
+**Load task memory.** A `load` task holds the bulk request it is filling and up to
+`PI_SENDERS_PER_WORKER` requests in flight, plus decoded documents waiting for the indexer
+within `PI_LOAD_BUFFER_BYTES` (default twice `PI_BULK_MAX_BYTES`): about
+`(PI_SENDERS_PER_WORKER + 1) × PI_BULK_MAX_BYTES + PI_LOAD_BUFFER_BYTES`, 40 MiB with the
+defaults, plus the document being decoded and a couple of segments being read. A document larger
+than the load buffer still passes, alone, so a small buffer slows the load but never stops it.
 
 **Elasticsearch.** Heap at most half of the node's memory (compose: `ES_HEAP` and
 `ES_MEM_LIMIT`), the rest is page cache for segments. On a nearly full disk the watermarks keep

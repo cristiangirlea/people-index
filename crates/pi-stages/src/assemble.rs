@@ -5,6 +5,12 @@
 //! are read twice: once to find each person's winning record (greatest `Seq`), once to build
 //! the winners' documents. Holding the ids rather than the records keeps memory at the joined
 //! rows plus one map entry per person.
+//!
+//! When that is estimated larger than `task_memory_bytes`, the task runs `k` passes keyed by a
+//! second hash of the person id ([`pi_model::Passes`]): pass `i` holds the joined rows of the
+//! persons of pass `i` and finds and builds only their documents, re-reading the segments each
+//! time. Every person belongs to exactly one pass, so the set of documents is the same for any
+//! `k`; their order inside the output segments is not.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,18 +24,21 @@ use pi_coord::{
     permanent,
 };
 use pi_model::{
-    DocRow, DocumentBuilder, DocumentStats, JoinedGroups, JoinedRow, LastWins, Partitioner,
+    DocRow, DocumentBuilder, DocumentStats, JoinedGroups, JoinedRow, LastWins, Partitioner, Passes,
     PersonRow,
 };
 use pi_segment::SegmentConfig;
 use pi_store::Dataset;
 
 use crate::channel::{Inbox, Outbox, input_channel, upload_channel};
-use crate::commits::{CommitCache, partition_outputs};
+use crate::commits::{CommitCache, partition_outputs, partition_size};
 use crate::config::StagesConfig;
 use crate::counters;
 use crate::feeder::feed_objects;
-use crate::join::{PREFETCH, next_object, partition_tasks, task_partition};
+use crate::join::{
+    PREFETCH, expect_end, next_object, partition_tasks, repeat_for_passes, task_partition,
+};
+use crate::passes::{assemble_estimate, plan_passes};
 use crate::pipeline::run_pipeline;
 use crate::plan_file::{Feed, Plan};
 use crate::quarantine::{Quarantine, QuarantineEntry};
@@ -68,6 +77,7 @@ struct AssembleJob {
     partitioner: Partitioner,
     joined_segments: usize,
     person_segments: usize,
+    passes: Passes,
     builder: DocumentBuilder,
     person_files: Vec<String>,
     namer: SegmentNamer,
@@ -83,28 +93,6 @@ impl AssembleJob {
         outbox: &Outbox,
     ) -> anyhow::Result<AssembleCounts> {
         let mut counts = AssembleCounts::default();
-
-        let mut groups = JoinedGroups::new();
-        for _ in 0..self.joined_segments {
-            let (key, bytes) = self.next(&mut inbox)?;
-            counts.joined_rows += for_each_row::<JoinedRow, _>(&key, bytes, |row| {
-                self.expect_partition(row.person_id, &key)?;
-                groups.push(row);
-                Ok(())
-            })?;
-        }
-
-        let mut winners: LastWins<u64, ()> = LastWins::new();
-        for _ in 0..self.person_segments {
-            let (key, bytes) = self.next(&mut inbox)?;
-            counts.person_rows += for_each_row::<PersonRow, _>(&key, bytes, |row| {
-                self.expect_partition(row.person_id, &key)?;
-                winners.offer(row.person_id, row.seq, ());
-                Ok(())
-            })?;
-        }
-        counts.persons = winners.len() as u64;
-
         let mut docs = RollingUpload::<DocRow>::new(
             Arc::new(self.namer.clone()),
             self.partition,
@@ -113,20 +101,69 @@ impl AssembleJob {
             outbox.clone(),
         );
         let mut quarantine = Quarantine::default();
-        let mut built: HashSet<u64> = HashSet::with_capacity(winners.len());
-        let mut stats = DocumentStats::default();
+        for pass in 0..self.passes.count() {
+            self.run_pass(pass, &mut inbox, &mut docs, &mut quarantine, &mut counts)?;
+        }
+        expect_end(&mut inbox)?;
+        counts.too_large = quarantine.len();
+        counts.written = docs.finish()?;
+        if let Some(bytes) = quarantine.into_bytes() {
+            outbox.send_blocking(self.quarantine_key.clone(), bytes)?;
+        }
+        Ok(counts)
+    }
+
+    /// One pass: the joined rows of the persons of `pass`, then their winners, then their
+    /// documents.
+    fn run_pass(
+        &self,
+        pass: u32,
+        inbox: &mut Inbox<(String, Bytes)>,
+        docs: &mut RollingUpload<DocRow>,
+        quarantine: &mut Quarantine,
+        counts: &mut AssembleCounts,
+    ) -> anyhow::Result<()> {
+        let mut groups = JoinedGroups::new();
+        for _ in 0..self.joined_segments {
+            let (key, bytes) = self.next(inbox)?;
+            for_each_row::<JoinedRow, _>(&key, bytes, |row| {
+                self.expect_partition(row.person_id, &key)?;
+                if self.passes.pass_of(row.person_id) == pass {
+                    counts.joined_rows += 1;
+                    groups.push(row);
+                }
+                Ok(())
+            })?;
+        }
+
+        let mut winners: LastWins<u64, ()> = LastWins::new();
         for _ in 0..self.person_segments {
-            let (key, bytes) = self.next(&mut inbox)?;
+            let (key, bytes) = self.next(inbox)?;
             for_each_row::<PersonRow, _>(&key, bytes, |row| {
-                // The same record twice (it cannot happen with one commit per file, but a
-                // duplicate document would double the count) is built once.
+                self.expect_partition(row.person_id, &key)?;
+                if self.passes.pass_of(row.person_id) == pass {
+                    counts.person_rows += 1;
+                    winners.offer(row.person_id, row.seq, ());
+                }
+                Ok(())
+            })?;
+        }
+        counts.persons += winners.len() as u64;
+
+        let mut built: HashSet<u64> = HashSet::with_capacity(winners.len());
+        for _ in 0..self.person_segments {
+            let (key, bytes) = self.next(inbox)?;
+            for_each_row::<PersonRow, _>(&key, bytes, |row| {
+                // Persons of other passes are not winners here. The same record twice (it
+                // cannot happen with one commit per file, but a duplicate document would
+                // double the count) is built once.
                 if !winners.is_winner(&row.person_id, row.seq) || !built.insert(row.person_id) {
                     return Ok(());
                 }
                 let joins = groups.for_person(row.person_id, row.seq);
                 match self.builder.build_row(&row, &joins) {
                     Ok(doc) => {
-                        stats += doc.stats;
+                        counts.stats += doc.stats;
                         docs.push(&doc.doc)
                     }
                     Err(e) if e.is_data_error() => {
@@ -149,19 +186,7 @@ impl AssembleJob {
                 }
             })?;
         }
-        if let Some(extra) = next_object(&mut inbox)? {
-            return Err(anyhow::anyhow!(
-                "unexpected input {} after the persons",
-                extra.0
-            ));
-        }
-        counts.too_large = quarantine.len();
-        counts.stats = stats;
-        counts.written = docs.finish()?;
-        if let Some(bytes) = quarantine.into_bytes() {
-            outbox.send_blocking(self.quarantine_key.clone(), bytes)?;
-        }
-        Ok(counts)
+        Ok(())
     }
 
     fn next(&self, inbox: &mut Inbox<(String, Bytes)>) -> anyhow::Result<(String, Bytes)> {
@@ -213,12 +238,22 @@ impl Stage for AssembleStage {
             Dataset::Persons,
             q,
         )?;
+        let passes = plan_passes(
+            StageName::Assemble,
+            q,
+            assemble_estimate(
+                partition_size(&join_commits, Dataset::Joined, q),
+                partition_size(&person_commits, Dataset::Persons, q),
+            ),
+            self.config.task_memory_bytes,
+        );
         let attempt = attempt.to_string();
         let job = AssembleJob {
             partition: q,
             partitioner: plan.partitioner()?,
             joined_segments: joined_keys.len(),
             person_segments: person_keys.len(),
+            passes,
             builder: DocumentBuilder::new(self.config.effective_max_document_bytes()),
             person_files: plan.persons.iter().map(|f| f.key.clone()).collect(),
             namer: SegmentNamer::new(
@@ -232,12 +267,13 @@ impl Stage for AssembleStage {
             quarantine_key: ctx.layout.quarantine(&task.task_id, &attempt)?,
             cancel: ctx.cancel.clone(),
         };
-        // Persons twice: the first pass finds the winners, the second builds them.
-        let keys: Vec<String> = joined_keys
+        // Per pass, persons twice: the first read finds the winners, the second builds them.
+        let per_pass: Vec<String> = joined_keys
             .into_iter()
             .chain(person_keys.clone())
             .chain(person_keys)
             .collect();
+        let keys = repeat_for_passes(&per_pass, passes);
         let read = Arc::new(AtomicU64::new(0));
         let (tx, inbox) = input_channel(1);
         let (outbox, uploads) = upload_channel(1);
@@ -274,6 +310,8 @@ impl Stage for AssembleStage {
         report.add("organizations", s.organizations);
         report.add("unresolved_ids", s.unresolved_ids);
         report.add(counters::SEGMENTS, counts.written.segments);
+        report.add(counters::PASSES, u64::from(passes.count()));
+        report.partitions = counts.written.partitions;
         if counts.too_large > 0 {
             tracing::warn!(
                 partition = q,

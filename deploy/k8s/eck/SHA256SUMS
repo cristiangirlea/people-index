@@ -1,2 +1,2 @@
-0e126dbd003f8f98c9b84f2af6263b5ac8a00b52cd9a6d6da225aa3af66cc13c  https://download.elastic.co/downloads/eck/3.5.0/crds.yaml
-450f59d5026341226c54bbd3fafb68adcf99de8c674b47e32c22fae8aa183bf7  https://download.elastic.co/downloads/eck/3.5.0/operator.yaml
+0e126dbd003f8f98c9b84f2af6263b5ac8a00b52cd9a6d6da225aa3af66cc13c  crds.yaml
+450f59d5026341226c54bbd3fafb68adcf99de8c674b47e32c22fae8aa183bf7  operator.yaml

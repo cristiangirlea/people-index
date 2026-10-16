@@ -1,0 +1,110 @@
+# Checks the published alias: `people-index verify` runs the acceptance queries against the
+# counts in s3://people-index/raw/expected.json (written by the datagen Job) and prints the
+# content digest. Rendered by render.sh like run.yaml; same pod security, credentials and CA
+# as the run Jobs, without a run id: it reads whatever the alias points at.
+#
+# The binary exits 1 both for a failed check and for an error (Elasticsearch or the store
+# unreachable), so the Job cannot tell them apart: it retries up to backoffLimit, which is
+# harmless because verify only reads. Evictions and drains do not count (podFailurePolicy).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pi-verify-${JOB_ID}
+  namespace: people-index
+  labels:
+    app.kubernetes.io/name: people-index
+    app.kubernetes.io/component: verify
+    app.kubernetes.io/part-of: people-index
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: ${VERIFY_DEADLINE_SECONDS}
+  ttlSecondsAfterFinished: 86400
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: people-index
+        app.kubernetes.io/component: verify
+        app.kubernetes.io/part-of: people-index
+        people-index.io/es-client: "true"
+        people-index.io/s3-client: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: people-index-pipeline
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: people-index
+          image: ${IMAGE}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
+          args:
+            - verify
+            - --expected
+            - s3://people-index/raw/expected.json
+            - --digest
+          envFrom:
+            - configMapRef:
+                name: people-index-config
+          env:
+            - name: PI_ES_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: pipeline-es-credentials
+                  key: username
+            - name: PI_ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pipeline-es-credentials
+                  key: password
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: TMPDIR
+              value: /tmp
+          resources:
+            requests:
+              cpu: "${VERIFY_CPU}"
+              memory: "${VERIFY_MEMORY}"
+              ephemeral-storage: 64Mi
+            limits:
+              memory: "${VERIFY_MEMORY}"
+              ephemeral-storage: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: es-ca
+              mountPath: /etc/people-index/es-ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: es-ca
+          secret:
+            secretName: es-es-http-certs-public
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

@@ -231,35 +231,69 @@ where
     cond().await
 }
 
-/// An in-memory store whose puts fail while `failing` is set: an unreachable S3.
+/// Faults a [`FlakyStore`] injects, switched on from the test.
+#[derive(Debug, Clone, Default)]
+pub struct Faults {
+    /// While set, puts fail without reaching the store: an unreachable S3.
+    pub failing: Arc<AtomicBool>,
+    /// The next this many puts land on the store but report an error: a lost response.
+    pub lost_responses: Arc<AtomicUsize>,
+    /// The next this many gets fail.
+    pub failed_gets: Arc<AtomicUsize>,
+    /// While set, every update-if-match is refused and the object left alone: a store whose
+    /// conditional check never accepts the version it handed out.
+    pub refused_updates: Arc<AtomicBool>,
+    /// Puts seen so far, faulted or not.
+    pub puts: Arc<AtomicUsize>,
+}
+
+/// An in-memory store that injects the [`Faults`] it was built with.
 #[derive(Debug)]
 pub struct FlakyStore {
     inner: InMemory,
-    pub failing: Arc<AtomicBool>,
+    faults: Faults,
 }
 
 impl FlakyStore {
+    /// A store whose puts fail while the returned flag is set.
     pub fn store() -> (Store, Arc<AtomicBool>) {
-        let failing = Arc::new(AtomicBool::new(false));
+        let (store, faults) = Self::with_faults();
+        (store, faults.failing)
+    }
+
+    /// A store with every fault off, and the switches.
+    pub fn with_faults() -> (Store, Faults) {
+        let faults = Faults::default();
         let flaky = FlakyStore {
             inner: InMemory::new(),
-            failing: Arc::clone(&failing),
+            faults: faults.clone(),
         };
         (
             Store::from_object_store(Arc::new(flaky), Backend::Memory, "flaky://"),
-            failing,
+            faults,
         )
     }
 
     fn check(&self) -> object_store::Result<()> {
-        if self.failing.load(Ordering::SeqCst) {
-            Err(object_store::Error::Generic {
-                store: "flaky",
-                source: "injected outage".into(),
-            })
+        if self.faults.failing.load(Ordering::SeqCst) {
+            Err(injected("injected outage"))
         } else {
             Ok(())
         }
+    }
+}
+
+/// Takes one from `counter` when it is above zero.
+fn take_one(counter: &AtomicUsize) -> bool {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+}
+
+fn injected(what: &'static str) -> object_store::Error {
+    object_store::Error::Generic {
+        store: "flaky",
+        source: what.into(),
     }
 }
 
@@ -277,8 +311,22 @@ impl ObjectStore for FlakyStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
+        self.faults.puts.fetch_add(1, Ordering::SeqCst);
         self.check()?;
-        self.inner.put_opts(location, payload, opts).await
+        if matches!(opts.mode, PutMode::Update(_))
+            && self.faults.refused_updates.load(Ordering::SeqCst)
+        {
+            return Err(object_store::Error::Precondition {
+                path: location.to_string(),
+                source: "injected refusal".into(),
+            });
+        }
+        let lose_response = take_one(&self.faults.lost_responses);
+        let result = self.inner.put_opts(location, payload, opts).await;
+        if lose_response && result.is_ok() {
+            return Err(injected("injected lost response"));
+        }
+        result
     }
 
     async fn put_multipart_opts(
@@ -295,6 +343,9 @@ impl ObjectStore for FlakyStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if take_one(&self.faults.failed_gets) {
+            return Err(injected("injected read failure"));
+        }
         self.inner.get_opts(location, options).await
     }
 

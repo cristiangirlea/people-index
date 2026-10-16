@@ -5,6 +5,11 @@
 //! expired with update-if-match on the version it observed. Every write is conditional, so
 //! two workers can never both believe they hold the same lease.
 //!
+//! A renewal can land on the store while its response is lost; the next renewal then presents
+//! a stale version and is refused. So a refused renewal re-reads the lease, and the holder keeps
+//! going on the version it reads when the lease still carries its own `holder` token. Only a
+//! lease another claim owns, or one that is gone, counts as lost.
+//!
 //! Leases keep work from being done twice; they are not what makes the result correct. The
 //! commit is: outputs carry the attempt id and only the first commit counts, so a worker that
 //! keeps running past a lost lease wastes time but cannot corrupt the run.
@@ -447,15 +452,25 @@ struct Renewal {
 async fn renew_loop(mut r: Renewal) -> Option<(Lease, ObjectVersion)> {
     let interval = r.config.renew_interval();
     let mut last_ok = Instant::now();
+    // Set after adopting a version re-read from the store, to renew on it at once rather than
+    // an interval later; never twice in a row, so a store that keeps refusing cannot spin.
+    let mut renew_at_once = false;
     loop {
-        tokio::select! {
-            () = r.stop.cancelled() => return Some((r.lease, r.version)),
-            () = tokio::time::sleep(interval) => {}
+        let immediate = std::mem::take(&mut renew_at_once);
+        if immediate {
+            if r.stop.is_cancelled() {
+                return Some((r.lease, r.version));
+            }
+        } else {
+            tokio::select! {
+                () = r.stop.cancelled() => return Some((r.lease, r.version)),
+                () = tokio::time::sleep(interval) => {}
+            }
         }
         let mut next = r.lease.clone();
         next.expires_at = add(OffsetDateTime::now_utc(), r.config.ttl);
         next.renewals += 1;
-        match r
+        let failure = match r
             .store
             .put_json_update_if_match(&r.key, &next, &r.version)
             .await
@@ -464,20 +479,55 @@ async fn renew_loop(mut r: Renewal) -> Option<(Lease, ObjectVersion)> {
                 r.lease = next;
                 r.version = version;
                 last_ok = Instant::now();
+                continue;
             }
-            Err(StoreError::PreconditionFailed { .. }) => {
-                tracing::warn!(key = %r.key, "lease lost: another worker took it over");
-                return lose(&r.lost);
-            }
-            Err(e) => {
-                // Give up before the lease could lapse: past this point another worker may
-                // already consider it expired, and two holders is what leases exist to prevent.
-                if last_ok.elapsed() + interval >= r.config.ttl {
-                    tracing::warn!(key = %r.key, error = %e, "lease lost: renewals kept failing");
-                    return lose(&r.lost);
+            Err(StoreError::PreconditionFailed { .. }) => match still_ours(&r).await {
+                Ok(Some((lease, version))) => {
+                    // The stored expiry bounds the holder: a store that keeps refusing renewals
+                    // of a lease that is still ours must not keep us past it. The next renewal
+                    // comes at once, or an interval from now after an immediate one.
+                    let next_try = if immediate { interval } else { Duration::ZERO };
+                    if add(OffsetDateTime::now_utc(), next_try) >= lease.expires_at {
+                        tracing::warn!(key = %r.key, "lease lost: renewals kept being refused");
+                        return lose(&r.lost);
+                    }
+                    // An earlier renewal of ours landed but its response was lost.
+                    tracing::info!(key = %r.key, "lease renewal refused but the lease is still ours; continuing on the version read");
+                    r.lease = lease;
+                    r.version = version;
+                    renew_at_once = !immediate;
+                    continue;
                 }
-                tracing::warn!(key = %r.key, error = %e, "lease renewal failed; retrying");
-            }
+                Ok(None) => return lose(&r.lost),
+                Err(e) => e,
+            },
+            Err(e) => e,
+        };
+        // Give up before the lease could lapse: past this point another worker may already
+        // consider it expired, and two holders is what leases exist to prevent.
+        if last_ok.elapsed() + interval >= r.config.ttl {
+            tracing::warn!(key = %r.key, error = %failure, "lease lost: renewals kept failing");
+            return lose(&r.lost);
+        }
+        tracing::warn!(key = %r.key, error = %failure, "lease renewal failed; retrying");
+    }
+}
+
+/// After a refused renewal: the lease as it is now when it still belongs to this claim,
+/// `None` when another claim owns it or it is gone (logged), an error when it cannot be read.
+async fn still_ours(r: &Renewal) -> StoreResult<Option<(Lease, ObjectVersion)>> {
+    let Some(current) = r.store.get_opt(&r.key).await? else {
+        tracing::warn!(key = %r.key, "lease lost: the lease object is gone");
+        return Ok(None);
+    };
+    match serde_json::from_slice::<Lease>(&current.bytes) {
+        Ok(lease) if lease.holder == r.lease.holder && !lease.released => {
+            Ok(Some((lease, current.version)))
+        }
+        // Unreadable counts as taken: a claimer overwrites an unreadable lease.
+        _ => {
+            tracing::warn!(key = %r.key, "lease lost: another worker took it over");
+            Ok(None)
         }
     }
 }

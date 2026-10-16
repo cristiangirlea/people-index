@@ -82,15 +82,15 @@ once the previous one has committed every task:
 | `assemble` | partition `q` | `persons/q`, `joined/q` | `docs/q=<q>/` segments of `DocRow`, quarantine |
 | `prepare-index` | run | cluster state | the run's index, load-time settings |
 | `load` | partition `q` | `docs/q` | bulk requests into the run's index |
-| `publish` | run | the run's index | count checked, settings restored, alias moved, `summary.json` |
+| `publish` | run | the run's index | count checked, settings restored, `publish.json`, alias moved, `summary.json` |
 
 - `p = xxh3_64(org_id as u64 little-endian) % P` and `q = xxh3_64(person_id LE) % P`
   (`xxhash-rust`, seed 0; `P` is a power of two, so the modulo is a mask). One `P` for both keys
   keeps the plan simple. Known value for tests: `xxh3_64(0u64 LE) = 0xC77B3ABB6F87ACD9`.
 - `plan` picks `P` from the total input bytes (compressed, as listed) and
   `partition_target_bytes` (default 256 MiB), at least `min_partitions` (default 16), rounded up
-  to a power of two. A task's memory is bounded by its partition, so more data means more
-  partitions, not bigger workers.
+  to a power of two. More data means more partitions, not bigger workers; what one task holds
+  is bounded by the settings below, not by how large its partition turned out.
 - `extract-*` stream one gzip file (every member's CRC and length checked) and write to up to
   `2 × P` partitions through one shared byte budget (`buffer_bytes`): when it is full, the
   largest partition is written out, so memory does not grow with `P`.
@@ -99,12 +99,31 @@ once the previous one has committed every task:
   newest record's rows) and reads the person segments twice: once to find each winner, once to
   build its document. Both are the two halves of a partitioned hash join: no node ever needs the
   whole organization table.
+- Both bound what they hold by `task_memory_bytes` (default 512 MiB) with a grace-hash-join
+  multi-pass. Before loading, a task estimates the side it holds from the per-partition sizes
+  the earlier stages committed (`report.partitions`, below): `join` from the `orgs/p` rows of
+  `extract-orgs`, `assemble` from the `joined/q` rows of `join` and the `persons/q` rows of
+  `extract-persons`. The estimate is the rows' encoded size before compression plus a fixed
+  overhead per row for the hash maps and vectors (128 bytes per organization, 96 per joined
+  row, 192 per person record; `crates/pi-stages/src/passes.rs` explains them). It then runs
+  `k = ceil(estimate / task_memory_bytes)` passes (at least 1, at most 1024, with a warning at
+  the cap): pass `i` holds only the ids with `xxh3_64(id LE, seed 1) % k == i` (organization
+  ids in `join`, person ids in `assemble`) and streams the other side filtered the same way,
+  re-reading the partition's segments once per pass. Every id falls in exactly one pass, so
+  the joined rows and the documents are the same for any `k`; only their order inside the
+  output segments differs, and nothing downstream depends on that order. The counter `passes`
+  records `k` per task. The estimate is a model, not a measurement: the overheads assume maps
+  and vectors up to half empty after growing.
 - `load` sends byte-bounded bulk requests (`bulk_max_bytes`, default 8 MiB) with
   `senders_per_worker` in flight per task (default 2), retries 429/502/503/504 and transport
   errors with jittered exponential backoff, resends only the failed items, and checks every
   item's status. It then checks rows read = sent = acknowledged = the documents `assemble`
   committed for that partition. Total pressure on the cluster is
   `concurrent load tasks × senders_per_worker`, the knob to size against the data nodes.
+  Decoded documents wait for the bulk indexer within a byte budget (`load_buffer_bytes`,
+  default `2 × bulk_max_bytes`): each takes its body length from the budget and gives it back
+  once it is in a bulk request buffer, and one larger than the whole budget passes alone. A
+  load task's memory is about `(senders_per_worker + 1) × bulk_max_bytes + load_buffer_bytes`.
 - `prepare-index` creates `<alias>-<run_id>` (lowercased) with `number_of_replicas: 0`,
   `refresh_interval: -1`, `translog.durability: async`, the codec, and `shards` primaries
   (default: 2 per data node, read from `_nodes`); an existing index counts as created, so a
@@ -112,10 +131,16 @@ once the previous one has committed every task:
 - `publish` refreshes and flushes while replicas are still 0 (so the complete-shard check covers
   every copy), checks that the index count equals the sum of `assemble`'s `documents` counters,
   then restores replicas (default 1), `refresh_interval: 1s` and request durability, waits for
-  the cluster health (`green` by default), moves the alias in one `_aliases` request, and
-  deletes the indexes the alias pointed at before. Any failure before the alias request leaves
-  the alias untouched; a count mismatch is a permanent failure of the run. A failed delete of an
-  old index is reported in `summary.json`, not a failure, since the alias has moved by then.
+  the cluster health (`green` by default), records the indexes the alias points at in
+  `publish.json` (create-if-absent; a later attempt reads the first attempt's list back), moves
+  the alias in one `_aliases` request, and deletes the recorded indexes and any others the alias
+  pointed at (never the run's own; a 404 counts as deleted). The removes carry
+  `"must_exist": false`, so a request resent after a lost answer is harmless, and a failed
+  request after which the alias points at the run's index alone counts as done. A publish
+  interrupted after the alias moved therefore still deletes the old indexes when it resumes.
+  Any failure before the alias request leaves the alias untouched; a count mismatch is a
+  permanent failure of the run. A failed delete of an old index is reported in `summary.json`,
+  not a failure, since the alias has moved by then.
   Publish then writes `summary.json` and deletes orphaned files (data and quarantine files no
   commit lists).
 
@@ -136,6 +161,7 @@ runs/<run_id>/<stage>/_commit/<task>.json
 runs/<run_id>/<stage>/_lease/<task>.json
 runs/<run_id>/<stage>/data/<dataset>/<p|q>=<n>/<task>-<attempt>-<n>.seg
 runs/<run_id>/quarantine/<task>-<attempt>.ndjson
+runs/<run_id>/publish.json             the indexes the alias served before (create-if-absent)
 runs/<run_id>/summary.json
 snapshots/                             reserved for Elasticsearch snapshots (k8s component)
 ```
@@ -154,6 +180,9 @@ snapshots/                             reserved for Elasticsearch snapshots (k8s
   creates it; workers and the coordinator stop when they see it; resuming a failed run clears it.
 - Quarantine: one NDJSON line per entry, `{feed, file, line, kind, reason, sample}` with a
   sample of at most 1 KiB; kinds `syntax | envelope | record | too_long | document_too_large`.
+- `publish.json`: `{alias, index, previous}`, the indexes the alias pointed at (the run's own
+  excluded) when the first publish attempt was about to move it; every attempt deletes
+  these after the swap.
 - `summary.json`: `{run_id, alias, index, partitions, started_at, finished_at, wall_ms,
   documents, persons_per_second, input_bytes, stages: [{stage, tasks, wall_ms, task_ms,
   bytes_in, bytes_out, counters}], publish: {docs, previous, deleted, not_deleted},
@@ -182,7 +211,9 @@ about one row past the target. Rows (`crates/pi-model`):
 A task writes its outputs under a fresh attempt id (a UUID v7) and returns a report; the
 executor then commits by creating `_commit/<task>.json` with a create-if-absent put
 (`PutMode::Create`): `{stage, task_id, attempt, worker, committed_at, report: {outputs,
-counters, bytes_in, bytes_out, duration_ms}}`. **Readers enumerate commits, never data
+counters, bytes_in, bytes_out, duration_ms, partitions}}`, where `partitions` (omitted when
+empty) maps each output partition, `orgs/p=3`, to `{rows, raw_bytes}`: the rows written there
+and their encoded size before compression, which `join` and `assemble` sum to size their passes. **Readers enumerate commits, never data
 prefixes**, so a crashed or duplicate attempt's files are invisible; the first commit wins and
 the loser's files are orphans that `publish` removes. A task that finds its commit already
 present is skipped. This makes every task safe to retry and safe to run twice at the same time.
@@ -193,9 +224,11 @@ A worker claims a task by creating `_lease/<task>.json` with `PutMode::Create`:
 `{worker, holder, expires_at, acquired_at, renewals, released}`. It renews every
 `lease_ttl / 3` with `PutMode::Update` on the etag it holds, and a worker that finds a lease
 past `expires_at + clock_skew` (default 5 s), or released, takes it over with `PutMode::Update`
-on the etag it observed. Release is an update-if-match that sets `released: true`. A holder
-whose renewals fail for a whole ttl, or whose lease was taken, has its task cancelled. Leases
-avoid duplicate work; commits are what keep a duplicate harmless.
+on the etag it observed. Release is an update-if-match that sets `released: true`. A refused
+renewal re-reads the lease: if it still carries the holder's own `holder` token (an earlier
+renewal landed but its response was lost), the holder goes on with the etag it read. A holder
+whose renewals fail for a whole ttl, or whose lease was taken or deleted, has its task
+cancelled. Leases avoid duplicate work; commits are what keep a duplicate harmless.
 
 A polling worker lists `_lease/` once per poll (next to `_commit/`) and tries to claim only the
 tasks whose lease is absent, released or past `expires_at + clock_skew`. It reads a lease body
@@ -281,8 +314,10 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_PARTITION_TARGET_BYTES`, `PI_MIN_PARTITIONS` | partitioning | 256 MiB, 16 |
 | `PI_MAX_MALFORMED`, `PI_MAX_LINE_BYTES` | per feed; longest input line | 1000, 8 MiB |
 | `PI_SEGMENT_TARGET_BYTES`, `PI_BUFFER_BYTES`, `PI_UPLOAD_CONCURRENCY` | segment size, partitioned-writer budget per task, uploads in flight per task | 64 MiB, 256 MiB, 2 |
+| `PI_TASK_MEMORY_BYTES` | what a `join` or `assemble` task holds per pass; a partition estimated larger runs in passes | 512 MiB |
 | `PI_MAX_DOCUMENT_BYTES` | larger documents are quarantined | 8 MiB (clamped) |
 | `PI_BULK_MAX_BYTES`, `PI_SENDERS_PER_WORKER` | load pressure | 8 MiB, 2 |
+| `PI_LOAD_BUFFER_BYTES` | decoded documents a load task holds waiting for the bulk indexer | 2 × `PI_BULK_MAX_BYTES` |
 | `PI_INDEX_SHARDS`, `PI_INDEX_REPLICAS`, `PI_INDEX_CODEC` | the index | 2 per data node, 1, `best_compression` |
 | `PI_PUBLISH_HEALTH`, `PI_HEALTH_TIMEOUT` | health publish waits for | `green`, `30m` |
 | `PI_METRICS_ADDR` | Prometheus endpoint, `off` to disable | `0.0.0.0:9464` |

@@ -156,6 +156,7 @@ pub(crate) async fn run_extract(
     report.add(counters::MALFORMED, counts.malformed);
     report.add(counters::DECOMPRESSED_BYTES, counts.decompressed);
     report.add(counters::SEGMENTS, counts.written.segments);
+    report.partitions = counts.written.partitions;
     for (name, n) in counts.extra {
         report.add(name, n);
     }

@@ -24,6 +24,7 @@ mod channel_reader;
 mod commits;
 mod config;
 pub mod counters;
+mod doc_channel;
 mod es_error;
 mod extract;
 mod extract_orgs;
@@ -33,6 +34,7 @@ mod join;
 mod lines;
 mod load;
 mod metered;
+mod passes;
 mod pipeline;
 mod plan;
 mod plan_file;
@@ -48,8 +50,9 @@ mod uploader;
 pub use assemble::AssembleStage;
 pub use commits::CommitCache;
 pub use config::{
-    DEFAULT_BUFFER_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_MALFORMED, DEFAULT_MIN_PARTITIONS,
-    DEFAULT_PARTITION_TARGET_BYTES, DEFAULT_UPLOAD_CONCURRENCY, EsStageConfig, StagesConfig,
+    DEFAULT_BUFFER_BYTES, DEFAULT_LOAD_BUFFER_BULKS, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_MALFORMED,
+    DEFAULT_MIN_PARTITIONS, DEFAULT_PARTITION_TARGET_BYTES, DEFAULT_TASK_MEMORY_BYTES,
+    DEFAULT_UPLOAD_CONCURRENCY, EsStageConfig, StagesConfig,
 };
 pub use extract_orgs::ExtractOrgsStage;
 pub use extract_persons::ExtractPersonsStage;
@@ -59,6 +62,6 @@ pub use metered::Metered;
 pub use plan::PlanStage;
 pub use plan_file::{Feed, InputFile, Plan, index_name};
 pub use prepare_index::PrepareIndexStage;
-pub use publish::{PublishStage, delete_orphans};
+pub use publish::{PublishRecord, PublishStage, delete_orphans};
 pub use registry::build_registry;
 pub use summary::{PublishSummary, StageSummary, Summary};

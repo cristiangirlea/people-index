@@ -49,7 +49,7 @@ pub use run_state::{RunState, RunStatus, latest_run_id};
 pub use stage::Stage;
 pub use stage_name::{StageName, UnknownStage};
 pub use stage_spec::{RunBy, StageSpec};
-pub use task::{AttemptId, TaskReport, TaskSpec};
+pub use task::{AttemptId, PartitionSize, TaskReport, TaskSpec};
 pub use worker::{Worker, WorkerExit, WorkerReport};
 
 /// Re-exported so stages and binaries need no direct `tokio-util` dependency.

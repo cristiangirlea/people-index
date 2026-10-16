@@ -2,11 +2,12 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::{FlakyStore, ctx, short_leases};
+use common::{CountingStore, FlakyStore, Op, ctx, short_leases};
 use pi_coord::{
     AttemptId, CommitLog, CommitOutcome, CommitRecord, Lease, LeaseManager, StageName, TaskReport,
 };
@@ -159,6 +160,123 @@ async fn an_unreadable_lease_does_not_block_the_task_forever() {
         .await
         .unwrap();
     assert!(g.is_some());
+}
+
+fn is_lease(path: &str) -> bool {
+    path.contains("/_lease/")
+}
+
+#[tokio::test]
+async fn polling_reads_only_the_leases_that_changed() {
+    let (store, ops) = CountingStore::store();
+    let holder = manager(&store, "a", 60_000);
+    let held: BTreeSet<String> = (0..20).map(|p| format!("part-{p:05}")).collect();
+    let mut guards = Vec::new();
+    for id in &held {
+        guards.push(
+            holder
+                .try_claim(StageName::Join, id)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    // A lease outside the tasks asked about (a committed task, say) is never read.
+    let _other = holder
+        .try_claim(StageName::Join, "part-00099")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut asked = held.clone();
+    asked.insert("part-00050".to_owned()); // no lease at all
+    let poller = manager(&store, "b", 60_000);
+
+    ops.clear();
+    let live = poller.live_task_ids(StageName::Join, &asked).await.unwrap();
+    assert_eq!(
+        live, held,
+        "every held lease is live; the absent one is not"
+    );
+    assert_eq!(ops.count(Op::List, |p| p.ends_with("/join/_lease")), 1);
+    assert_eq!(
+        ops.count(Op::Get, is_lease),
+        20,
+        "first poll reads each held lease"
+    );
+    assert_eq!(ops.count(Op::Get, |p| p.contains("part-00099")), 0);
+    assert_eq!(
+        ops.count(Op::Create, is_lease) + ops.count(Op::Update, is_lease),
+        0
+    );
+
+    ops.clear();
+    let live = poller.live_task_ids(StageName::Join, &asked).await.unwrap();
+    assert_eq!(live, held);
+    assert_eq!(ops.count(Op::List, |p| p.ends_with("/join/_lease")), 1);
+    assert_eq!(
+        ops.count(Op::Get, is_lease),
+        0,
+        "unchanged leases are not read again"
+    );
+
+    // Releasing one changes its version: only that lease is read, and it is no longer live.
+    let released = guards.pop().unwrap();
+    released.release().await.unwrap();
+    ops.clear();
+    let live = poller.live_task_ids(StageName::Join, &asked).await.unwrap();
+    assert_eq!(ops.count(Op::Get, is_lease), 1);
+    assert_eq!(live.len(), 19);
+    assert!(!live.contains("part-00019"));
+}
+
+#[tokio::test]
+async fn an_unchanged_lease_expires_without_being_read_again() {
+    let (store, ops) = CountingStore::store();
+    let crashed = manager(&store, "a", 200)
+        .try_claim(StageName::Join, "t")
+        .await
+        .unwrap()
+        .unwrap();
+    drop(crashed);
+    let poller = manager(&store, "b", 200);
+    let asked = BTreeSet::from(["t".to_owned()]);
+    assert_eq!(
+        poller.live_task_ids(StageName::Join, &asked).await.unwrap(),
+        asked
+    );
+    tokio::time::sleep(Duration::from_millis(260)).await;
+    ops.clear();
+    assert!(
+        poller
+            .live_task_ids(StageName::Join, &asked)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the cached expiry has passed"
+    );
+    assert_eq!(ops.count(Op::Get, is_lease), 0);
+    let taken = poller
+        .try_claim(StageName::Join, "t")
+        .await
+        .unwrap()
+        .expect("the expired lease is taken over");
+    assert!(taken.took_over());
+}
+
+#[tokio::test]
+async fn an_unreadable_lease_is_not_live() {
+    let store = Store::memory();
+    let layout = ctx(&store, "r1").layout;
+    store
+        .put(&layout.lease("join", "t").unwrap(), "{not json")
+        .await
+        .unwrap();
+    let asked = BTreeSet::from(["t".to_owned()]);
+    let live = manager(&store, "a", 60_000)
+        .live_task_ids(StageName::Join, &asked)
+        .await
+        .unwrap();
+    assert!(live.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -17,7 +17,7 @@ use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use pi_coord::{
     AttemptId, LeaseConfig, RetryPolicy, RunContext, Stage, StageName, StoreCoordination,
@@ -310,6 +310,138 @@ impl ObjectStore for FlakyStore {
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// One request a [`CountingStore`] saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    List,
+    Get,
+    /// A create-if-absent put.
+    Create,
+    /// An update-if-match put.
+    Update,
+    /// An unconditional put.
+    Put,
+}
+
+/// The requests a [`CountingStore`] saw, with their key or prefix.
+#[derive(Debug, Clone, Default)]
+pub struct Ops(Arc<Mutex<Vec<(Op, String)>>>);
+
+impl Ops {
+    fn record(&self, op: Op, path: String) {
+        self.0.lock().unwrap().push((op, path));
+    }
+
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
+    /// Requests of kind `op` whose key or prefix satisfies `matches`.
+    pub fn count(&self, op: Op, matches: impl Fn(&str) -> bool) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(o, path)| *o == op && matches(path))
+            .count()
+    }
+}
+
+/// An in-memory store that records every list, get and put: what a worker costs S3.
+#[derive(Debug)]
+pub struct CountingStore {
+    inner: InMemory,
+    ops: Ops,
+}
+
+impl CountingStore {
+    pub fn store() -> (Store, Ops) {
+        let ops = Ops::default();
+        let counting = CountingStore {
+            inner: InMemory::new(),
+            ops: ops.clone(),
+        };
+        (
+            Store::from_object_store(Arc::new(counting), Backend::Memory, "counting://"),
+            ops,
+        )
+    }
+}
+
+impl fmt::Display for CountingStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CountingStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for CountingStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let op = match opts.mode {
+            PutMode::Create => Op::Create,
+            PutMode::Update(_) => Op::Update,
+            PutMode::Overwrite => Op::Put,
+        };
+        self.ops.record(op, location.to_string());
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.ops.record(Op::Put, location.to_string());
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.ops.record(Op::Get, location.to_string());
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.ops.record(
+            Op::List,
+            prefix.map(ToString::to_string).unwrap_or_default(),
+        );
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.ops.record(
+            Op::List,
+            prefix.map(ToString::to_string).unwrap_or_default(),
+        );
         self.inner.list_with_delimiter(prefix).await
     }
 

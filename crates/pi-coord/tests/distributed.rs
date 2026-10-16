@@ -6,11 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::{Behavior, FakeStage, coordination, ctx, eventually, fast_retry};
+use common::{
+    Behavior, CountingStore, FakeStage, Op, coordination, ctx, eventually, fast_retry, short_leases,
+};
 use pi_coord::{
-    CommitLog, Coordination, DistributedExecutor, Executor, Lease, RunBy, RunContext, RunDriver,
-    RunFailed, RunState, RunStatus, StageName, StageRegistry, StageSpec, TaskSpec, Worker,
-    WorkerExit,
+    CommitLog, Coordination, DistributedExecutor, Executor, Lease, LeaseManager, RunBy, RunContext,
+    RunDriver, RunFailed, RunState, RunStatus, StageName, StageRegistry, StageSpec, TaskSpec,
+    Worker, WorkerExit,
 };
 use pi_store::Store;
 use time::OffsetDateTime;
@@ -288,6 +290,91 @@ async fn a_crashed_workers_task_is_taken_over_after_its_lease_expires() {
     assert_eq!(record.worker, "survivor");
     finish_run(&ctx).await;
     assert_eq!(survivor.await.unwrap().unwrap().committed, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_polling_worker_skips_live_leases_and_takes_over_an_expired_one() {
+    const N: u32 = 16;
+    let (store, ops) = CountingStore::store();
+    let ctx = ctx(&store, "r1");
+    let join = Arc::new(FakeStage::new(StageName::Join, N));
+    let registry = Arc::new(StageRegistry::new().with(join.clone()));
+    hand_stage_to_workers(&ctx, StageName::Join, {
+        (0..N)
+            .map(|p| TaskSpec::for_partition(StageName::Join, p))
+            .collect()
+    })
+    .await;
+    // Another worker holds every task but the first, and keeps holding them.
+    let other = LeaseManager::new(
+        store.clone(),
+        ctx.layout.clone(),
+        "other",
+        short_leases(60_000),
+    );
+    let mut held = Vec::new();
+    for p in 1..N {
+        let id = TaskSpec::for_partition(StageName::Join, p).task_id;
+        held.push(
+            other
+                .try_claim(StageName::Join, &id)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    // The first task's holder crashed: its lease lapses after 150 ms.
+    drop(
+        LeaseManager::new(
+            store.clone(),
+            ctx.layout.clone(),
+            "crashed",
+            short_leases(150),
+        )
+        .try_claim(StageName::Join, "part-00000")
+        .await
+        .unwrap()
+        .unwrap(),
+    );
+
+    ops.clear();
+    let w = spawn_worker(worker("w", &registry, 2_000), &ctx);
+    let log = CommitLog::new(store.clone(), ctx.layout.clone());
+    assert!(
+        eventually(Duration::from_secs(5), || async {
+            log.is_committed(StageName::Join, "part-00000")
+                .await
+                .unwrap()
+        })
+        .await,
+        "the expired lease was taken over"
+    );
+    // A few more polls with nothing claimable.
+    tokio::time::sleep(POLL * 6).await;
+    finish_run(&ctx).await;
+    let report = w.await.unwrap().unwrap();
+    assert_eq!(report.committed, 1);
+    assert_eq!(join.total_runs(), 1, "no live lease was run");
+
+    let held_lease = |path: &str| path.contains("/join/_lease/") && !path.contains("part-00000");
+    let polls = ops.count(Op::List, |p| p.ends_with("/join/_lease"));
+    assert!(polls >= 6, "the worker polled the leases {polls} times");
+    assert_eq!(
+        ops.count(Op::List, |p| p.ends_with("/join/_commit")),
+        polls,
+        "one lease listing per poll, next to the commit listing"
+    );
+    assert_eq!(
+        ops.count(Op::Create, held_lease) + ops.count(Op::Update, held_lease),
+        0,
+        "no claim attempt on a live lease"
+    );
+    assert_eq!(
+        ops.count(Op::Get, held_lease),
+        (N - 1) as usize,
+        "each live lease read once, on the first poll"
+    );
+    drop(held);
 }
 
 #[tokio::test]

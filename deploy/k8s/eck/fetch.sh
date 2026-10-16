@@ -10,9 +10,12 @@
 # again into a staging directory, checked with `sha256sum -c`, and moved into <dir> only when
 # every checksum matches. On a mismatch nothing is moved and the script exits 1.
 #
+# operator.yaml names the operator image by tag only; pin-operator.sh pins it by digest from
+# operator-image before anything applies or validates it.
+#
 # Upgrading: change `version` below, refresh SHA256SUMS (`sha256sum crds.yaml operator.yaml`
-# on the new release files), and read the ECK release notes for the supported Elasticsearch
-# versions.
+# on the new release files) and the reference in operator-image, and read the ECK release notes
+# for the supported Elasticsearch versions.
 set -euo pipefail
 
 version="3.5.0"

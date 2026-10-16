@@ -22,7 +22,8 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
-  # The toolchain CI and the Dockerfile build with; the MSRV job checks rust-version separately.
+  # The toolchain CI builds with; the Dockerfile's rust image tag must be the same version
+  # (scripts/check-deploy.sh compares them). The MSRV job checks rust-version separately.
   RUST_TOOLCHAIN: "1.98.1"
   RUST_MSRV: "1.90"
 
@@ -99,14 +100,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The lint images are pinned as name:tag@digest. Dependabot does not read `docker run`
+      # lines, so bump both by hand (`docker buildx imagetools inspect <name>:<tag>`).
       - name: actionlint
-        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
       - name: shellcheck
         run: |
           mapfile -t scripts < <(git ls-files '*.sh' '.githooks/*')
           shellcheck --severity=warning "${scripts[@]}"
       - name: hadolint
-        run: docker run --rm -i hadolint/hadolint:v2.15.1 hadolint --failure-threshold warning - < Dockerfile
+        run: docker run --rm -i hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d hadolint --failure-threshold warning - < Dockerfile
       - name: scrub-check finds its list from any worktree
         run: bash scripts/test-scrub-check.sh
 

@@ -22,7 +22,7 @@ metadata:
 servers: 1
 agents: 3
 # Pinned so every machine runs the same Kubernetes (the k3s release k3d v5.9.0 defaults to).
-image: rancher/k3s:v1.35.5-k3s1
+image: rancher/k3s:v1.35.5-k3s1@sha256:2074403abe1bded11ef3dde09d457e13be8e0b64c218b1c4f8269b4565cfbc65
 # The API server listens on loopback only (k3d's default is every interface), on a free port
 # that k3d writes into the kubeconfig.
 kubeAPI:

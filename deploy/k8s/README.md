@@ -10,7 +10,7 @@ the stages, the storage layout and the `PI_*` settings used here.
 | path | what it holds |
 |---|---|
 | `../k3d/cluster.yaml` | a local cluster: 1 server (control plane only) + 3 agents in zones `zone-a`, `zone-b`, `zone-c` |
-| `eck/` | `fetch.sh`: downloads the ECK 3.5.0 operator and CRDs from Elastic's release URLs and keeps them only when they match `SHA256SUMS` |
+| `eck/` | `fetch.sh`: downloads the ECK 3.5.0 operator and CRDs from Elastic's release URLs and keeps them only when they match `SHA256SUMS`; `pin-operator.sh`: pins the operator image to the digest in `operator-image` |
 | `base/` | namespace, Elasticsearch (`es`: 3 masters, 3 data nodes), SeaweedFS (`s3:8333`) and its bucket Job, the pipeline ServiceAccount, the `people-index-config` ConfigMap, NetworkPolicies |
 | `components/snapshots/` | S3 snapshot repository `people-index` (prefix `snapshots/`) and the SLM policy `nightly` |
 | `components/monitoring/` | elasticsearch-exporter, ServiceMonitors, a PodMonitor for the pipeline's `:9464`, alert rules; needs the prometheus-operator CRDs |
@@ -37,7 +37,8 @@ k3d image import people-index:local -c people-index
 
 deploy/k8s/gen-secrets.sh local
 deploy/k8s/eck/fetch.sh target/eck      # fails, keeping nothing, on a checksum mismatch
-kubectl --context k3d-people-index apply --server-side -f target/eck/crds.yaml -f target/eck/operator.yaml
+bash deploy/k8s/eck/pin-operator.sh target/eck/operator.yaml >target/eck/operator-pinned.yaml
+kubectl --context k3d-people-index apply --server-side -f target/eck/crds.yaml -f target/eck/operator-pinned.yaml
 kubectl --context k3d-people-index -n elastic-system rollout status statefulset/elastic-operator
 kubectl --context k3d-people-index apply --server-side -k deploy/k8s/overlays/local
 kubectl --context k3d-people-index -n people-index wait elasticsearch/es \
@@ -120,8 +121,14 @@ index) can be recreated, and production uses a managed object store.
 
 ## Checks
 
-`scripts/check-deploy.sh` (CI) fetches the ECK files with `eck/fetch.sh` (and checks that it
-refuses a checksum mismatch), renders `base`, every overlay and the Job templates, validates
-all of it with kubeconform `-strict` (Kubernetes schemas plus the datreeio CRDs-catalog for the
-custom resources), validates the k3d config against k3d's schema, parses the shell scripts (and runs shellcheck when installed), and
-runs `docker compose config -q` on `deploy/compose/compose.yaml`. It needs no cluster.
+`scripts/check-deploy.sh` (CI) checks that every image (Dockerfile, compose, k3d, the rendered
+manifests, the ECK operator, the Job templates, CI's lint images) is pinned as
+`name:tag@sha256:<digest>` and that the Dockerfile's Rust is CI's `RUST_TOOLCHAIN`; fetches the
+ECK files with `eck/fetch.sh`, which keeps them only when they match `eck/SHA256SUMS` (and
+checks that it refuses a mismatch), and pins the operator image in `operator.yaml` to
+`eck/operator-image` with `eck/pin-operator.sh`, as `make eck` does; renders `base`, every
+overlay and the Job templates; validates all of it with kubeconform `-strict` (Kubernetes
+schemas plus the datreeio CRDs-catalog, at a pinned commit, for the custom resources);
+validates the k3d config against k3d's schema; parses the shell scripts (and runs shellcheck
+when installed); and runs `docker compose config -q` on `deploy/compose/compose.yaml`. It needs
+no cluster.

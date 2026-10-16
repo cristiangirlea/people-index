@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.27.1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 #
 # The people-index image: one static-ish binary on a distroless base, run as non-root.
 #
@@ -14,11 +14,15 @@
 # and the runtime is Debian 12 too, so the two always agree.
 #
 # Build: docker build -t people-index:local .   (or `make image`)
+#
+# Base images are pinned as name:tag@digest, so a rebuild gets the same bytes; Dependabot
+# (.github/dependabot.yml) bumps tag and digest together. The Rust tag is written out rather
+# than taken from an ARG because Dependabot cannot follow an ARG in FROM, and it must equal
+# RUST_TOOLCHAIN in .github/workflows/ci.yml (scripts/check-deploy.sh fails otherwise).
 
-ARG RUST_VERSION=1.98
 ARG CARGO_CHEF_VERSION=0.1.78
 
-FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS chef
 ARG CARGO_CHEF_VERSION
 RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src
@@ -41,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --package people-index --bin people-index \
     && install -D -m 0755 target/release/people-index /out/people-index
 
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
 LABEL org.opencontainers.image.title="people-index" \
       org.opencontainers.image.description="Staged, multi-node person and organization join loaded into Elasticsearch" \
       org.opencontainers.image.source="https://github.com/cristiangirlea/people-index" \

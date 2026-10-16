@@ -107,8 +107,10 @@ make k3d-down        # delete the cluster
   each run is a pair of Jobs, kept for a day after they finish (`ttlSecondsAfterFinished`).
 - `make eck` downloads `crds.yaml` and `operator.yaml` into `target/eck/` with
   `deploy/k8s/eck/fetch.sh`, checks them with `sha256sum -c` against
-  `deploy/k8s/eck/SHA256SUMS`, and applies those local files (server-side). On a mismatch it
-  keeps nothing and stops before applying; `scripts/check-deploy.sh` validates the same files.
+  `deploy/k8s/eck/SHA256SUMS`, pins the operator image to the digest in
+  `deploy/k8s/eck/operator-image` (`pin-operator.sh`, into `target/eck/operator-pinned.yaml`)
+  and applies those local files (server-side). On a mismatch it keeps nothing and stops before
+  applying; `scripts/check-deploy.sh` validates the same files, pinned the same way.
 - `make verify` renders `deploy/k8s/jobs/verify.yaml` (pod security, credentials and CA as the
   run Jobs), runs `people-index verify --expected s3://people-index/raw/expected.json --digest`
   against the alias, waits for the Job and prints its output; a failed check fails the target.

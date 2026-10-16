@@ -3,10 +3,10 @@
 mod common;
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use common::{FlakyStore, ctx, short_leases};
+use common::{FlakyStore, ctx, eventually, short_leases};
 use pi_coord::{
     AttemptId, CommitLog, CommitOutcome, CommitRecord, Lease, LeaseManager, StageName, TaskReport,
 };
@@ -128,6 +128,92 @@ async fn renewals_failing_past_the_ttl_cancel_the_holder() {
         .await
         .expect("an unreachable store cancels the holder before its lease lapses");
     failing.store(false, Ordering::SeqCst);
+}
+
+/// Waits until `counter` is back to zero: the fault it armed has fired.
+async fn fired(counter: &Arc<AtomicUsize>) -> bool {
+    eventually(Duration::from_secs(2), || {
+        let counter = Arc::clone(counter);
+        async move { counter.load(Ordering::SeqCst) == 0 }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_lost_renewal_response_does_not_cancel_the_holder() {
+    let (store, faults) = FlakyStore::with_faults();
+    let a = manager(&store, "a", 300);
+    let b = manager(&store, "b", 300);
+    let guard = a.try_claim(StageName::Join, "t").await.unwrap().unwrap();
+    let (claimed, _) = a.read(StageName::Join, "t").await.unwrap().unwrap();
+    // The next renewal lands on the store, but the holder only sees an error, so it still
+    // holds the old version and its following renewal is refused.
+    faults.lost_responses.store(1, Ordering::SeqCst);
+    assert!(fired(&faults.lost_responses).await, "a renewal ran");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!guard.is_lost(), "a lost response is not a takeover");
+    assert!(
+        b.try_claim(StageName::Join, "t").await.unwrap().is_none(),
+        "the lease is still held"
+    );
+    let (lease, _) = a.read(StageName::Join, "t").await.unwrap().unwrap();
+    assert_eq!(lease.holder, claimed.holder);
+    assert!(lease.renewals >= 3, "renewed {} times", lease.renewals);
+    // The holder renews on the version it re-read, so its release still applies.
+    guard.release().await.unwrap();
+    let (lease, _) = a.read(StageName::Join, "t").await.unwrap().unwrap();
+    assert!(lease.released);
+}
+
+#[tokio::test]
+async fn a_refused_renewal_whose_reread_fails_is_retried() {
+    let (store, faults) = FlakyStore::with_faults();
+    let a = manager(&store, "a", 300);
+    let guard = a.try_claim(StageName::Join, "t").await.unwrap().unwrap();
+    // The holder's own lease under a new version, as a renewal whose response was lost leaves
+    // it; the re-read after the refused renewal fails once.
+    let (lease, _) = a.read(StageName::Join, "t").await.unwrap().unwrap();
+    faults.failed_gets.store(1, Ordering::SeqCst);
+    store.put_json(guard.key(), &lease).await.unwrap();
+    assert!(fired(&faults.failed_gets).await, "the re-read ran");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!guard.is_lost(), "one failed re-read is one failed renewal");
+    let (now, _) = a.read(StageName::Join, "t").await.unwrap().unwrap();
+    assert_eq!(now.holder, lease.holder);
+    assert!(now.renewals > lease.renewals, "renewals went on");
+}
+
+#[tokio::test]
+async fn refusals_of_a_lease_still_ours_neither_spin_nor_outlive_it() {
+    let (store, faults) = FlakyStore::with_faults();
+    let a = manager(&store, "a", 600);
+    let guard = a.try_claim(StageName::Join, "t").await.unwrap().unwrap();
+    // Every renewal is refused while the lease stays ours: the re-read keeps adopting it.
+    faults.refused_updates.store(true, Ordering::SeqCst);
+    let before = faults.puts.load(Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(3), guard.lost_token().cancelled())
+        .await
+        .expect("the holder lets go once its lease could lapse");
+    let (lease, _) = a.read(StageName::Join, "t").await.unwrap().unwrap();
+    assert!(
+        OffsetDateTime::now_utc() < lease.expires_at,
+        "cancelled before the stored lease lapsed"
+    );
+    // About two renewal intervals passed: each refused renewal is retried at once, then waits.
+    let puts = faults.puts.load(Ordering::SeqCst) - before;
+    assert!(puts <= 6, "{puts} renewals: refusals must not spin");
+    faults.refused_updates.store(false, Ordering::SeqCst);
+}
+
+#[tokio::test]
+async fn a_holder_whose_lease_is_gone_is_cancelled() {
+    let store = Store::memory();
+    let a = manager(&store, "a", 150);
+    let guard = a.try_claim(StageName::Join, "t").await.unwrap().unwrap();
+    store.delete(guard.key()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), guard.lost_token().cancelled())
+        .await
+        .expect("a deleted lease is lost");
 }
 
 #[tokio::test]

@@ -8,10 +8,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use pi_coord::{CommitLog, CommitRecord, RunContext, StageName, permanent};
+use pi_coord::{CommitLog, CommitRecord, PartitionSize, RunContext, StageName, permanent};
 use pi_store::Dataset;
 
 use crate::plan_file::Feed;
+use crate::segments_out::partition_name;
 
 /// Cached commit lists by (run id, stage).
 type Lists = HashMap<(String, StageName), Arc<Vec<CommitRecord>>>;
@@ -77,6 +78,24 @@ pub(crate) fn partition_outputs(
     Ok(keys)
 }
 
+/// What the commits wrote to partition `partition` of `dataset`, summed over the tasks. Zero
+/// for commits that recorded no sizes.
+pub(crate) fn partition_size(
+    commits: &[CommitRecord],
+    dataset: Dataset,
+    partition: u32,
+) -> PartitionSize {
+    let name = partition_name(dataset, partition);
+    let mut total = PartitionSize::default();
+    for size in commits
+        .iter()
+        .filter_map(|c| c.report.partitions.get(&name))
+    {
+        total.add(*size);
+    }
+    total
+}
+
 /// Fails the run when the extract stage of `feed` committed more than `max` malformed lines
 /// in total. Counted from commits, so every participant sees the same number.
 pub(crate) async fn check_malformed(ctx: &RunContext, feed: Feed, max: u64) -> anyhow::Result<u64> {
@@ -138,6 +157,22 @@ mod tests {
         let c = commit(StageName::ExtractOrgs, "file-00000", &[p10, p1], 0);
         let got = partition_outputs(&ctx, &[c], StageName::ExtractOrgs, Dataset::Orgs, 1).unwrap();
         assert_eq!(got, [p1]);
+    }
+
+    #[test]
+    fn partition_sizes_are_summed_over_commits() {
+        let mut a = commit(StageName::ExtractOrgs, "file-00000", &[], 0);
+        let mut b = commit(StageName::ExtractOrgs, "file-00001", &[], 0);
+        let size = |rows, raw_bytes| PartitionSize { rows, raw_bytes };
+        a.report.partitions.insert("orgs/p=1".into(), size(2, 100));
+        a.report.partitions.insert("orgs/p=10".into(), size(7, 700));
+        b.report.partitions.insert("orgs/p=1".into(), size(3, 50));
+        b.report.partitions.insert("edges/p=1".into(), size(9, 900));
+        let commits = [a, b];
+        assert_eq!(partition_size(&commits, Dataset::Orgs, 1), size(5, 150));
+        assert_eq!(partition_size(&commits, Dataset::Orgs, 10), size(7, 700));
+        assert_eq!(partition_size(&commits, Dataset::Edges, 1), size(9, 900));
+        assert_eq!(partition_size(&commits, Dataset::Orgs, 2), size(0, 0));
     }
 
     #[tokio::test]

@@ -2,8 +2,9 @@
 //!
 //! Nothing here does I/O. The extract stages turn lines into rows with [`parse_org_line`] and
 //! [`parse_person_line`] (or quarantine a [`MalformedRecord`]); every stage routes ids with a
-//! [`Partitioner`]; `join` and `assemble` deduplicate with [`LastWins`] and group joined rows
-//! with [`JoinedGroups`]; `assemble` writes documents with [`DocumentBuilder`].
+//! [`Partitioner`]; `join` and `assemble` deduplicate with [`LastWins`], group joined rows
+//! with [`JoinedGroups`] and split a partition that exceeds the memory budget into
+//! [`Passes`]; `assemble` writes documents with [`DocumentBuilder`].
 
 mod builder;
 mod dedup;
@@ -15,6 +16,7 @@ mod joined;
 mod json;
 mod lookup;
 mod partition;
+mod pass;
 mod raw;
 mod roles;
 mod rows;
@@ -31,5 +33,6 @@ pub use id::parse_decimal_id;
 pub use joined::{JoinedGroup, JoinedGroups, NoJoins, PersonJoins};
 pub use lookup::{OrgLookup, Resolution};
 pub use partition::{PartitionError, Partitioner, partition_count};
+pub use pass::{MAX_PASSES, PASS_SEED, Passes};
 pub use rows::{DocRow, EdgeRow, JoinedRow, OrgRow, PersonRow};
 pub use seq::Seq;

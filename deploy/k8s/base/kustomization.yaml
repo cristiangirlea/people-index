@@ -42,6 +42,14 @@ configMapGenerator:
       - PI_INDEX_CODEC=best_compression
       - PI_BULK_MAX_BYTES=8388608
       - PI_SENDERS_PER_WORKER=2
+      # Per-task memory (docs/OPERATIONS.md, Sizing): about PI_TASK_MEMORY_BYTES +
+      # PI_BUFFER_BYTES + 8 x PI_SEGMENT_TARGET_BYTES + 32 MiB = 416 MiB here, which fits
+      # WORKER_MEMORY / WORKER_CONCURRENCY of the local overlay (1Gi / 2) and its 512Mi
+      # coordinator, which runs single-task stages (an extract stage with one file) itself.
+      # The production example raises all three.
+      - PI_TASK_MEMORY_BYTES=192MiB
+      - PI_BUFFER_BYTES=64MiB
+      - PI_SEGMENT_TARGET_BYTES=16MiB
       - PI_METRICS_ADDR=0.0.0.0:9464
       - PI_LOG_FORMAT=json
   - name: s3-bucket-init

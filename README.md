@@ -215,9 +215,10 @@ What has not been done or measured yet, plainly:
   numbers for any data size, on any hardware. The defaults (256 MiB partitions, 64 MiB
   segments, 8 MiB bulk requests, 2 senders per task) are reasoned starting points, not tuned
   values.
-- **Memory per worker is unmeasured.** It is bounded by configuration (partition size, buffer
-  budget, concurrency) rather than input size, but the actual peak has not been profiled. The
-  partition target counts gzipped input bytes, so a decoded partition is several times larger.
+- **Memory per worker is unmeasured.** It is bounded by configuration (task memory, buffer
+  budget, segment size, concurrency) rather than input size, with `join` and `assemble` running
+  a partition in several passes when it is estimated larger than `PI_TASK_MEMORY_BYTES`, but
+  the estimate is a model and the actual peak has not been profiled.
 - **No real cluster has run it yet.** The Kubernetes manifests pass schema validation and their
   pieces were checked against Elasticsearch and SeaweedFS containers, but ECK reconciliation,
   NetworkPolicy enforcement and a distributed run through the binary on k3d have not been

@@ -223,6 +223,35 @@ done < <(find "$work/k8s" -name '*.env.example' -print0)
 step "eck (crds.yaml, operator.yaml pinned by operator-image)"
 bash "$root/deploy/k8s/eck/pin-operator.sh" "$eck_dir/operator.yaml" >"$work/eck-operator.yaml" ||
   fail "deploy/k8s/eck/pin-operator.sh could not pin the operator image"
+# make eck applies the pinned operator, never the raw verified file.
+eck_recipe="$(awk '/^eck:/ { on = 1; next } on && !/^\t/ { exit } on' "$root/Makefile")"
+[[ "$eck_recipe" == *pin-operator.sh* && "$eck_recipe" == *"-f \$(ECK_DIR)/operator-pinned.yaml"* &&
+  "$eck_recipe" != *"-f \$(ECK_DIR)/operator.yaml"* ]] ||
+  fail "the Makefile's eck target must apply \$(ECK_DIR)/operator-pinned.yaml made by pin-operator.sh"
+# pin-operator.sh refuses, printing nothing, anything but one pinned reference that operator.yaml
+# names exactly once: a copy of it next to a crafted operator-image, run on crafted inputs.
+pin_bad="$work/pin-bad"
+mkdir -p "$pin_bad"
+cp "$root/deploy/k8s/eck/pin-operator.sh" "$pin_bad/"
+operator_ref="$(awk '!/^[[:space:]]*(#|$)/ { print $1 }' "$root/deploy/k8s/eck/operator-image")"
+operator_tag="${operator_ref%@*}"
+refuses() { # <case> <operator-image content> <operator.yaml>
+  local out rc=0
+  printf '%s\n' "$2" >"$pin_bad/operator-image"
+  out="$(bash "$pin_bad/pin-operator.sh" "$3" 2>/dev/null)" || rc=$?
+  [[ "$rc" -eq 1 && -z "$out" ]] || fail "pin-operator.sh accepted $1 (exit $rc)"
+}
+refuses "an unpinned reference" "$operator_tag" "$eck_dir/operator.yaml"
+refuses "two references" "$operator_ref"$'\n'"$operator_ref" "$eck_dir/operator.yaml"
+refuses "another tag" "${operator_tag%:*}:0.0.0@${operator_ref#*@}" "$eck_dir/operator.yaml"
+grep -v -F "$operator_tag" "$eck_dir/operator.yaml" >"$pin_bad/none.yaml"
+refuses "an operator.yaml without the image" "$operator_ref" "$pin_bad/none.yaml"
+{
+  cat "$eck_dir/operator.yaml"
+  grep -F "$operator_tag" "$eck_dir/operator.yaml"
+} >"$pin_bad/twice.yaml"
+refuses "an operator.yaml naming the image twice" "$operator_ref" "$pin_bad/twice.yaml"
+step "make eck applies the pinned operator; pin-operator.sh refuses bad input"
 {
   cat "$eck_dir/crds.yaml"
   printf '\n---\n'

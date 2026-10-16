@@ -37,7 +37,7 @@ k3d image import people-index:local -c people-index
 
 deploy/k8s/gen-secrets.sh local
 deploy/k8s/eck/fetch.sh target/eck      # fails, keeping nothing, on a checksum mismatch
-deploy/k8s/eck/pin-operator.sh target/eck/operator.yaml >target/eck/operator-pinned.yaml
+bash deploy/k8s/eck/pin-operator.sh target/eck/operator.yaml >target/eck/operator-pinned.yaml
 kubectl --context k3d-people-index apply --server-side -f target/eck/crds.yaml -f target/eck/operator-pinned.yaml
 kubectl --context k3d-people-index -n elastic-system rollout status statefulset/elastic-operator
 kubectl --context k3d-people-index apply --server-side -k deploy/k8s/overlays/local

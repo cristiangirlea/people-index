@@ -154,7 +154,8 @@ The workspace:
 Inputs are gzipped NDJSON, one envelope per line:
 `{"id": <u64 or decimal string>, "updated_at": ..., "record": {...}}`. Organization records
 carry name, domain, industry, location, size, keywords and funding; person records carry
-profile fields, skills and `roles[]`, each role with an `organization_id` that may be null.
+profile fields, skills and `roles[]`, each role with an `organization_id` (u64, decimal
+string or null).
 Unknown fields pass through untouched. Lines that do not parse, or whose `id` or `record` is
 invalid, are quarantined with file, line and reason; a run fails only past `PI_MAX_MALFORMED`
 per feed.

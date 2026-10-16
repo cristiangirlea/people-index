@@ -33,8 +33,11 @@ whitespace-only line, a duplicate `id` or `record` key in the envelope, and a li
 `city`, `industry`, `profile_url`, `skills[]`, `connections`, `followers`, `open_to_work`,
 `roles[]`, `memberships[]`, `educations[]`, `certifications[]`, `languages[]`.
 A role is `{id, title, organization_id, organization_name, organization_domain,
-employment_type, start_date, end_date, location, description}`; `organization_id` is a JSON
-number or null (never a string).
+employment_type, start_date, end_date, location, description}`; `organization_id` absent or
+null means no organization, otherwise it follows the envelope `id` rule (a non-negative 64-bit
+integer, or a string of decimal digits that is one; `"7"` and `7` are the same organization).
+`roles` absent or null means no roles. A `roles` that is neither an array nor null, a role that
+is not an object, or any other `organization_id` makes the line malformed (kind `record`).
 
 Unknown fields are carried through untouched (the record is kept as raw JSON; only the fields
 the join needs are parsed).

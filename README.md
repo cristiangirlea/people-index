@@ -102,11 +102,11 @@ make image image-import
 make deploy-local   # credentials, Elasticsearch, SeaweedFS, network policies; waits for green
 make datagen        # Job: synthetic feeds into s3://people-index/raw/
 make run            # coordinator Job + worker Job; waits until the run publishes
+make verify         # Job: acceptance queries and content digest against the alias
 make k3d-down
 ```
 
 Every kubectl call passes `--context k3d-people-index`; nothing acts on your current context.
-`make verify` on k3d is not wired up yet (see [Limitations](#limitations)).
 
 **Without Docker**, the offline stages run on a local directory, which is a quick way to look at
 the intermediate data:
@@ -223,7 +223,6 @@ What has not been done or measured yet, plainly:
   NetworkPolicy enforcement and a distributed run through the binary on k3d have not been
   exercised. The compose infrastructure has been started; the full compose run has not been
   completed against the finished binary.
-- **`make verify` on k3d** needs a `verify` Job template that does not exist yet.
 - **One coordinator per run** is assumed (the Kubernetes Job and compose guarantee it); there
   is no coordinator lease.
 - **Leases depend on clocks**: expiry is wall-clock time plus a skew allowance (5 s). Large

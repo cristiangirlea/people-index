@@ -10,13 +10,13 @@ the stages, the storage layout and the `PI_*` settings used here.
 | path | what it holds |
 |---|---|
 | `../k3d/cluster.yaml` | a local cluster: 1 server (control plane only) + 3 agents in zones `zone-a`, `zone-b`, `zone-c` |
-| `eck/` | the ECK 3.5.0 operator and CRDs from Elastic's release URLs, pinned by `SHA256SUMS` |
+| `eck/` | `fetch.sh`: downloads the ECK 3.5.0 operator and CRDs from Elastic's release URLs and keeps them only when they match `SHA256SUMS` |
 | `base/` | namespace, Elasticsearch (`es`: 3 masters, 3 data nodes), SeaweedFS (`s3:8333`) and its bucket Job, the pipeline ServiceAccount, the `people-index-config` ConfigMap, NetworkPolicies |
 | `components/snapshots/` | S3 snapshot repository `people-index` (prefix `snapshots/`) and the SLM policy `nightly` |
 | `components/monitoring/` | elasticsearch-exporter, ServiceMonitors, a PodMonitor for the pipeline's `:9464`, alert rules; needs the prometheus-operator CRDs |
 | `overlays/local/` | k3d sizing (about 7.5 GiB for Elasticsearch), snapshots, `imagePullPolicy: Never` for `people-index:local` |
 | `overlays/production-example/` | 6 data nodes, external S3 instead of SeaweedFS, monitoring and snapshots, sizing notes |
-| `jobs/` | `run.yaml` (coordinator + workers) and `datagen.yaml`, rendered by `render.sh` from an overlay's `jobs.vars` |
+| `jobs/` | `run.yaml` (coordinator + workers), `datagen.yaml` and `verify.yaml`, rendered by `render.sh` from an overlay's `jobs.vars` |
 | `gen-secrets.sh` | writes an overlay's git-ignored credential env files from its `*.env.example` |
 
 Names other parts rely on: namespace `people-index`; Elasticsearch HTTP service `es-es-http:9200`
@@ -36,7 +36,8 @@ docker build -t people-index:local .
 k3d image import people-index:local -c people-index
 
 deploy/k8s/gen-secrets.sh local
-kubectl --context k3d-people-index apply --server-side -k deploy/k8s/eck
+deploy/k8s/eck/fetch.sh target/eck      # fails, keeping nothing, on a checksum mismatch
+kubectl --context k3d-people-index apply --server-side -f target/eck/crds.yaml -f target/eck/operator.yaml
 kubectl --context k3d-people-index -n elastic-system rollout status statefulset/elastic-operator
 kubectl --context k3d-people-index apply --server-side -k deploy/k8s/overlays/local
 kubectl --context k3d-people-index -n people-index wait elasticsearch/es \
@@ -53,6 +54,9 @@ deploy/k8s/jobs/render.sh datagen | kubectl --context k3d-people-index apply -f 
 RUN_ID=demo-1 deploy/k8s/jobs/render.sh run | kubectl --context k3d-people-index apply -f -
 kubectl --context k3d-people-index -n people-index wait job/pi-run-demo-1 --for=condition=complete --timeout=2h
 kubectl --context k3d-people-index -n people-index logs -f job/pi-run-demo-1
+JOB_ID=demo-1 deploy/k8s/jobs/render.sh verify | kubectl --context k3d-people-index apply -f -
+kubectl --context k3d-people-index -n people-index wait job/pi-verify-demo-1 --for=condition=complete --timeout=30m
+kubectl --context k3d-people-index -n people-index logs job/pi-verify-demo-1
 ```
 
 `render.sh` reads `overlays/<overlay>/jobs.vars` (default overlay `local`); any variable in the
@@ -116,8 +120,8 @@ index) can be recreated, and production uses a managed object store.
 
 ## Checks
 
-`scripts/check-deploy.sh` (CI) verifies the ECK files against `eck/SHA256SUMS`, renders `eck`,
-`base`, every overlay and the Job templates, validates all of it with kubeconform `-strict`
-(Kubernetes schemas plus the datreeio CRDs-catalog for the custom resources), validates the k3d
-config against k3d's schema, parses the shell scripts (and runs shellcheck when installed), and
+`scripts/check-deploy.sh` (CI) fetches the ECK files with `eck/fetch.sh` (and checks that it
+refuses a checksum mismatch), renders `base`, every overlay and the Job templates, validates
+all of it with kubeconform `-strict` (Kubernetes schemas plus the datreeio CRDs-catalog for the
+custom resources), validates the k3d config against k3d's schema, parses the shell scripts (and runs shellcheck when installed), and
 runs `docker compose config -q` on `deploy/compose/compose.yaml`. It needs no cluster.

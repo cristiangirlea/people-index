@@ -1,7 +1,7 @@
 # The local k3d cluster (deploy/k3d/cluster.yaml): the full topology at laptop size.
 #
 #   deploy/k8s/gen-secrets.sh local       # once: random credentials in git-ignored env files
-#   kubectl --context k3d-people-index apply --server-side -k deploy/k8s/eck
+#   make eck                              # ECK CRDs and operator, checked against eck/SHA256SUMS
 #   kubectl --context k3d-people-index apply --server-side -k deploy/k8s/overlays/local
 #
 # Elasticsearch: 3 masters (512 MiB heap) and 3 data nodes (768 MiB heap), one of each per

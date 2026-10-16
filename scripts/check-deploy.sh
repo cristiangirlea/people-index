@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Validates the deployment without a cluster:
-#   - the ECK release files still match deploy/k8s/eck/SHA256SUMS;
-#   - deploy/k8s/eck, base and every overlay render with kustomize, and every object passes
-#     kubeconform -strict against the Kubernetes schemas and, for custom resources (ECK,
+#   - the ECK release files, fetched by deploy/k8s/eck/fetch.sh (what `make eck` applies),
+#     still match deploy/k8s/eck/SHA256SUMS, and fetch.sh refuses files that do not;
+#   - those ECK files, base and every overlay (rendered with kustomize) pass kubeconform
+#     -strict against the Kubernetes schemas and, for custom resources (ECK,
 #     prometheus-operator), the datreeio CRDs-catalog schemas;
-#   - the run and datagen Job templates render for every overlay and pass the same check;
+#   - the run, datagen and verify Job templates render for every overlay and pass the same
+#     check;
 #   - deploy/k3d/cluster.yaml passes k3d's own config schema;
 #   - the shell scripts parse (and pass shellcheck when it is installed);
 #   - deploy/compose/compose.yaml, when present, passes `docker compose config -q`.
@@ -120,13 +122,26 @@ validate() {
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# 1. The ECK release files are what SHA256SUMS says.
-while read -r want url; do
-  [[ -z "$want" ]] && continue
-  curl -fsSL --retry 3 -m 120 -o "$work/eck-file" "$url"
-  [[ "$(sha256 "$work/eck-file")" == "$want" ]] || fail "$url does not match deploy/k8s/eck/SHA256SUMS"
-done <"$root/deploy/k8s/eck/SHA256SUMS"
+# 1. The ECK release files are what SHA256SUMS says, fetched the way `make eck` fetches them;
+# and fetch.sh keeps nothing when a checksum does not match: a copy of it with one checksum
+# changed, run on a directory that already holds the files (the reuse path `make eck` takes
+# when target/eck exists), must exit 1 (a mismatch, not a download error) and leave no file.
+eck_dir="$cache/eck"
+bash "$root/deploy/k8s/eck/fetch.sh" "$eck_dir" || fail "ECK release files do not match deploy/k8s/eck/SHA256SUMS"
 step "ECK release files match SHA256SUMS"
+mkdir -p "$work/eck-bad"
+cp "$root/deploy/k8s/eck/fetch.sh" "$work/eck-bad/"
+awk 'NR == 1 { c = substr($0, 1, 1); $0 = (c == "0" ? "1" : "0") substr($0, 2) } { print }' \
+  "$root/deploy/k8s/eck/SHA256SUMS" >"$work/eck-bad/SHA256SUMS"
+mkdir -p "$work/eck-bad/out"
+cp "$eck_dir"/*.yaml "$work/eck-bad/out/"
+rc=0
+bash "$work/eck-bad/fetch.sh" "$work/eck-bad/out" >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 1 ]] ||
+  fail "deploy/k8s/eck/fetch.sh exited $rc on a file that does not match SHA256SUMS (want 1)"
+[[ -z "$(find "$work/eck-bad/out" -name '*.yaml' 2>/dev/null)" ]] ||
+  fail "deploy/k8s/eck/fetch.sh left unverified files behind"
+step "fetch.sh refuses a checksum mismatch"
 
 # 2. A copy of deploy/k8s with example credentials in place of the git-ignored env files.
 cp -R "$root/deploy/k8s" "$work/k8s"
@@ -134,14 +149,22 @@ while IFS= read -r -d '' example; do
   [[ -e "${example%.example}" ]] || cp "$example" "${example%.example}"
 done < <(find "$work/k8s" -name '*.env.example' -print0)
 
-# 3. Every kustomization renders and validates.
+# 3. The verified ECK files, and every kustomization, render and validate.
+step "eck (crds.yaml, operator.yaml)"
+{
+  cat "$eck_dir/crds.yaml"
+  printf '
+---
+'
+  cat "$eck_dir/operator.yaml"
+} | validate || fail "the ECK files do not validate"
 overlays=()
 for dir in "$work"/k8s/overlays/*/; do
   dir="${dir%/}"
   overlays+=("overlays/${dir##*/}")
 done
 [[ -d "${work}/k8s/${overlays[0]:-none}" ]] || fail "no overlays under deploy/k8s/overlays"
-for dir in eck base "${overlays[@]}"; do
+for dir in base "${overlays[@]}"; do
   [[ -f "$work/k8s/$dir/kustomization.yaml" ]] || fail "deploy/k8s/$dir has no kustomization.yaml"
   step "kustomize $dir"
   kustomize_build "$work/k8s/$dir" >"$work/rendered.yaml" || fail "kustomize failed for deploy/k8s/$dir"
@@ -151,7 +174,7 @@ done
 # 4. The Job templates render for every overlay and validate.
 for vars in "$work"/k8s/overlays/*/jobs.vars; do
   overlay="$(basename "$(dirname "$vars")")"
-  for kind in run datagen; do
+  for kind in run datagen verify; do
     step "jobs/$kind for $overlay"
     RUN_ID=check JOB_ID=check bash "$work/k8s/jobs/render.sh" "$kind" --overlay "$overlay" 2>/dev/null |
       validate || fail "jobs/$kind does not render or validate for $overlay"
@@ -174,6 +197,7 @@ step "deploy/k3d/cluster.yaml"
 scripts=(
   "$root/scripts/check-deploy.sh"
   "$root/deploy/k8s/gen-secrets.sh"
+  "$root/deploy/k8s/eck/fetch.sh"
   "$root/deploy/k8s/jobs/render.sh"
   "$root/deploy/k8s/base/s3/bucket-init.sh"
   "$root/deploy/k8s/components/snapshots/bootstrap.sh"

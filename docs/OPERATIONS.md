@@ -84,13 +84,13 @@ Prerequisites: Docker, [k3d](https://k3d.io) 5, kubectl, GNU make, bash. Every t
 
 ```bash
 make k3d-up          # cluster "people-index": 1 server + 3 agents, zones zone-a/b/c
-make eck             # ECK 3.5.0 CRDs and operator (checksums verified in CI)
+make eck             # ECK 3.5.0 CRDs and operator: downloaded, checked against SHA256SUMS, applied
 make image           # build people-index:local
 make image-import    # load it into every k3d node (imagePullPolicy: Never)
 make deploy-local    # credentials if missing, then Elasticsearch, store, RBAC, config; waits for green
 make datagen         # Job pi-datagen-<id>: feeds into s3://people-index/raw/
 make run             # Jobs pi-run-<id> + pi-worker-<id>; waits until the coordinator completes
-make verify          # acceptance queries and digest, as a Job (not yet: see below)
+make verify          # Job pi-verify-<id>: acceptance queries and digest against the alias
 make k3d-down        # delete the cluster
 ```
 
@@ -105,9 +105,14 @@ make k3d-down        # delete the cluster
   `make worker-logs RUN_ID=<id>` shows every worker.
 - Persistent things (Elasticsearch, the store, RBAC, config) are applied once with kustomize;
   each run is a pair of Jobs, kept for a day after they finish (`ttlSecondsAfterFinished`).
-- `make verify` renders a `verify` Job, but `deploy/k8s/jobs/render.sh` has no `verify` kind
-  and there is no `verify.yaml` template yet, so the target fails on k3d today. Until it exists,
-  run `people-index verify` from a pod that has the pipeline's environment and credentials.
+- `make eck` downloads `crds.yaml` and `operator.yaml` into `target/eck/` with
+  `deploy/k8s/eck/fetch.sh`, checks them with `sha256sum -c` against
+  `deploy/k8s/eck/SHA256SUMS`, and applies those local files (server-side). On a mismatch it
+  keeps nothing and stops before applying; `scripts/check-deploy.sh` validates the same files.
+- `make verify` renders `deploy/k8s/jobs/verify.yaml` (pod security, credentials and CA as the
+  run Jobs), runs `people-index verify --expected s3://people-index/raw/expected.json --digest`
+  against the alias, waits for the Job and prints its output; a failed check fails the target.
+  Size it with `VERIFY_CPU`, `VERIFY_MEMORY` and `VERIFY_DEADLINE_SECONDS` in `jobs.vars`.
 
 ## Scaling
 

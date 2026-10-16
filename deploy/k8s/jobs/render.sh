@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Renders a run (coordinator + worker Jobs) or a datagen Job from the templates beside this
-# script, for `kubectl apply -f -`.
+# Renders a run (coordinator + worker Jobs), a datagen Job or a verify Job from the templates
+# beside this script, for `kubectl apply -f -`.
 #
 #   deploy/k8s/jobs/render.sh run     [--overlay local]   > run.yaml
 #   deploy/k8s/jobs/render.sh datagen [--overlay local]   > datagen.yaml
+#   deploy/k8s/jobs/render.sh verify  [--overlay local]   > verify.yaml
 #
 # Values come from deploy/k8s/overlays/<overlay>/jobs.vars (KEY=value lines; read as data,
 # never executed), and an environment variable of the same name wins:
 #   RUN_ID=nightly-01 WORKERS=6 deploy/k8s/jobs/render.sh run | kubectl --context k3d-people-index apply -f -
-# RUN_ID (run) and JOB_ID (datagen) default to the UTC time plus a random suffix.
+# RUN_ID (run) and JOB_ID (datagen, verify) default to the UTC time plus a random suffix.
 #
 # Every value is checked against a strict pattern before it is substituted, so nothing a caller
 # passes can add YAML structure, and the output is refused if any ${...} is left.
@@ -16,12 +17,12 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
-  echo "usage: $0 run|datagen [--overlay <name>]" >&2
+  echo "usage: $0 run|datagen|verify [--overlay <name>]" >&2
   exit 2
 }
 
 kind="${1:-}"
-[[ "$kind" == run || "$kind" == datagen ]] || usage
+[[ "$kind" == run || "$kind" == datagen || "$kind" == verify ]] || usage
 shift
 overlay="${OVERLAY:-local}"
 while [[ $# -gt 0 ]]; do
@@ -42,9 +43,11 @@ if [[ "$kind" == run ]]; then
   names=(RUN_ID IMAGE IMAGE_PULL_POLICY WORKERS WORKER_BACKOFF_LIMIT WORKER_CONCURRENCY
     WORKER_CPU WORKER_MEMORY COORDINATOR_CONCURRENCY COORDINATOR_CPU COORDINATOR_MEMORY
     RUN_DEADLINE_SECONDS TMP_SIZE)
-else
+elif [[ "$kind" == datagen ]]; then
   names=(JOB_ID IMAGE IMAGE_PULL_POLICY PERSONS ORGANIZATIONS FILES SEED DATAGEN_CPU
     DATAGEN_MEMORY DATAGEN_DEADLINE_SECONDS TMP_SIZE)
+else
+  names=(JOB_ID IMAGE IMAGE_PULL_POLICY VERIFY_CPU VERIFY_MEMORY VERIFY_DEADLINE_SECONDS)
 fi
 
 declare -A value
@@ -66,7 +69,7 @@ generated_id() {
   printf '%s-%s' "$(date -u +%Y%m%d-%H%M%S)" "$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 }
 if [[ "$kind" == run && -z "${value[RUN_ID]:-}" ]]; then value[RUN_ID]="$(generated_id)"; fi
-if [[ "$kind" == datagen && -z "${value[JOB_ID]:-}" ]]; then value[JOB_ID]="$(generated_id)"; fi
+if [[ "$kind" != run && -z "${value[JOB_ID]:-}" ]]; then value[JOB_ID]="$(generated_id)"; fi
 
 # Patterns per value. Ids become part of Job names (at most 63 characters with the `pi-worker-`
 # prefix) and label values, so they are DNS labels of at most 40 characters.
@@ -110,5 +113,5 @@ printf '%s\n' "$out"
 if [[ "$kind" == run ]]; then
   echo "render: run id ${value[RUN_ID]}" >&2
 else
-  echo "render: datagen job ${value[JOB_ID]}" >&2
+  echo "render: $kind job ${value[JOB_ID]}" >&2
 fi

@@ -58,6 +58,8 @@ pinned by a known test value, because two components that disagree on it lose ro
   `p`. The join holds organizations and streams edges, so that costs streaming time in one
   task, not memory. On the person side, a person's joined rows are bounded by their roles.
 - **The partition target counts gzipped bytes**, so a decoded partition is several times the
-  target; the target is a knob to lower when workers approach their memory limit.
+  target. `join` and `assemble` do not rely on it for memory: a partition estimated larger
+  than `PI_TASK_MEMORY_BYTES` runs in several passes (a grace hash join keyed by a second hash
+  of the id), each holding one share of it, at the cost of re-reading the partition per pass.
 - **More stages and more intermediate data** than a single-node join, which
   [ADR 0005](0005-staged-intermediate-data.md) accepts for retries and scaling.

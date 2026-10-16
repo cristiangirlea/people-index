@@ -14,21 +14,18 @@ use pi_coord::{
 use pi_es::{BulkIndexer, BulkStats, EsClient};
 use pi_model::DocRow;
 use pi_store::Dataset;
-use tokio::sync::mpsc;
 
 use crate::channel::{Inbox, input_channel};
 use crate::commits::{CommitCache, partition_outputs};
 use crate::config::StagesConfig;
 use crate::counters;
+use crate::doc_channel::{DocSender, doc_channel};
 use crate::es_error::es_error;
 use crate::feeder::feed_objects;
 use crate::join::{PREFETCH, next_object, partition_tasks, task_partition};
 use crate::pipeline::run_blocking;
 use crate::plan_file::Plan;
 use crate::segments_in::for_each_row;
-
-/// Decoded documents waiting for the bulk indexer.
-const DOC_BUFFER: usize = 1024;
 
 /// The `load` stage: one task per document partition.
 #[derive(Debug, Clone)]
@@ -54,7 +51,7 @@ impl LoadStage {
 /// Decodes document segments on the blocking side and hands the rows to the async side.
 fn decode_documents(
     mut inbox: Inbox<(String, Bytes)>,
-    docs: &mpsc::Sender<DocRow>,
+    docs: &DocSender,
     cancel: &CancellationToken,
 ) -> anyhow::Result<u64> {
     let mut n = 0;
@@ -62,10 +59,7 @@ fn decode_documents(
         if cancel.is_cancelled() {
             return Err(anyhow::Error::new(Cancelled));
         }
-        n += for_each_row::<DocRow, _>(&key, bytes, |doc| {
-            docs.blocking_send(doc)
-                .map_err(|_| anyhow::anyhow!("the bulk indexer stopped"))
-        })?;
+        n += for_each_row::<DocRow, _>(&key, bytes, |doc| docs.send_blocking(doc))?;
     }
     Ok(n)
 }
@@ -103,16 +97,19 @@ impl Stage for LoadStage {
             .map_err(|e| es_error(e, "starting the bulk indexer"))?;
         let read = Arc::new(AtomicU64::new(0));
         let (feed_tx, inbox) = input_channel(1);
-        let (doc_tx, mut doc_rx) = mpsc::channel::<DocRow>(DOC_BUFFER);
+        // Decoded documents wait for the indexer within a byte budget, not a count.
+        let (doc_tx, mut doc_rx) = doc_channel(self.config.effective_load_buffer_bytes());
         let cancel = ctx.cancel.clone();
         let decoding = run_blocking(move || decode_documents(inbox, &doc_tx, &cancel));
         let sending = async move {
             let mut sent = 0u64;
-            while let Some(doc) = doc_rx.recv().await {
+            while let Some(item) = doc_rx.recv().await {
                 indexer
-                    .add(doc.person_id, &doc.body)
+                    .add(item.doc.person_id, &item.doc.body)
                     .await
                     .map_err(|e| es_error(e, &format!("indexing into {}", plan.index)))?;
+                // The body is in the bulk buffer now: give its share of the budget back.
+                drop(item);
                 sent += 1;
             }
             let stats = indexer

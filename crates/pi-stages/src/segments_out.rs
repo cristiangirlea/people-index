@@ -1,10 +1,11 @@
 //! Writing rows as segments: [`RollingUpload`] for one partition, [`PartitionedWriter`] for
 //! many. Both run on the blocking side and hand finished segments to the uploader.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use pi_coord::StageName;
+use pi_coord::{PartitionSize, StageName};
 use pi_segment::{MemorySink, SegmentConfig, SegmentWriter};
 use pi_store::{Dataset, RunLayout};
 use serde::Serialize;
@@ -38,6 +39,11 @@ impl SegmentNamer {
         }
     }
 
+    /// The name of `partition` in a report's per-partition sizes.
+    pub(crate) fn partition_name(&self, partition: u32) -> String {
+        partition_name(self.dataset, partition)
+    }
+
     /// The key of segment `n` of `partition`.
     pub(crate) fn key(&self, partition: u32, n: u32) -> anyhow::Result<String> {
         Ok(self.layout.segment(
@@ -51,8 +57,18 @@ impl SegmentNamer {
     }
 }
 
+/// The name of a partition of `dataset` in [`pi_coord::TaskReport::partitions`]: its
+/// directory below the stage's data prefix, `orgs/p=3`.
+pub(crate) fn partition_name(dataset: Dataset, partition: u32) -> String {
+    format!(
+        "{}/{}={partition}",
+        dataset.as_str(),
+        dataset.partition_key()
+    )
+}
+
 /// What a writer wrote.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Written {
     pub(crate) segments: u64,
     pub(crate) records: u64,
@@ -60,6 +76,8 @@ pub(crate) struct Written {
     pub(crate) raw_bytes: u64,
     /// Segment bytes.
     pub(crate) bytes: u64,
+    /// Rows and encoded bytes per partition written to, by [`partition_name`].
+    pub(crate) partitions: BTreeMap<String, PartitionSize>,
 }
 
 impl Written {
@@ -68,6 +86,9 @@ impl Written {
         self.records += other.records;
         self.raw_bytes += other.raw_bytes;
         self.bytes += other.bytes;
+        for (name, size) in other.partitions {
+            self.partitions.entry(name).or_default().add(size);
+        }
     }
 }
 
@@ -120,11 +141,22 @@ impl<T: Serialize> RollingUpload<T> {
             let key = namer.key(partition, first_segment + done.index)?;
             outbox.send_blocking(key, done.bytes)?;
         }
+        let mut partitions = BTreeMap::new();
+        if totals.records > 0 {
+            partitions.insert(
+                namer.partition_name(partition),
+                PartitionSize {
+                    rows: totals.records,
+                    raw_bytes: totals.raw_bytes,
+                },
+            );
+        }
         Ok(Written {
             segments: u64::from(totals.segments),
             records: totals.records,
             raw_bytes: totals.raw_bytes,
             bytes: totals.bytes,
+            partitions,
         })
     }
 
@@ -263,6 +295,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(written.records, 100);
+        // Per-partition sizes, summed over every flush, add up to the totals.
+        assert_eq!(
+            written.partitions.keys().collect::<Vec<_>>(),
+            ["joined/q=0", "joined/q=1", "joined/q=2", "joined/q=3"]
+        );
+        assert!(written.partitions.values().all(|s| s.rows == 25));
+        assert_eq!(
+            written
+                .partitions
+                .values()
+                .map(|s| s.raw_bytes)
+                .sum::<u64>(),
+            written.raw_bytes
+        );
         let mut per_partition = std::collections::BTreeMap::<String, Vec<u64>>::new();
         let mut keys = Vec::new();
         while let Some(up) = rx.recv().await {

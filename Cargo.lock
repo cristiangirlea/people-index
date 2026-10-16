@@ -1612,6 +1612,7 @@ dependencies = [
  "futures",
  "memchr",
  "metrics",
+ "pi-model",
  "rand 0.10.3",
  "reqwest",
  "serde",

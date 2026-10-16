@@ -1,5 +1,6 @@
-//! `publish`: restores serving settings, checks the count, moves the alias, writes
-//! `summary.json` and removes the files of attempts that never committed.
+//! `publish`: restores serving settings, checks the count, records the indexes the alias
+//! serves in `publish.json`, moves the alias, deletes those indexes, writes `summary.json` and
+//! removes the files of attempts that never committed.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -7,7 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_coord::{AttemptId, CommitLog, RunContext, Stage, StageName, TaskReport, TaskSpec};
-use pi_es::{EsClient, IndexAdmin, PublishSpec, Publisher, ServingSettings};
+use pi_es::{EsClient, EsError, IndexAdmin, PublishSpec, Publisher, ServingSettings};
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::time::Instant;
 
@@ -27,6 +29,46 @@ const DATA_STAGES: [StageName; 4] = [
     StageName::Join,
     StageName::Assemble,
 ];
+
+/// The content of `runs/<id>/publish.json`: what the alias served before this run's index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishRecord {
+    /// The alias.
+    pub alias: String,
+    /// The run's index.
+    pub index: String,
+    /// The indexes the alias pointed at when the first attempt was about to move it.
+    pub previous: Vec<String>,
+}
+
+/// Records `on_alias` as the indexes to delete after the swap, create-if-absent. When an
+/// earlier attempt recorded them already, its list wins: the alias may have moved since, and
+/// then only the record knows what it served before.
+async fn record_previous(
+    ctx: &RunContext,
+    alias: &str,
+    index: &str,
+    on_alias: Vec<String>,
+) -> anyhow::Result<Vec<String>> {
+    let key = ctx.layout.publish_record();
+    let record = PublishRecord {
+        alias: alias.to_owned(),
+        index: index.to_owned(),
+        previous: on_alias,
+    };
+    if ctx
+        .store
+        .put_json_create_if_absent(&key, &record)
+        .await?
+        .is_created()
+    {
+        return Ok(record.previous);
+    }
+    match ctx.store.get_json::<PublishRecord>(&key).await? {
+        Some((earlier, _)) => Ok(earlier.previous),
+        None => anyhow::bail!("{key} existed and then did not"),
+    }
+}
 
 /// The `publish` stage: one task per run.
 #[derive(Debug, Clone)]
@@ -112,8 +154,9 @@ impl Stage for PublishStage {
         Ok(vec![TaskSpec::single(StageName::Publish)])
     }
 
-    /// Idempotent: publishing an index the alias already points at changes nothing, and the
-    /// summary is rewritten with the same content (and a later `finished_at`).
+    /// Idempotent: publishing an index the alias already points at changes nothing, an attempt
+    /// that resumes after the alias moved still deletes the indexes `publish.json` recorded,
+    /// and the summary is rewritten with the same content (and a later `finished_at`).
     async fn run(
         &self,
         ctx: &RunContext,
@@ -137,7 +180,11 @@ impl Stage for PublishStage {
         spec.wait_for = es.wait_for;
         spec.health_timeout = es.health_timeout;
         let published = Publisher::new(IndexAdmin::new(self.client.clone()))
-            .publish(&spec)
+            .publish_recording(&spec, |on_alias| async {
+                record_previous(ctx, &plan.alias, &plan.index, on_alias)
+                    .await
+                    .map_err(|e| EsError::Record(format!("{e:#}")))
+            })
             .await
             .map_err(|e| es_error(e, &format!("publishing {} as {}", plan.index, plan.alias)))?;
         tracing::info!(alias = %plan.alias, index = %plan.index, documents, "published");
@@ -185,5 +232,41 @@ impl Stage for PublishStage {
         report.add("orphans_deleted", orphans_deleted);
         report.add("orphans_left", orphans_left);
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pi_store::Store;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn the_first_record_wins() {
+        let ctx = RunContext::new("run-r", Store::memory()).unwrap();
+        let first = record_previous(&ctx, "persons", "persons-run-r", vec!["persons-old".into()])
+            .await
+            .unwrap();
+        assert_eq!(first, ["persons-old"]);
+        // A resumed attempt sees the alias on its own index already: the record still names
+        // what it served before.
+        let again = record_previous(&ctx, "persons", "persons-run-r", Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(again, ["persons-old"]);
+        let (stored, _) = ctx
+            .store
+            .get_json::<PublishRecord>(&ctx.layout.publish_record())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored,
+            PublishRecord {
+                alias: "persons".into(),
+                index: "persons-run-r".into(),
+                previous: vec!["persons-old".into()],
+            }
+        );
     }
 }

@@ -108,6 +108,10 @@ spec:
           ports:
             - name: metrics
               containerPort: 9464
+          # The coordinator runs every stage of one task or fewer itself, an extract stage with
+          # one input file included, one task at a time: the limit must hold one task as the
+          # ConfigMap sizes it (PI_TASK_MEMORY_BYTES, PI_BUFFER_BYTES, PI_SEGMENT_TARGET_BYTES;
+          # docs/OPERATIONS.md, Sizing).
           resources:
             requests:
               cpu: "${COORDINATOR_CPU}"
@@ -256,8 +260,9 @@ spec:
           ports:
             - name: metrics
               containerPort: 9464
-          # Memory is bounded by configuration (partition and segment sizes, bulk bytes) times
-          # PI_CONCURRENCY, never by the input size, so the limit is set once per worker shape.
+          # Memory is bounded by configuration (PI_TASK_MEMORY_BYTES, PI_BUFFER_BYTES, segment
+          # and bulk sizes) times PI_CONCURRENCY, never by the input size, so the limit is set
+          # once per worker shape (docs/OPERATIONS.md, Sizing).
           resources:
             requests:
               cpu: "${WORKER_CPU}"

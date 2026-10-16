@@ -13,10 +13,20 @@
 //! Leases keep work from being done twice; they are not what makes the result correct. The
 //! commit is: outputs carry the attempt id and only the first commit counts, so a worker that
 //! keeps running past a lost lease wastes time but cannot corrupt the run.
+//!
+//! A polling worker asks [`LeaseManager::live_task_ids`] which tasks someone else holds before
+//! it tries to claim any: one listing of `_lease/`, plus a read of each lease whose version
+//! changed since the last poll (a [`LeaseCache`] remembers the rest), so a live lease costs no
+//! request on most polls instead of a create and a read on every one.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use pi_store::{CreateOutcome, ObjectVersion, RunLayout, Store, StoreError, StoreResult};
+use futures::{StreamExt, TryStreamExt};
+use pi_store::{
+    CreateOutcome, ObjectInfo, ObjectVersion, RunLayout, Store, StoreError, StoreResult,
+};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
@@ -25,6 +35,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::stage_name::StageName;
+
+/// Lease bodies read at once when a poll finds many changed leases.
+const READ_CONCURRENCY: usize = 32;
 
 /// Lease timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +107,50 @@ fn add(t: OffsetDateTime, d: Duration) -> OffsetDateTime {
     t.saturating_add(time::Duration::try_from(d).unwrap_or(time::Duration::MAX))
 }
 
+/// The leases a poller has read, by key, with the version each body came with: a lease whose
+/// listed version is unchanged is not read again. Clones share the cache.
+///
+/// Only the leases of the last listing are kept, so it holds at most one stage's tasks.
+#[derive(Clone, Default)]
+pub struct LeaseCache {
+    seen: Arc<Mutex<HashMap<String, SeenLease>>>,
+}
+
+impl std::fmt::Debug for LeaseCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeaseCache")
+            .field("leases", &self.lock().len())
+            .finish()
+    }
+}
+
+impl LeaseCache {
+    // A poisoned lock only means another poller panicked mid-update; every entry is still a
+    // consistent (version, body) pair, and a stale one is only a missed skip or an extra read.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, SeenLease>> {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// One lease as last read.
+#[derive(Debug, Clone)]
+struct SeenLease {
+    version: ObjectVersion,
+    /// `None` when the body was unreadable (`try_claim` overwrites such a lease).
+    lease: Option<Lease>,
+}
+
+/// True when a listed version names the same object as the one a body was read with. S3
+/// listings carry the etag but not the version id, so the etag decides when there is one; a
+/// listing with neither is treated as changed.
+fn unchanged(listed: &ObjectVersion, read: &ObjectVersion) -> bool {
+    match (&listed.e_tag, &listed.version) {
+        (Some(tag), _) => read.e_tag.as_ref() == Some(tag),
+        (None, Some(version)) => read.version.as_ref() == Some(version),
+        (None, None) => false,
+    }
+}
+
 /// Claims and inspects the leases of one run on behalf of one worker.
 #[derive(Debug, Clone)]
 pub struct LeaseManager {
@@ -101,6 +158,7 @@ pub struct LeaseManager {
     layout: RunLayout,
     worker: String,
     config: LeaseConfig,
+    cache: LeaseCache,
 }
 
 impl LeaseManager {
@@ -117,7 +175,16 @@ impl LeaseManager {
             layout,
             worker: worker.into(),
             config,
+            cache: LeaseCache::default(),
         }
+    }
+
+    /// Uses `cache` for [`LeaseManager::live_task_ids`], so the leases read on one poll are not
+    /// read again on the next while they are unchanged.
+    #[must_use]
+    pub fn with_cache(mut self, cache: LeaseCache) -> Self {
+        self.cache = cache;
+        self
     }
 
     /// The timing in use.
@@ -134,6 +201,81 @@ impl LeaseManager {
     ) -> StoreResult<Option<(Lease, ObjectVersion)>> {
         let key = self.layout.lease(stage.as_str(), task_id)?;
         self.store.get_json(&key).await
+    }
+
+    /// The tasks among `task_ids` whose lease is live: held, not released, and not past
+    /// `expires_at + clock_skew`. Absent, expired, released and unreadable leases are left out,
+    /// so those are the tasks worth a [`LeaseManager::try_claim`].
+    ///
+    /// Costs one listing of the stage's `_lease/` plus one read per lease of `task_ids` that is
+    /// new or whose version changed since the cache saw it; expiry of an unchanged lease is
+    /// judged from the cached `expires_at`. The answer is a snapshot: a lease taken or released
+    /// right after is caught by the claim itself or by the next poll.
+    pub async fn live_task_ids(
+        &self,
+        stage: StageName,
+        task_ids: &BTreeSet<String>,
+    ) -> StoreResult<BTreeSet<String>> {
+        let dir = self.layout.leases_dir(stage.as_str())?;
+        let listed: Vec<(String, ObjectInfo)> = self
+            .store
+            .list(&dir)
+            .await?
+            .into_iter()
+            .filter_map(|info| {
+                let task = RunLayout::task_id_from_key(&info.key)?;
+                task_ids
+                    .contains(task)
+                    .then(|| (task.to_owned(), info.clone()))
+            })
+            .collect();
+        let changed: Vec<String> = {
+            let seen = self.cache.lock();
+            listed
+                .iter()
+                .filter(|(_, info)| {
+                    seen.get(&info.key)
+                        .is_none_or(|s| !unchanged(&info.version, &s.version))
+                })
+                .map(|(_, info)| info.key.clone())
+                .collect()
+        };
+        let read: Vec<(String, Option<SeenLease>)> = futures::stream::iter(changed)
+            .map(|key| async move {
+                let seen = self.store.get_opt(&key).await?.map(|obj| SeenLease {
+                    lease: serde_json::from_slice(&obj.bytes).ok(),
+                    version: obj.version,
+                });
+                Ok::<_, StoreError>((key, seen))
+            })
+            .buffer_unordered(READ_CONCURRENCY)
+            .try_collect()
+            .await?;
+
+        let now = OffsetDateTime::now_utc();
+        let mut seen = self.cache.lock();
+        let keys: HashSet<&str> = listed.iter().map(|(_, info)| info.key.as_str()).collect();
+        seen.retain(|key, _| keys.contains(key.as_str()));
+        for (key, lease) in read {
+            match lease {
+                Some(lease) => {
+                    seen.insert(key, lease);
+                }
+                // Deleted between the listing and the read: nobody holds it.
+                None => {
+                    seen.remove(&key);
+                }
+            }
+        }
+        Ok(listed
+            .into_iter()
+            .filter(|(_, info)| {
+                seen.get(&info.key)
+                    .and_then(|s| s.lease.as_ref())
+                    .is_some_and(|l| !l.is_expired(now, self.config.clock_skew))
+            })
+            .map(|(task, _)| task)
+            .collect())
     }
 
     /// Tries to claim a task. `Some` holds the lease and keeps renewing it until released or

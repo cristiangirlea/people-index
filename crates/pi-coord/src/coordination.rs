@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::commit::{CommitLog, CommitOutcome, CommitRecord};
 use crate::context::RunContext;
 use crate::failure::RunFailure;
-use crate::lease::{LeaseConfig, LeaseGuard, LeaseManager};
+use crate::lease::{LeaseCache, LeaseConfig, LeaseGuard, LeaseManager};
 use crate::stage_name::StageName;
 
 /// A claim on a task, held while it runs.
@@ -66,6 +66,19 @@ pub trait Coordination: Send + Sync {
         stage: StageName,
     ) -> anyhow::Result<Vec<CommitRecord>>;
 
+    /// The tasks among `task_ids` that another participant holds a live lease on right now,
+    /// so a poller can skip them instead of trying to claim each one. A snapshot: claiming a
+    /// task left out may still fail, and one included may be free by the next poll. The
+    /// default answers none, which makes the poller try every task.
+    async fn live_leases(
+        &self,
+        _ctx: &RunContext,
+        _stage: StageName,
+        _task_ids: &BTreeSet<String>,
+    ) -> anyhow::Result<BTreeSet<String>> {
+        Ok(BTreeSet::new())
+    }
+
     /// Tries to claim a task; `None` when another participant holds it.
     async fn try_claim(
         &self,
@@ -90,6 +103,8 @@ pub trait Coordination: Send + Sync {
 pub struct StoreCoordination {
     worker: String,
     lease: LeaseConfig,
+    /// The leases [`Coordination::live_leases`] read, kept between polls.
+    seen: LeaseCache,
 }
 
 impl StoreCoordination {
@@ -99,6 +114,7 @@ impl StoreCoordination {
         Self {
             worker: worker.into(),
             lease,
+            seen: LeaseCache::default(),
         }
     }
 
@@ -115,6 +131,7 @@ impl StoreCoordination {
             self.worker.clone(),
             self.lease,
         )
+        .with_cache(self.seen.clone())
     }
 }
 
@@ -174,6 +191,15 @@ impl Coordination for StoreCoordination {
         stage: StageName,
     ) -> anyhow::Result<Vec<CommitRecord>> {
         Ok(Self::commits_of(ctx).list(stage).await?)
+    }
+
+    async fn live_leases(
+        &self,
+        ctx: &RunContext,
+        stage: StageName,
+        task_ids: &BTreeSet<String>,
+    ) -> anyhow::Result<BTreeSet<String>> {
+        Ok(self.leases_of(ctx).live_task_ids(stage, task_ids).await?)
     }
 
     async fn try_claim(

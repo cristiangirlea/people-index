@@ -16,6 +16,8 @@ pub fn mapping() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use pi_model::{BUILDER_OWNED, JsonKind, ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS};
+
     use super::*;
 
     fn field<'a>(mapping: &'a Value, path: &str) -> &'a Value {
@@ -55,6 +57,90 @@ mod tests {
             field(&mapping, "roles.organization_resolved")["type"],
             "boolean"
         );
+    }
+
+    #[test]
+    fn numbers_and_dates_ignore_malformed_values() {
+        let mut checked = 0;
+        visit(&mapping(), "", &mut |path, node| {
+            if matches!(node["type"].as_str(), Some("long" | "integer" | "date")) {
+                assert_eq!(node["ignore_malformed"], Value::Bool(true), "{path}");
+                checked += 1;
+            }
+        });
+        assert!(checked >= 10, "{checked}");
+    }
+
+    /// Calls `f` with the path and definition of every mapped field, depth first.
+    fn visit(node: &Value, prefix: &str, f: &mut dyn FnMut(&str, &Value)) {
+        let Some(properties) = node["properties"].as_object() else {
+            return;
+        };
+        for (name, child) in properties {
+            let path = format!("{prefix}{name}");
+            f(&path, child);
+            visit(child, &format!("{path}."), f);
+        }
+    }
+
+    /// The JSON-kind table extraction checks (`pi_model::*_FIELDS`), as mapping paths.
+    fn shape_table() -> std::collections::BTreeMap<String, JsonKind> {
+        let mut table = std::collections::BTreeMap::new();
+        for (fields, prefix) in [
+            (PERSON_FIELDS, ""),
+            (ROLE_FIELDS, "roles."),
+            (ORGANIZATION_FIELDS, "organizations."),
+        ] {
+            for shape in fields {
+                let old = table.insert(format!("{prefix}{}", shape.name), shape.kind);
+                assert!(old.is_none(), "{prefix}{} listed twice", shape.name);
+            }
+        }
+        table
+    }
+
+    /// Extraction's type check and the mapping cannot drift: every field Elasticsearch parses
+    /// (not disabled, not written by the document builder) has a table entry of the kind its
+    /// type expects, and every table entry is such a field.
+    #[test]
+    fn extract_shapes_agree_with_the_mapping() {
+        let table = shape_table();
+        let mut seen = Vec::new();
+        visit(&mapping(), "", &mut |path, node| {
+            // `organizations` itself is builder-owned; its fields are the organization
+            // record's, checked at extract-orgs.
+            let owned = BUILDER_OWNED.contains(&path);
+            let disabled = node["enabled"] == Value::Bool(false);
+            let Some(kind) = table.get(path) else {
+                assert!(
+                    disabled || owned,
+                    "{path} ({}) is mapped but extraction does not check it",
+                    node["type"]
+                );
+                return;
+            };
+            assert!(!disabled, "{path} is disabled: any value is fine, drop it");
+            assert!(
+                !owned,
+                "{path} is builder-owned: the input value is replaced"
+            );
+            let ok = match node["type"].as_str() {
+                Some("long" | "integer") => *kind == JsonKind::Number,
+                Some("boolean") => *kind == JsonKind::Boolean,
+                Some("text" | "keyword" | "date") => {
+                    matches!(kind, JsonKind::String | JsonKind::StringArray)
+                }
+                Some("object") => *kind == JsonKind::ObjectArray,
+                other => panic!("{path}: no rule for mapping type {other:?}"),
+            };
+            assert!(ok, "{path}: mapped {}, checked as {kind}", node["type"]);
+            seen.push(path.to_owned());
+        });
+        let missing: Vec<&String> = table.keys().filter(|k| !seen.contains(k)).collect();
+        assert!(missing.is_empty(), "checked but not mapped: {missing:?}");
+        for owned in BUILDER_OWNED {
+            assert!(!field(&mapping(), owned).is_null(), "{owned} is not mapped");
+        }
     }
 
     #[test]

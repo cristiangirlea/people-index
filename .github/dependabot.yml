@@ -2,7 +2,7 @@
 #
 # Images are pinned as name:tag@sha256:<digest> (scripts/check-deploy.sh enforces it); Dependabot
 # bumps tag and digest together. It cannot follow everything:
-#   - the ECK operator image (`images:` in deploy/k8s/eck/kustomization.yaml), the lint images
+#   - the ECK operator image (deploy/k8s/eck/operator-image), the lint images
 #     in .github/workflows/ci.yml (`docker run`) and the Dockerfile's `# syntax=` frontend are
 #     bumped by hand;
 #   - compose and deploy/k8s/base must name the same image, and Elasticsearch's spec.version

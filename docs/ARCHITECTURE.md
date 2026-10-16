@@ -19,7 +19,8 @@ Both feeds are gzipped NDJSON (`*.ndjson.gz`), one envelope per line:
 ```
 
 `id` is a non-negative 64-bit integer, or a string of decimal digits that is one; it is the
-person or organization id (the record's own `id` field is carried through but not read).
+person or organization id (the record's own `id` field is carried through, never used as the
+id; like any mapped field it is only type-checked, see below).
 `record` must be an object. Anything else on a line is *malformed*: counted, quarantined with
 its origin, and the run fails past `max_malformed` per feed. Malformed includes an empty or
 whitespace-only line, a duplicate `id` or `record` key in the envelope, and a line longer than
@@ -33,11 +34,30 @@ whitespace-only line, a duplicate `id` or `record` key in the envelope, and a li
 `city`, `industry`, `profile_url`, `skills[]`, `connections`, `followers`, `open_to_work`,
 `roles[]`, `memberships[]`, `educations[]`, `certifications[]`, `languages[]`.
 A role is `{id, title, organization_id, organization_name, organization_domain,
-employment_type, start_date, end_date, location, description}`; `organization_id` is a JSON
-number or null (never a string).
+employment_type, start_date, end_date, location, description}`; `organization_id` absent or
+null means no organization, otherwise it follows the envelope `id` rule (a non-negative 64-bit
+integer, or a string of decimal digits that is one; `"7"` and `7` are the same organization).
+`roles` absent or null means no roles. A `roles` that is neither an array nor null, a role that
+is not an object, or any other `organization_id` makes the line malformed (kind `record`).
 
 Unknown fields are carried through untouched (the record is kept as raw JSON; only the fields
 the join needs are parsed).
+
+**Mapped fields must have the JSON kind their mapping expects**, or the record is malformed
+(kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
+or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must
+cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELDS`,
+`ROLE_FIELDS`, `ORGANIZATION_FIELDS`), checked by `extract-persons` (the record and every role)
+and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. `long` and
+`integer` fields take a number or a string holding one, `boolean` fields `true`, `false`,
+`"true"`, `"false"` or `""`, `text`, `keyword` and `date` fields (the lists `skills`,
+`keywords` and `technologies` included) any scalar, which Elasticsearch reads as text (`"city":
+10001`, `"start_date": 2020`), or an array of scalars, but no object at any depth, and `roles`
+an array of objects. `null` is allowed everywhere. Disabled objects (`memberships`, `addresses`, ...) take anything, and the
+names the builder writes (`organizations`, `unresolved_organization_ids`,
+`roles[].organization_resolved`) are replaced, so neither is checked. A value of the right kind
+that still does not parse (a number out of range, a date in another format) is not indexed for
+that field and stays in `_source` (`ignore_malformed`).
 
 ## The output document
 
@@ -171,8 +191,14 @@ snapshots/                             reserved for Elasticsearch snapshots (k8s
 - Task ids: `run` (single-task stages), `file-NNNNN` (extract), `part-NNNNN` (partitioned).
   Run, stage, task and attempt ids are `[A-Za-z0-9._=-]`, at most 128 bytes. Generated run ids
   are `20261015T120000Z-a1b2c3` (UTC start time first, so the greatest id is the newest run).
-- `plan.json`: `{run_id, partitions, alias, index, organizations: [{key, size}], persons:
-  [{key, size}], total_bytes, created_at}`, written create-if-absent; a retry reads it back.
+- `plan.json`: `{run_id, partitions, alias, index, organizations: [{key, size, version}],
+  persons: [{key, size, version}], total_bytes, created_at}`, written create-if-absent; a retry
+  reads it back. `version` is `{e_tag, version}` as the input listing reported it (the etag
+  always; a version id only where the store reports one). Extract reads each file with
+  `If-Match` on that etag (and the version id, if any), so a run reads exactly the bytes it
+  planned. The local filesystem's etag is its inode, modification time and size; it checks it
+  only on open and then reads the open file, so extract heads the file again once it has read
+  it and fails the same way if the etag moved (an in-place overwrite during the read).
 - `stages/<stage>.json`: `{stage, run_by: coordinator|workers, tasks, written_at}`. A stage
   with one task or fewer is run by the coordinator, including an extract stage with one file.
 - `state.json`: `{run_id, status, stage, completed, error, started_at, updated_at}`.
@@ -270,8 +296,11 @@ pub trait Executor: Send + Sync {
 ```
 
 `RunContext` carries the store, the layout and a cancellation token. An error marked
-`permanent` (bad gzip, malformed limit, count mismatch) is not retried; any other error is
-retried up to `task_attempts`.
+`permanent` (bad gzip, malformed limit, count mismatch, an input changed or removed since the
+plan) is not retried; any other error is retried up to `task_attempts`. A changed input fails
+the run with the file and both versions, planned and current; reading the new bytes would mix
+inputs (`P` was sized from the old ones, and `Seq` positions would point at different
+records), and no retry can bring the planned bytes back.
 
 CPU-bound work (gzip, JSON, zstd, the join) runs on `spawn_blocking` or rayon, never on the
 async reactor threads.

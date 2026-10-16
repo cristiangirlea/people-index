@@ -2,9 +2,10 @@
 # Waits for the formed cluster, then creates the pipeline's role and user (idempotent: PUT).
 #
 # The pipeline never uses the elastic superuser. Role people-index-writer is the same one ECK
-# creates on Kubernetes: cluster monitor (health, _nodes for the shard default) and
-# manage_index_templates, and every privilege on the alias's indexes (`<alias>*`: the run's
-# `<alias>-<run_id>` index and the alias itself).
+# creates on Kubernetes (deploy/k8s/base/elasticsearch/roles.yml lists every call it covers):
+# cluster monitor (_cluster/health, _nodes for the shard default) and every privilege on exactly
+# two names, the alias `<alias>` and the run indexes `<alias>-*` (`<alias>-<run_id>`). No index
+# templates: the pipeline creates its index with the mapping in the request.
 set -euo pipefail
 
 : "${ES_URL:?}" "${ES_NODES:?}" "${ELASTIC_PASSWORD:?}" "${PIPELINE_ES_PASSWORD:?}"
@@ -35,11 +36,12 @@ until as_elastic "${ES_URL}/_cluster/health?wait_for_nodes=${ES_NODES}&wait_for_
   sleep 2
 done
 
-echo "es-users: role people-index-writer on ${alias_name}*"
+alias_json="$(json_escape "$alias_name")"
+echo "es-users: role people-index-writer on ${alias_name} and ${alias_name}-*"
 as_elastic -X PUT "${ES_URL}/_security/role/people-index-writer" -d @- >/dev/null <<EOF
 {
-  "cluster": ["monitor", "manage_index_templates"],
-  "indices": [{ "names": ["$(json_escape "$alias_name")*"], "privileges": ["all"] }]
+  "cluster": ["monitor"],
+  "indices": [{ "names": ["${alias_json}", "${alias_json}-*"], "privileges": ["all"] }]
 }
 EOF
 

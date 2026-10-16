@@ -1,7 +1,7 @@
 {
   "dynamic": false,
   "properties": {
-    "id": {"type": "long"},
+    "id": {"type": "long", "ignore_malformed": true},
     "first_name": {
       "type": "text",
       "copy_to": "full_name",

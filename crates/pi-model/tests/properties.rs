@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use pi_model::{DocumentBuilder, Partitioner, Seq, parse_person_line};
+use pi_model::{
+    DocumentBuilder, FieldShape, PERSON_FIELDS, Partitioner, ROLE_FIELDS, Seq, parse_person_line,
+};
 use proptest::prelude::*;
 use serde_json::{Map, Value, json};
 
@@ -60,17 +62,22 @@ struct Case {
 
 const RESERVED: [&str; 3] = ["roles", "organizations", "unresolved_organization_ids"];
 
+/// Whether `key` is a mapped field whose JSON kind extraction checks: not an unknown field.
+fn is_checked(fields: &[FieldShape], key: &str) -> bool {
+    fields.iter().any(|f| f.name == key)
+}
+
 fn case() -> impl Strategy<Value = Case> {
     let unknown =
         prop::collection::btree_map("[a-z_\"\\\\é]{1,8}", json_value(), 0..6).prop_map(|m| {
             m.into_iter()
-                .filter(|(k, _)| !RESERVED.contains(&k.as_str()))
+                .filter(|(k, _)| !RESERVED.contains(&k.as_str()) && !is_checked(PERSON_FIELDS, k))
                 .collect()
         });
     let role_fields =
         prop::collection::btree_map("[a-z_]{1,6}", json_value(), 0..3).prop_map(|m| {
             m.into_iter()
-                .filter(|(k, _)| k != "organization_id" && k != "organization_resolved")
+                .filter(|(k, _)| k != "organization_resolved" && !is_checked(ROLE_FIELDS, k))
                 .collect()
         });
     let roles = prop::collection::vec((org_ref(), role_fields), 0..10);

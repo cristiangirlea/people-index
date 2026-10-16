@@ -6,7 +6,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use pi_coord::{AttemptId, RunContext, Stage, StageName, TaskReport, TaskSpec, permanent};
 use pi_model::partition_count;
-use pi_store::{CreateOutcome, Store};
+use pi_store::{CreateOutcome, ObjectInfo, Store};
 use time::OffsetDateTime;
 
 use crate::config::StagesConfig;
@@ -78,19 +78,37 @@ impl PlanStage {
     }
 }
 
-/// The input files under `prefix`, sorted by key (feed order).
+/// The input files under `prefix`, sorted by key (feed order), with the versions extract
+/// will insist on.
 async fn list_inputs(store: &Store, prefix: &str) -> anyhow::Result<Vec<InputFile>> {
-    Ok(store
+    let listed = store
         .list(prefix)
         .await
-        .with_context(|| format!("listing {prefix}"))?
+        .with_context(|| format!("listing {prefix}"))?;
+    input_files(listed)
+}
+
+/// The input files among `listed`, each with the version the store listed. One without a
+/// version fails the plan for good.
+fn input_files(listed: Vec<ObjectInfo>) -> anyhow::Result<Vec<InputFile>> {
+    listed
         .into_iter()
         .filter(|o| is_input_key(&o.key))
-        .map(|o| InputFile {
-            key: o.key,
-            size: o.size,
+        .map(|o| {
+            if o.version.is_empty() {
+                // Without one, extract could not tell a replaced file from the planned one.
+                return Err(permanent(anyhow::anyhow!(
+                    "the store lists {} without an etag or version: the run cannot pin its inputs",
+                    o.key
+                )));
+            }
+            Ok(InputFile {
+                key: o.key,
+                size: o.size,
+                version: o.version,
+            })
         })
-        .collect())
+        .collect()
 }
 
 #[async_trait]
@@ -138,5 +156,47 @@ impl Stage for PlanStage {
         report.add("organization_files", plan.organizations.len() as u64);
         report.add("person_files", plan.persons.len() as u64);
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use pi_store::ObjectVersion;
+
+    use super::*;
+
+    fn listed(key: &str, version: ObjectVersion) -> ObjectInfo {
+        ObjectInfo {
+            key: key.to_owned(),
+            size: 7,
+            version,
+            last_modified: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn an_input_listed_without_a_version_fails_the_plan_for_good() {
+        let etag = ObjectVersion {
+            e_tag: Some("\"abc\"".into()),
+            version: None,
+        };
+        let files = input_files(vec![
+            listed("raw/persons/a.ndjson.gz", etag.clone()),
+            listed("raw/persons/_SUCCESS", ObjectVersion::default()),
+        ])
+        .unwrap();
+        assert_eq!(files.len(), 1, "only input keys are kept");
+        assert_eq!(files[0].version, etag);
+
+        let err = input_files(vec![
+            listed("raw/persons/a.ndjson.gz", etag),
+            listed("raw/persons/b.ndjson.gz", ObjectVersion::default()),
+        ])
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(pi_coord::is_permanent(&err), "{text}");
+        assert!(text.contains("raw/persons/b.ndjson.gz"), "{text}");
     }
 }

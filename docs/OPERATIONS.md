@@ -19,10 +19,10 @@ them all.
 | synthetic data | service `datagen` (profile `datagen`) | Job `pi-datagen-<id>` |
 | metrics | Prometheus (profile `metrics`) | `deploy/k8s/components/monitoring` (Prometheus Operator) |
 
-Role `people-index-writer` grants cluster `monitor` and `manage_index_templates`, and every
-privilege on `persons*` (the alias and its `persons-<run_id>` indexes) and nothing else. If you
-change `PI_ALIAS`, the role's index pattern follows it in compose (`es-users` reads `PI_ALIAS`);
-on Kubernetes change `deploy/k8s/base/elasticsearch/roles.yml` too.
+Role `people-index-writer` grants cluster `monitor` and every privilege on `persons` (the alias)
+and `persons-*` (its `persons-<run_id>` indexes) and nothing else; `roles.yml` lists the calls
+this covers. If you change `PI_ALIAS`, the role's index names follow it in compose (`es-users`
+reads `PI_ALIAS`); on Kubernetes change `deploy/k8s/base/elasticsearch/roles.yml` too.
 
 The store must refuse a conditional write that does not hold (HTTP 412 for `If-None-Match: *` on
 an existing key and for a stale `If-Match`): commits and leases depend on it. SeaweedFS 4.48
@@ -84,13 +84,13 @@ Prerequisites: Docker, [k3d](https://k3d.io) 5, kubectl, GNU make, bash. Every t
 
 ```bash
 make k3d-up          # cluster "people-index": 1 server + 3 agents, zones zone-a/b/c
-make eck             # ECK 3.5.0 CRDs and operator (checksums verified in CI)
+make eck             # ECK 3.5.0 CRDs and operator: downloaded, checked against SHA256SUMS, applied
 make image           # build people-index:local
 make image-import    # load it into every k3d node (imagePullPolicy: Never)
 make deploy-local    # credentials if missing, then Elasticsearch, store, RBAC, config; waits for green
 make datagen         # Job pi-datagen-<id>: feeds into s3://people-index/raw/
 make run             # Jobs pi-run-<id> + pi-worker-<id>; waits until the coordinator completes
-make verify          # acceptance queries and digest, as a Job (not yet: see below)
+make verify          # Job pi-verify-<id>: acceptance queries and digest against the alias
 make k3d-down        # delete the cluster
 ```
 
@@ -105,9 +105,16 @@ make k3d-down        # delete the cluster
   `make worker-logs RUN_ID=<id>` shows every worker.
 - Persistent things (Elasticsearch, the store, RBAC, config) are applied once with kustomize;
   each run is a pair of Jobs, kept for a day after they finish (`ttlSecondsAfterFinished`).
-- `make verify` renders a `verify` Job, but `deploy/k8s/jobs/render.sh` has no `verify` kind
-  and there is no `verify.yaml` template yet, so the target fails on k3d today. Until it exists,
-  run `people-index verify` from a pod that has the pipeline's environment and credentials.
+- `make eck` downloads `crds.yaml` and `operator.yaml` into `target/eck/` with
+  `deploy/k8s/eck/fetch.sh`, checks them with `sha256sum -c` against
+  `deploy/k8s/eck/SHA256SUMS`, pins the operator image to the digest in
+  `deploy/k8s/eck/operator-image` (`pin-operator.sh`, into `target/eck/operator-pinned.yaml`)
+  and applies those local files (server-side). On a mismatch it keeps nothing and stops before
+  applying; `scripts/check-deploy.sh` validates the same files, pinned the same way.
+- `make verify` renders `deploy/k8s/jobs/verify.yaml` (pod security, credentials and CA as the
+  run Jobs), runs `people-index verify --expected s3://people-index/raw/expected.json --digest`
+  against the alias, waits for the Job and prints its output; a failed check fails the target.
+  Size it with `VERIFY_CPU`, `VERIFY_MEMORY` and `VERIFY_DEADLINE_SECONDS` in `jobs.vars`.
 
 ## Scaling
 
@@ -155,8 +162,12 @@ committed; a failed run never moves the alias, so the previous index keeps servi
 - To find a run id: `make compose-runs` (compose), `make logs` (k3d), or the `runs/` prefix of
   the store.
 
-Data generation is seeded, so rerunning `datagen` with the same arguments rewrites identical
-files; do not change `raw/` under a run that is being resumed.
+A run reads exactly the input files it planned: `plan.json` records each file's version, and
+an extract task whose file was replaced or removed since then fails the run for good, naming the
+file and both versions. To run on new inputs, start a new run. Rewriting a file with identical
+content counts as a change too on stores whose etag is not a content hash (the local
+filesystem's includes the modification time), so do not rerun `datagen` under a run that is
+being resumed.
 
 ## Metrics, logs and the run summary
 

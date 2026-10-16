@@ -1,17 +1,21 @@
 # File-realm roles, loaded by ECK from the `people-index-es-roles` Secret.
 #
 # people-index-writer is everything the pipeline does and nothing more:
-#   monitor                  read `_nodes` (shard count per data node) and cluster health
-#   manage_index_templates   install the index template before the first load
-#   persons* all             create `<alias>-<run_id>`, bulk load, change its settings,
-#                            move the alias, delete the indexes the alias left behind
-# A different PI_ALIAS needs its own index pattern here.
+#   cluster monitor   GET _nodes/settings (shard count per data node) and
+#                     GET _cluster/health[/<index>] (wait for green/yellow)
+#   persons, persons-* all
+#                     the run's index `persons-<run_id>`: HEAD and PUT (create), _bulk,
+#                     PUT _settings, _refresh, _flush, _count, POST _pit, search and DELETE
+#                     _pit through it (verify), DELETE of the indexes the alias left behind;
+#                     the alias `persons`: GET _alias, POST _aliases (move it), _count and _pit
+# No index templates: the index is created with its mapping and settings in the request body.
+# A different PI_ALIAS needs its own two names here (`<alias>` and `<alias>-*`).
 people-index-writer:
   cluster:
     - monitor
-    - manage_index_templates
   indices:
     - names:
-        - "persons*"
+        - "persons"
+        - "persons-*"
       privileges:
         - all

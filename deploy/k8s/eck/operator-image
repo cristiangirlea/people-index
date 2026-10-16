@@ -1,0 +1,4 @@
+# The ECK operator image, pinned by digest. operator.yaml names it by tag only; pin-operator.sh
+# puts this reference in its place (make eck, scripts/check-deploy.sh). Bump it with fetch.sh's
+# version: `docker buildx imagetools inspect docker.elastic.co/eck/eck-operator:<version>`.
+docker.elastic.co/eck/eck-operator:3.5.0@sha256:b6f261372d9d9af7b00aab03efea25263314d16063c4d440ac322e52c2fdf314

@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Validates the deployment without a cluster:
 #   - every image in the Dockerfile (its `# syntax=` frontend included), deploy/compose,
-#     deploy/k8s (rendered) and the CI workflow's `docker run` lines is pinned as
-#     name:tag@sha256:<digest> (people-index:local and the Job templates' ${IMAGE} excepted),
-#     and the Dockerfile's rust tag is CI's RUST_TOOLCHAIN;
+#     deploy/k3d, the CI workflow's `docker run` lines, the ECK operator manifest (as pinned
+#     by deploy/k8s/eck/pin-operator.sh from deploy/k8s/eck/operator-image), deploy/k8s
+#     (rendered) and the Job templates is pinned as name:tag@sha256:<digest>
+#     (people-index:local and the Job templates' ${IMAGE} excepted), and the Dockerfile's rust
+#     tag is CI's RUST_TOOLCHAIN;
 #   - an image in both compose and deploy/k8s/base is the same reference in both, and the
 #     Elasticsearch resource's image tag is its spec.version;
-#   - the ECK release files still match deploy/k8s/eck/SHA256SUMS;
-#   - deploy/k8s/eck, base and every overlay render with kustomize, and every object passes
-#     kubeconform -strict against the Kubernetes schemas and, for custom resources (ECK,
+#   - the ECK release files, fetched by deploy/k8s/eck/fetch.sh (what `make eck` applies),
+#     still match deploy/k8s/eck/SHA256SUMS, and fetch.sh refuses files that do not;
+#   - those ECK files (operator.yaml pinned), base and every overlay (rendered with kustomize)
+#     pass kubeconform -strict against the Kubernetes schemas and, for custom resources (ECK,
 #     prometheus-operator), the datreeio CRDs-catalog schemas at a pinned commit;
-#   - the run and datagen Job templates render for every overlay and pass the same check;
+#   - the run, datagen and verify Job templates render for every overlay and pass the same
+#     check;
 #   - deploy/k3d/cluster.yaml passes k3d's own config schema;
 #   - the shell scripts parse (and pass shellcheck when it is installed);
 #   - deploy/compose/compose.yaml, when present, passes `docker compose config -q`.
@@ -187,13 +191,26 @@ ci_rust="$(sed -nE 's/^[[:space:]]*RUST_TOOLCHAIN:[[:space:]]*"?([0-9][0-9.]*)"?
   fail "Dockerfile builds with rust '${docker_rust}', CI with RUST_TOOLCHAIN '${ci_rust}': make them equal"
 step "images pinned by digest; Dockerfile and CI build with rust $ci_rust"
 
-# 1. The ECK release files are what SHA256SUMS says.
-while read -r want url; do
-  [[ -z "$want" ]] && continue
-  curl -fsSL --retry 3 -m 120 -o "$work/eck-file" "$url"
-  [[ "$(sha256 "$work/eck-file")" == "$want" ]] || fail "$url does not match deploy/k8s/eck/SHA256SUMS"
-done <"$root/deploy/k8s/eck/SHA256SUMS"
+# 1. The ECK release files are what SHA256SUMS says, fetched the way `make eck` fetches them;
+# and fetch.sh keeps nothing when a checksum does not match: a copy of it with one checksum
+# changed, run on a directory that already holds the files (the reuse path `make eck` takes
+# when target/eck exists), must exit 1 (a mismatch, not a download error) and leave no file.
+eck_dir="$cache/eck"
+bash "$root/deploy/k8s/eck/fetch.sh" "$eck_dir" || fail "ECK release files do not match deploy/k8s/eck/SHA256SUMS"
 step "ECK release files match SHA256SUMS"
+mkdir -p "$work/eck-bad"
+cp "$root/deploy/k8s/eck/fetch.sh" "$work/eck-bad/"
+awk 'NR == 1 { c = substr($0, 1, 1); $0 = (c == "0" ? "1" : "0") substr($0, 2) } { print }' \
+  "$root/deploy/k8s/eck/SHA256SUMS" >"$work/eck-bad/SHA256SUMS"
+mkdir -p "$work/eck-bad/out"
+cp "$eck_dir"/*.yaml "$work/eck-bad/out/"
+rc=0
+bash "$work/eck-bad/fetch.sh" "$work/eck-bad/out" >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 1 ]] ||
+  fail "deploy/k8s/eck/fetch.sh exited $rc on a file that does not match SHA256SUMS (want 1)"
+[[ -z "$(find "$work/eck-bad/out" -name '*.yaml' 2>/dev/null)" ]] ||
+  fail "deploy/k8s/eck/fetch.sh left unverified files behind"
+step "fetch.sh refuses a checksum mismatch"
 
 # 2. A copy of deploy/k8s with example credentials in place of the git-ignored env files.
 cp -R "$root/deploy/k8s" "$work/k8s"
@@ -201,14 +218,28 @@ while IFS= read -r -d '' example; do
   [[ -e "${example%.example}" ]] || cp "$example" "${example%.example}"
 done < <(find "$work/k8s" -name '*.env.example' -print0)
 
-# 3. Every kustomization renders and validates.
+# 3. The verified ECK files, with the operator image pinned the way `make eck` pins it, and
+#    every kustomization render, validate and name only pinned images.
+step "eck (crds.yaml, operator.yaml pinned by operator-image)"
+bash "$root/deploy/k8s/eck/pin-operator.sh" "$eck_dir/operator.yaml" >"$work/eck-operator.yaml" ||
+  fail "deploy/k8s/eck/pin-operator.sh could not pin the operator image"
+{
+  cat "$eck_dir/crds.yaml"
+  printf '\n---\n'
+  cat "$work/eck-operator.yaml"
+} >"$work/eck.yaml"
+validate <"$work/eck.yaml" || fail "the ECK files do not validate"
+while read -r ref; do
+  check_ref deploy/k8s/eck "$ref"
+done < <(yaml_images <"$work/eck.yaml")
+report_unpinned
 overlays=()
 for dir in "$work"/k8s/overlays/*/; do
   dir="${dir%/}"
   overlays+=("overlays/${dir##*/}")
 done
 [[ -d "${work}/k8s/${overlays[0]:-none}" ]] || fail "no overlays under deploy/k8s/overlays"
-for dir in eck base "${overlays[@]}"; do
+for dir in base "${overlays[@]}"; do
   [[ -f "$work/k8s/$dir/kustomization.yaml" ]] || fail "deploy/k8s/$dir has no kustomization.yaml"
   step "kustomize $dir"
   kustomize_build "$work/k8s/$dir" >"$work/rendered.yaml" || fail "kustomize failed for deploy/k8s/$dir"
@@ -235,10 +266,18 @@ for dir in eck base "${overlays[@]}"; do
   fi
 done
 
-# 4. The Job templates render for every overlay and validate.
+# 4. The Job templates name only pinned images (their ${IMAGE} comes from jobs.vars), and render
+#    for every overlay and validate.
+job_kinds=(run datagen verify)
+for kind in "${job_kinds[@]}"; do
+  while read -r ref; do
+    check_ref "deploy/k8s/jobs/$kind.yaml" "$ref"
+  done < <(yaml_images <"$work/k8s/jobs/$kind.yaml")
+done
+report_unpinned
 for vars in "$work"/k8s/overlays/*/jobs.vars; do
   overlay="$(basename "$(dirname "$vars")")"
-  for kind in run datagen; do
+  for kind in "${job_kinds[@]}"; do
     step "jobs/$kind for $overlay"
     RUN_ID=check JOB_ID=check bash "$work/k8s/jobs/render.sh" "$kind" --overlay "$overlay" 2>/dev/null |
       validate || fail "jobs/$kind does not render or validate for $overlay"
@@ -261,6 +300,8 @@ step "deploy/k3d/cluster.yaml"
 scripts=(
   "$root/scripts/check-deploy.sh"
   "$root/deploy/k8s/gen-secrets.sh"
+  "$root/deploy/k8s/eck/fetch.sh"
+  "$root/deploy/k8s/eck/pin-operator.sh"
   "$root/deploy/k8s/jobs/render.sh"
   "$root/deploy/k8s/base/s3/bucket-init.sh"
   "$root/deploy/k8s/components/snapshots/bootstrap.sh"

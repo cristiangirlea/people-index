@@ -50,6 +50,7 @@ COMPOSE_ALL := $(COMPOSE) --profile datagen --profile verify --profile metrics
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 RENDER := bash deploy/k8s/jobs/render.sh
 JOBS_OUT := target/jobs
+ECK_DIR := target/eck
 SECRETS_DIR := deploy/k8s/overlays/$(OVERLAY)/secrets
 
 # wait-job <job name>: block until the Job is Complete (exit 0) or Failed (exit 1), or until
@@ -196,8 +197,14 @@ k3d-down: ## Delete the k3d cluster and everything in it
 	k3d cluster delete $(CLUSTER)
 
 .PHONY: eck
-eck: ## Install the ECK operator and CRDs (deploy/k8s/eck, checksums in SHA256SUMS)
-	$(KUBECTL) apply --server-side -k deploy/k8s/eck
+eck: ## Download the ECK operator and CRDs, check them against deploy/k8s/eck/SHA256SUMS, apply them
+	@# fetch.sh leaves only files that match SHA256SUMS in $(ECK_DIR) and fails otherwise, so
+	@# nothing unverified is applied. pin-operator.sh swaps the operator image's tag for the
+	@# digest-pinned reference in deploy/k8s/eck/operator-image, failing unless it replaced
+	@# exactly one line. Server-side: the CRDs are too large for client-side apply.
+	bash deploy/k8s/eck/fetch.sh $(ECK_DIR)
+	bash deploy/k8s/eck/pin-operator.sh $(ECK_DIR)/operator.yaml >$(ECK_DIR)/operator-pinned.yaml
+	$(KUBECTL) apply --server-side -f $(ECK_DIR)/crds.yaml -f $(ECK_DIR)/operator-pinned.yaml
 	$(KUBECTL) -n elastic-system rollout status statefulset/elastic-operator --timeout=5m
 
 .PHONY: image-import

@@ -8,6 +8,7 @@
 use anyhow::Context as _;
 use pi_coord::{RunContext, permanent};
 use pi_model::Partitioner;
+use pi_store::ObjectVersion;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -18,6 +19,11 @@ pub struct InputFile {
     pub key: String,
     /// Its size in bytes when the plan was made.
     pub size: u64,
+    /// Its version (etag, and version id where the store keeps one) when the plan was made.
+    /// Extract reads exactly this version and fails for good if the object changed. Absent in
+    /// a plan written before versions were recorded; such a plan's extract fails for good.
+    #[serde(default)]
+    pub version: ObjectVersion,
 }
 
 /// What `plan` decided.
@@ -138,6 +144,10 @@ mod tests {
             organizations: vec![InputFile {
                 key: "raw/organizations/a.ndjson.gz".into(),
                 size: 10,
+                version: ObjectVersion {
+                    e_tag: Some("\"e1\"".into()),
+                    version: None,
+                },
             }],
             persons: vec![],
             total_bytes: 10,
@@ -147,5 +157,12 @@ mod tests {
         assert_eq!(serde_json::from_str::<Plan>(&json).unwrap(), plan);
         assert_eq!(plan.files(Feed::Organizations).len(), 1);
         assert!(plan.partitioner().is_ok());
+    }
+
+    #[test]
+    fn an_input_without_a_version_still_parses() {
+        let file: InputFile =
+            serde_json::from_str(r#"{"key":"raw/persons/a.ndjson.gz","size":3}"#).unwrap();
+        assert!(file.version.is_empty());
     }
 }

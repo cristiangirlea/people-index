@@ -2,7 +2,8 @@
 //!
 //! The cap keeps one bad line (a file with no newlines at all, a runaway record) from taking
 //! the task's memory: a line past the cap is reported as too long with only its first
-//! `max_line_bytes` bytes kept, and the rest is skipped up to the next newline.
+//! `max_line_bytes` bytes kept, and the rest is skipped up to the next newline. The cap counts
+//! the line without its `\n` or `\r\n`, so the same line fits with either ending.
 
 use std::io::{self, BufRead};
 
@@ -49,6 +50,9 @@ impl<R: BufRead> LineReader<R> {
         let mut len = 0u64;
         let mut too_long = false;
         let mut saw_bytes = false;
+        // One byte past the cap, so a `\r` before the newline still fits; the cap itself is
+        // checked once that `\r` is dropped below.
+        let cap = self.max_line_bytes.saturating_add(1);
         loop {
             let available = match self.inner.fill_buf() {
                 Ok(b) => b,
@@ -65,7 +69,7 @@ impl<R: BufRead> LineReader<R> {
             };
             let chunk = &available[..chunk_len];
             if !too_long {
-                let room = self.max_line_bytes - buf.len();
+                let room = cap - buf.len();
                 if chunk.len() > room {
                     buf.extend_from_slice(&chunk[..room]);
                     too_long = true;
@@ -86,6 +90,10 @@ impl<R: BufRead> LineReader<R> {
         if !too_long && buf.last() == Some(&b'\r') {
             buf.pop();
             len -= 1;
+        }
+        if buf.len() > self.max_line_bytes {
+            buf.truncate(self.max_line_bytes);
+            too_long = true;
         }
         self.number += 1;
         Ok(Some(LineInfo {
@@ -150,5 +158,48 @@ mod tests {
         let lines = all(b"12345678\n", 8, 3);
         assert!(!lines[0].0.too_long);
         assert_eq!(lines[0].1, b"12345678");
+    }
+
+    #[test]
+    fn a_crlf_line_of_exactly_the_cap_fits() {
+        for buffer in [1, 3, 64] {
+            let lines = all(b"12345678\r\nnext\r\n", 8, buffer);
+            assert_eq!(lines.len(), 2);
+            assert!(!lines[0].0.too_long);
+            assert_eq!(lines[0].0.len, 8);
+            assert_eq!(lines[0].1, b"12345678");
+            assert_eq!(lines[1].1, b"next");
+        }
+        let lines = all(b"12345678\r", 8, 3);
+        assert!(!lines[0].0.too_long);
+        assert_eq!(lines[0].1, b"12345678");
+    }
+
+    #[test]
+    fn one_byte_past_the_cap_is_too_long_with_either_ending() {
+        for input in [&b"123456789\n"[..], b"123456789\r\n", b"123456789"] {
+            for buffer in [1, 3, 64] {
+                let lines = all(input, 8, buffer);
+                assert_eq!(lines.len(), 1);
+                assert!(lines[0].0.too_long);
+                assert_eq!(lines[0].1, b"12345678");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cr_not_before_the_newline_is_content() {
+        for buffer in [1, 3, 64] {
+            let lines = all(b"1234567\rX\n", 8, buffer);
+            assert!(lines[0].0.too_long);
+            assert_eq!(lines[0].0.len, 9);
+            assert_eq!(lines[0].1, b"1234567\r");
+            let lines = all(b"123456\rX\n", 8, buffer);
+            assert!(!lines[0].0.too_long);
+            assert_eq!(lines[0].1, b"123456\rX");
+            let lines = all(b"1234567\r\r\n", 8, buffer);
+            assert!(!lines[0].0.too_long);
+            assert_eq!(lines[0].1, b"1234567\r");
+        }
     }
 }

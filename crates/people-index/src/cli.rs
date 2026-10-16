@@ -118,6 +118,9 @@ pub struct PipelineArgs {
     /// Rows a partitioned writer buffers per task before writing out its largest partition.
     #[arg(long, env = "PI_BUFFER_BYTES", value_parser = parse_byte_size_usize, default_value = "256MiB")]
     pub buffer_bytes: usize,
+    /// Memory a join or assemble task plans to hold per pass; a larger partition runs in passes.
+    #[arg(long, env = "PI_TASK_MEMORY_BYTES", value_parser = parse_byte_size, default_value = "512MiB")]
+    pub task_memory_bytes: u64,
     /// Segment uploads in flight per task.
     #[arg(long, env = "PI_UPLOAD_CONCURRENCY", default_value_t = pi_stages::DEFAULT_UPLOAD_CONCURRENCY)]
     pub upload_concurrency: usize,
@@ -350,5 +353,9 @@ mod tests {
         assert_eq!(run.exec.lease_ttl, Duration::from_secs(30));
         assert_eq!(run.metrics.addr().unwrap(), None);
         assert_eq!(run.pipeline.min_partitions, 16);
+        assert_eq!(
+            run.pipeline.task_memory_bytes,
+            pi_stages::DEFAULT_TASK_MEMORY_BYTES
+        );
     }
 }

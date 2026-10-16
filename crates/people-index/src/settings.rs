@@ -112,6 +112,7 @@ pub fn stages_config(
             ..SegmentConfig::default()
         },
         buffer_bytes: pipeline.buffer_bytes,
+        task_memory_bytes: pipeline.task_memory_bytes,
         upload_concurrency: pipeline.upload_concurrency,
         max_document_bytes: pipeline.max_document_bytes,
         input_store: stores.inputs.clone(),
@@ -208,12 +209,15 @@ mod tests {
             "default",
             "--senders-per-worker",
             "4",
+            "--task-memory-bytes",
+            "64MiB",
         ]);
         let stores = Stores::open(&args.store).unwrap();
         let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
         assert_eq!(cfg.alias, "people");
         assert_eq!(cfg.es.codec, pi_es::Codec::Default);
         assert_eq!(cfg.es.bulk.senders, 4);
+        assert_eq!(cfg.task_memory_bytes, 64 << 20);
         assert!(cfg.input_store.is_none());
         assert_eq!(stores.layout("r1").unwrap().raw_persons(), "raw/persons");
     }

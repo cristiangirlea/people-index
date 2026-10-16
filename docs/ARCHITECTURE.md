@@ -224,9 +224,11 @@ A worker claims a task by creating `_lease/<task>.json` with `PutMode::Create`:
 `{worker, holder, expires_at, acquired_at, renewals, released}`. It renews every
 `lease_ttl / 3` with `PutMode::Update` on the etag it holds, and a worker that finds a lease
 past `expires_at + clock_skew` (default 5 s), or released, takes it over with `PutMode::Update`
-on the etag it observed. Release is an update-if-match that sets `released: true`. A holder
-whose renewals fail for a whole ttl, or whose lease was taken, has its task cancelled. Leases
-avoid duplicate work; commits are what keep a duplicate harmless.
+on the etag it observed. Release is an update-if-match that sets `released: true`. A refused
+renewal re-reads the lease: if it still carries the holder's own `holder` token (an earlier
+renewal landed but its response was lost), the holder goes on with the etag it read. A holder
+whose renewals fail for a whole ttl, or whose lease was taken or deleted, has its task
+cancelled. Leases avoid duplicate work; commits are what keep a duplicate harmless.
 
 Conditional updates need an S3-compatible store that answers 412 to a failed `If-None-Match: *`
 or a stale `If-Match`; the deployments use SeaweedFS 4.48, which does (see

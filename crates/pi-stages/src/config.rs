@@ -21,6 +21,9 @@ pub const DEFAULT_MAX_LINE_BYTES: usize = 8 << 20;
 /// Default rows held per task before the largest partition is written out
 /// (`PI_BUFFER_BYTES`).
 pub const DEFAULT_BUFFER_BYTES: usize = 256 << 20;
+/// Default memory a `join` or `assemble` task plans to hold per pass
+/// (`PI_TASK_MEMORY_BYTES`).
+pub const DEFAULT_TASK_MEMORY_BYTES: u64 = 512 << 20;
 /// Default uploads in flight per task (`PI_UPLOAD_CONCURRENCY`).
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 2;
 /// Room left in a bulk request for the action line next to the largest document.
@@ -78,6 +81,11 @@ pub struct StagesConfig {
     /// task's memory whatever the partition count, instead of one open zstd stream (and one
     /// segment buffer) per partition.
     pub buffer_bytes: usize,
+    /// The memory a `join` or `assemble` task plans to hold per pass: the estimated size of
+    /// the partition side it holds, divided by this and rounded up, is its pass count
+    /// (`PI_TASK_MEMORY_BYTES`). Separate from `buffer_bytes`, which `join` also uses for its
+    /// output.
+    pub task_memory_bytes: u64,
     /// Segment uploads in flight per task.
     pub upload_concurrency: usize,
     /// The largest document `assemble` writes; larger ones are quarantined.
@@ -99,6 +107,7 @@ impl Default for StagesConfig {
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             segment: SegmentConfig::default(),
             buffer_bytes: DEFAULT_BUFFER_BYTES,
+            task_memory_bytes: DEFAULT_TASK_MEMORY_BYTES,
             upload_concurrency: DEFAULT_UPLOAD_CONCURRENCY,
             max_document_bytes: pi_model::DEFAULT_MAX_DOCUMENT_BYTES,
             input_store: None,
@@ -120,6 +129,10 @@ impl StagesConfig {
         anyhow::ensure!(
             self.segment.target_bytes > 0,
             "segment_target_bytes must be positive"
+        );
+        anyhow::ensure!(
+            self.task_memory_bytes > 0,
+            "task_memory_bytes must be positive"
         );
         anyhow::ensure!(
             self.upload_concurrency > 0,
@@ -174,6 +187,11 @@ mod tests {
         assert!(cfg.validate().is_err());
         let cfg = StagesConfig {
             upload_concurrency: 0,
+            ..StagesConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+        let cfg = StagesConfig {
+            task_memory_bytes: 0,
             ..StagesConfig::default()
         };
         assert!(cfg.validate().is_err());

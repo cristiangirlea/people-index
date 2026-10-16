@@ -33,6 +33,7 @@ mod join;
 mod lines;
 mod load;
 mod metered;
+mod passes;
 mod pipeline;
 mod plan;
 mod plan_file;
@@ -49,7 +50,8 @@ pub use assemble::AssembleStage;
 pub use commits::CommitCache;
 pub use config::{
     DEFAULT_BUFFER_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_MALFORMED, DEFAULT_MIN_PARTITIONS,
-    DEFAULT_PARTITION_TARGET_BYTES, DEFAULT_UPLOAD_CONCURRENCY, EsStageConfig, StagesConfig,
+    DEFAULT_PARTITION_TARGET_BYTES, DEFAULT_TASK_MEMORY_BYTES, DEFAULT_UPLOAD_CONCURRENCY,
+    EsStageConfig, StagesConfig,
 };
 pub use extract_orgs::ExtractOrgsStage;
 pub use extract_persons::ExtractPersonsStage;

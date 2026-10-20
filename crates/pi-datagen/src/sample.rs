@@ -61,7 +61,7 @@ mod tests {
             s.dedup();
             assert_eq!(s.len(), v.len());
         }
-        assert!(pick_distinct(&mut rng, &[1], 0, 0).is_empty());
+        assert_eq!(pick_distinct(&mut rng, &[1], 0, 0), [] as [i32; 0]);
     }
 
     #[test]

@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn no_organizations_no_names() {
         let (t, _) = build(0, 0.01);
-        assert!(t.org_names.is_empty());
+        assert_eq!(t.org_names, [] as [std::string::String; 0]);
         assert_eq!(t.org_slot(0), NO_SLOT);
     }
 }

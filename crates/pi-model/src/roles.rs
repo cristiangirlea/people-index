@@ -129,9 +129,15 @@ mod tests {
 
     #[test]
     fn absent_or_null_roles_mean_none() {
-        assert!(ids("{}").unwrap().is_empty());
-        assert!(ids(r#"{"roles":null}"#).unwrap().is_empty());
-        assert!(ids(r#"{"roles":[]}"#).unwrap().is_empty());
+        assert_eq!(ids("{}").unwrap(), [] as [std::option::Option<u64>; 0]);
+        assert_eq!(
+            ids(r#"{"roles":null}"#).unwrap(),
+            [] as [std::option::Option<u64>; 0]
+        );
+        assert_eq!(
+            ids(r#"{"roles":[]}"#).unwrap(),
+            [] as [std::option::Option<u64>; 0]
+        );
     }
 
     #[test]

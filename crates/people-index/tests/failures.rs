@@ -229,12 +229,12 @@ async fn values_the_index_skips_do_not_count_as_malformed() {
             "{stage:?}"
         );
     }
-    assert!(
+    assert_eq!(
         store
             .list_keys("runs/run-lenient/quarantine")
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [std::string::String; 0]
     );
 }
 

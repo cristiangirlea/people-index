@@ -128,7 +128,7 @@ mod tests {
             br#"{"errors":false,"items":[{"index":{"status":201}},{"index":{"status":200}}]}"#;
         let settled = settle("/b", body, 2, 3, ids).expect("settled");
         assert_eq!(settled.indexed, 2);
-        assert!(settled.retry.is_empty());
+        assert_eq!(settled.retry, [] as [usize; 0]);
     }
 
     #[test]

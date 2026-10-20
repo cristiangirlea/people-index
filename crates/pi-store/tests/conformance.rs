@@ -231,7 +231,10 @@ async fn listing(f: Fixture) {
     );
     let dirs = f.store.list_prefixes(&f.key("a")).await.unwrap();
     assert_eq!(dirs, vec![f.key("a/b"), f.key("a/bc")]);
-    assert!(f.store.list(&f.key("empty")).await.unwrap().is_empty());
+    assert_eq!(
+        f.store.list(&f.key("empty")).await.unwrap(),
+        [] as [pi_store::ObjectInfo; 0]
+    );
     f.store.delete(&f.key("a/b/1")).await.unwrap();
     assert_eq!(f.store.list(&f.key("a/b")).await.unwrap().len(), 2);
 }

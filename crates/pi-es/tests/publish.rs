@@ -93,7 +93,10 @@ async fn publish_moves_the_alias_and_drops_the_old_index() {
     assert_eq!(report.docs, 1000);
     assert_eq!(report.previous, vec!["persons-old".to_owned()]);
     assert_eq!(report.deleted, vec!["persons-old".to_owned()]);
-    assert!(report.not_deleted.is_empty());
+    assert_eq!(
+        report.not_deleted,
+        [] as [(std::string::String, std::string::String); 0]
+    );
 
     // The alias moves only after the count and the restored settings.
     let order: Vec<String> = server
@@ -142,7 +145,7 @@ async fn first_publish_has_nothing_to_remove() {
         .publish(&spec(5))
         .await
         .expect("published");
-    assert!(report.previous.is_empty());
+    assert_eq!(report.previous, [] as [std::string::String; 0]);
 }
 
 #[tokio::test]
@@ -381,7 +384,10 @@ async fn a_404_on_delete_counts_as_deleted() {
         .await
         .expect("published");
     assert_eq!(report.deleted, ["persons-old"]);
-    assert!(report.not_deleted.is_empty());
+    assert_eq!(
+        report.not_deleted,
+        [] as [(std::string::String, std::string::String); 0]
+    );
 }
 
 #[tokio::test]

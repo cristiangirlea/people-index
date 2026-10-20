@@ -67,7 +67,10 @@ fn empty_segment_has_no_rows() {
     let (bytes, stats) = encoder.finish().unwrap();
     assert_eq!(stats.records, 0);
     assert_eq!(stats.bytes, bytes.len() as u64);
-    assert!(read_all::<DocRow>(&bytes).unwrap().is_empty());
+    assert_eq!(
+        read_all::<DocRow>(&bytes).unwrap(),
+        [] as [pi_model::DocRow; 0]
+    );
 }
 
 #[test]

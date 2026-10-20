@@ -513,5 +513,8 @@ async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun(
         .0;
     assert_eq!(summary.publish.previous, ["persons-old"]);
     assert_eq!(summary.publish.deleted, ["persons-old"]);
-    assert!(summary.publish.not_deleted.is_empty());
+    assert_eq!(
+        summary.publish.not_deleted,
+        [] as [(std::string::String, std::string::String); 0]
+    );
 }

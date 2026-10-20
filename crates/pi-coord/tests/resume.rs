@@ -151,7 +151,7 @@ async fn running_a_published_run_again_does_nothing() {
     driver(&registry).run(&ctx).await.unwrap();
     let again = driver(&registry).run(&ctx).await.unwrap();
     assert_eq!(again.status, RunStatus::Published);
-    assert!(again.stages.is_empty());
+    assert_eq!(again.stages, [] as [pi_coord::StageReport; 0]);
     assert_eq!(again.skipped, vec![StageName::Plan]);
     assert_eq!(plan.runs_of("run"), 1);
 }

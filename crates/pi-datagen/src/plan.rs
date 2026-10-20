@@ -155,9 +155,9 @@ mod tests {
         let layout = FeedLayout::new(1000, 1);
         let plan = DuplicatePlan::new(1, Domain::PersonDuplicate, 0.1, layout);
         assert!(plan.incoming(0).iter().all(|d| d.slot == u64::MAX));
-        assert!(!plan.incoming(0).is_empty());
+        assert_ne!(plan.incoming(0), []);
         let none = DuplicatePlan::new(1, Domain::PersonDuplicate, 0.0, layout);
-        assert!(none.incoming(0).is_empty());
+        assert_eq!(none.incoming(0), []);
         assert_eq!(none.final_version(5), 0);
     }
 }

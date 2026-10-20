@@ -72,11 +72,14 @@ The person record, plus:
   when there are none.
 
 These three names are owned by the builder: an input field of the same name is replaced. When a
-record repeats a key (top level or inside a role), the last occurrence wins and the output has
-no duplicate keys. Organization bodies are spliced in as raw JSON; they are never re-parsed on
-the person side. A document larger than `max_document_bytes` (clamped to `bulk_max_bytes`
-minus 4 KiB, so every kept document fits in one bulk request) is quarantined as
-`document_too_large` instead of indexed.
+record repeats a key (top level, inside a role, or at the top level of an organization), the
+last occurrence wins and the output has no duplicate keys at those levels. Organization bodies
+are spliced in as raw JSON; they are never re-parsed on the person side. So `extract-orgs` does
+their part: a body that repeats a key is rewritten from the last occurrences, in input order,
+before it is stored (rather than quarantined, so the rule is the same for every record); a body
+without one, nearly all of them, is stored byte for byte. A document larger than
+`max_document_bytes` (clamped to `bulk_max_bytes` minus 4 KiB, so every kept document fits in
+one bulk request) is quarantined as `document_too_large` instead of indexed.
 
 Duplicate ids resolve to the **last record in feed order** (input files sorted by key, then
 line number), for organizations and for persons alike, whatever the partition or worker count.
@@ -222,7 +225,8 @@ varint length followed by the `postcard` encoding of the row. Files start with t
 the compressed size reaches `segment_target_bytes` (default 64 MiB), so a segment ends at most
 about one row past the target. Rows (`crates/pi-model`):
 
-- `OrgRow { org_id: u64, seq: Seq, body: Vec<u8> }`: `body` is the raw JSON of the record.
+- `OrgRow { org_id: u64, seq: Seq, body: Vec<u8> }`: `body` is the raw JSON of the record, its
+  repeated top-level keys reduced to the last occurrence.
 - `PersonRow { person_id: u64, seq: Seq, body: Vec<u8>, org_ids: Vec<u64> }`: distinct
   non-null organization ids in role order.
 - `EdgeRow { org_id: u64, person_id: u64, seq: Seq }`

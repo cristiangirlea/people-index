@@ -277,8 +277,8 @@ cluster until they return.
 
 `.github/workflows/ci.yml` runs on GitHub-hosted runners: `rust` (fmt, clippy with
 `-D warnings`, tests, all `--locked`), `msrv` (check at `rust-version`), `deploy`
-(`scripts/check-deploy.sh` and the scrub check), `lint` (actionlint, shellcheck, hadolint),
-`image` (docker build, no push), `audit` (cargo-deny: advisories, bans, licenses, sources; also
-weekly), and `e2e` on pushes to main and manual dispatch: the compose stack with a small data
-set through `make compose-run`, logs uploaded on failure. `make check` runs the same Rust,
-deploy and scrub checks locally.
+(`scripts/check-deploy.sh` and the scrub check), `lint` (actionlint, shellcheck, hadolint, the
+scrub-check test, hooks and scripts stored as 100755), `image` (docker build, no push), `audit`
+(cargo-deny: advisories, bans, licenses, sources; also weekly), and `e2e` on pushes to main and
+manual dispatch: the compose stack with a small data set through `make compose-run`, logs
+uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.

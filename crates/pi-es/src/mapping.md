@@ -71,8 +71,8 @@ doing that:
   still fails the item, `ignore_malformed` or not.
 
 Identifiers (`id`, `roles.id`, `roles.organization_id`, `organizations.id`) are strict at
-extract time (`JsonKind::Number`): a value that is not a number, or a string holding one, is
-quarantined, and `ignore_malformed` stays on them as a second line. Measures (`connections`,
+extract time (`JsonKind::Number`): a value that is not a number, or a string of decimal
+digits within `u64` (`pi_model::parse_decimal_id`, so `"007"` passes), is quarantined, and `ignore_malformed` stays on them as a second line. Measures (`connections`,
 `followers`, `open_to_work`, `organizations.employee_count`, `organizations.founded_year`) are
 lenient (`JsonKind::LenientLong`, `LenientInteger` for `founded_year`, `LenientBoolean`): any
 scalar or array of scalars passes, and only an object is quarantined. `values_ignored_by_index`

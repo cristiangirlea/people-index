@@ -19,11 +19,13 @@ mod joined;
 mod json;
 mod line_stats;
 mod lookup;
+mod number_length;
 mod partition;
 mod pass;
 mod raw;
 mod roles;
 mod rows;
+mod scan;
 mod seq;
 mod shape;
 

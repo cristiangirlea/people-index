@@ -10,6 +10,7 @@ use crate::envelope::parse_envelope;
 use crate::error::{MalformedKind, MalformedRecord};
 use crate::json::write_string;
 use crate::line_stats::LineStats;
+use crate::number_length::check_number_lengths;
 use crate::raw::RawObject;
 use crate::roles::{PersonFields, distinct_in_order};
 use crate::rows::{OrgRow, PersonRow};
@@ -18,12 +19,13 @@ use crate::shape::{ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS, check_fields
 
 /// Parses an organization feed line into its row. The join never reads inside an organization
 /// body, it splices it into `organizations[]` as it is; so its mapped fields' JSON kinds are
-/// checked here, and a body that repeats a key is rewritten from the last occurrences
+/// checked here (and every number's length, [`check_number_lengths`]), and a body that repeats a key is rewritten from the last occurrences
 /// ([`org_body`]).
 pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<(OrgRow, LineStats), MalformedRecord> {
     let envelope = parse_envelope(line)?;
     let object = RawObject::parse(envelope.record_text())
         .map_err(|e| MalformedRecord::from_json(MalformedKind::Record, &e))?;
+    check_number_lengths(envelope.record_text())?;
     let mut stats = LineStats::default();
     check_fields(&object, ORGANIZATION_FIELDS, None, &mut stats)?;
     let row = OrgRow {
@@ -59,12 +61,13 @@ fn org_body(text: &str, object: &RawObject<'_>) -> Vec<u8> {
 }
 
 /// Parses a person feed line into its row, validating `roles[].organization_id` and the JSON
-/// kinds of the mapped fields, the record's and each role's. The row's edges are
+/// kinds of the mapped fields, the record's and each role's, and the length of every number. The row's edges are
 /// [`PersonRow::edges`].
 pub fn parse_person_line(line: &[u8], seq: Seq) -> Result<(PersonRow, LineStats), MalformedRecord> {
     let envelope = parse_envelope(line)?;
     let record = envelope.record_text();
     let fields = PersonFields::parse(record)?;
+    check_number_lengths(record)?;
     let mut stats = LineStats::default();
     check_fields(&fields.object, PERSON_FIELDS, None, &mut stats)?;
     for (index, role) in fields.roles.iter().flatten().enumerate() {
@@ -269,6 +272,54 @@ mod tests {
             err.reason(),
             "name: expected a string, number or boolean, found an object"
         );
+    }
+
+    type Parse = fn(&[u8]) -> Result<LineStats, MalformedRecord>;
+
+    #[test]
+    fn lines_with_a_number_too_long_for_elasticsearch_are_quarantined() {
+        // The sign and point count as characters.
+        for (ok, long) in [
+            ("1".repeat(1000), "1".repeat(1001)),
+            (
+                format!("-{}", "1".repeat(999)),
+                format!("-{}", "1".repeat(1000)),
+            ),
+            (
+                format!("1.{}", "1".repeat(998)),
+                format!("1.{}", "1".repeat(999)),
+            ),
+        ] {
+            check_long_numbers(&ok, &long);
+        }
+    }
+
+    fn check_long_numbers(ok: &str, long: &str) {
+        let parsers: [Parse; 2] = [
+            |line| parse_person_line(line, Seq::default()).map(|(_, stats)| stats),
+            |line| parse_org_line(line, Seq::default()).map(|(_, stats)| stats),
+        ];
+        for (template, path) in [
+            (r#"{"connections":N}"#, "connections"),
+            (r#"{"x":{"deep":{"n":N}}}"#, "x.deep.n"),
+            (r#"{"addresses":[{},{},{"zip":N}]}"#, "addresses[2].zip"),
+            (r#"{"roles":[{"x":[0,N]}]}"#, "roles[0].x[1]"),
+            // The scan reads the record as written, so a repeated key's dropped value counts.
+            (r#"{"zip":N,"zip":1}"#, "zip"),
+        ] {
+            for parse in parsers {
+                let line = |n: &str| format!(r#"{{"id":1,"record":{}}}"#, template.replace('N', n));
+                assert!(parse(line(ok).as_bytes()).is_ok(), "{template}");
+                let err = parse(line(long).as_bytes()).unwrap_err();
+                assert_eq!(err.kind(), MalformedKind::Record, "{template}");
+                assert_eq!(
+                    err.reason(),
+                    format!(
+                        "{path}: a number of 1001 characters; Elasticsearch accepts at most 1000"
+                    )
+                );
+            }
+        }
     }
 
     #[test]

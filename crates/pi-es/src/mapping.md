@@ -42,8 +42,12 @@ analysed.
 
 `memberships`, `educations`, `certifications`, `languages`, `organizations.addresses`,
 `organizations.locations`, `organizations.funding_rounds`: nested structures with fields of
-their own that no query needs. `enabled: false` skips parsing their contents entirely, so their
+their own that no query needs. `enabled: false` skips mapping their contents entirely, so their
 shape (or a malformed value) can never fail a bulk item, and they cost nothing but `_source`.
+The one exception is the JSON parser's own limit, which applies before any mapping: a number
+token longer than 1000 characters fails the item in any field, disabled, `text` or
+`ignore_malformed` alike (observed on 9.5.5), so extraction quarantines such a record as
+`record`, naming the path (`pi_model`'s `MAX_NUMBER_CHARS`; docs/ARCHITECTURE.md, "The data").
 
 ## Robust scalar types
 

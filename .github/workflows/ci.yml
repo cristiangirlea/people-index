@@ -24,7 +24,7 @@ env:
   RUST_BACKTRACE: "1"
   # The toolchain CI builds with; the Dockerfile's rust image tag must be the same version
   # (scripts/check-deploy.sh compares them). The MSRV job checks rust-version separately.
-  RUST_TOOLCHAIN: "1.98.1"
+  RUST_TOOLCHAIN: "1.99.1"
   RUST_MSRV: "1.90"
 
 jobs:

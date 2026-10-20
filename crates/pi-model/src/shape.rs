@@ -11,8 +11,8 @@
 //! Fields the mapping disables (`enabled: false`) accept any value and are not listed; neither
 //! are the fields the document builder writes itself ([`BUILDER_OWNED`]), since an input value
 //! of that name is replaced. `null` is always allowed, at any level: Elasticsearch skips it.
-//! When a key repeats in a person or role object, only its last occurrence is checked, the one
-//! the document keeps.
+//! When a key repeats in a person, role or organization object, only its last occurrence is
+//! checked, the one the document keeps.
 
 use std::fmt;
 

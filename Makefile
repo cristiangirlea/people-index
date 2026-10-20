@@ -93,7 +93,7 @@ help: ## List the targets
 ##@ Checks
 
 .PHONY: check
-check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub (and cargo-deny if installed)
+check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub, file modes (and cargo-deny if installed)
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo test --workspace --locked
@@ -101,6 +101,8 @@ check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub (and car
 	bash scripts/scrub-check.sh
 	bash scripts/test-scrub-check.sh
 	bash scripts/test-check-republish.sh
+	bash scripts/test-check-modes.sh
+	bash scripts/check-modes.sh
 	@if command -v cargo-deny >/dev/null; then cargo deny check; else echo "cargo-deny not installed; skipped (CI runs it)"; fi
 
 .PHONY: scrub

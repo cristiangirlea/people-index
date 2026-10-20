@@ -8,6 +8,7 @@
 
 use crate::envelope::parse_envelope;
 use crate::error::{MalformedKind, MalformedRecord};
+use crate::json::write_string;
 use crate::raw::RawObject;
 use crate::roles::{PersonFields, distinct_in_order};
 use crate::rows::{OrgRow, PersonRow};
@@ -15,8 +16,9 @@ use crate::seq::Seq;
 use crate::shape::{ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS, check_fields};
 
 /// Parses an organization feed line into its row. The join never reads inside an organization
-/// body; only its mapped fields' JSON kinds are checked, since it is indexed under
-/// `organizations[]`.
+/// body, it splices it into `organizations[]` as it is; so its mapped fields' JSON kinds are
+/// checked here, and a body that repeats a key is rewritten from the last occurrences
+/// ([`org_body`]).
 pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<OrgRow, MalformedRecord> {
     let envelope = parse_envelope(line)?;
     let object = RawObject::parse(envelope.record_text())
@@ -25,8 +27,32 @@ pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<OrgRow, MalformedRecord> 
     Ok(OrgRow {
         org_id: envelope.id,
         seq,
-        body: envelope.record_text().as_bytes().to_vec(),
+        body: org_body(envelope.record_text(), &object),
     })
+}
+
+/// The body an organization row keeps: `text` as it is, or, when a key repeats, the object
+/// rewritten from each key's last occurrence, in input order, as the document builder does for
+/// persons and roles. Elasticsearch rejects a document with a duplicate key, and the checked
+/// value ([`check_fields`] reads the last occurrence) must be the one indexed.
+fn org_body(text: &str, object: &RawObject<'_>) -> Vec<u8> {
+    let keep = object.last_occurrences();
+    if keep.iter().all(|kept| *kept) {
+        return text.as_bytes().to_vec();
+    }
+    let mut out = Vec::with_capacity(text.len());
+    out.push(b'{');
+    for ((key, value), _) in object.entries.iter().zip(keep).filter(|(_, kept)| *kept) {
+        if out.len() > 1 {
+            out.push(b',');
+        }
+        write_string(&mut out, &key.0);
+        out.push(b':');
+        out.extend_from_slice(value.get().as_bytes());
+    }
+    out.push(b'}');
+    // The extract budget counts `body.len()`: drop the capacity a long discarded value left.
+    out.into_boxed_slice().into_vec()
 }
 
 /// Parses a person feed line into its row, validating `roles[].organization_id` and the JSON
@@ -133,6 +159,43 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind(), MalformedKind::Record);
+        assert_eq!(
+            err.reason(),
+            "name: expected a string, number or boolean, found an object"
+        );
+    }
+
+    #[test]
+    fn org_lines_keep_the_last_of_a_repeated_key() {
+        for (record, body) in [
+            (r#"{"name":"A","name":"B"}"#, r#"{"name":"B"}"#),
+            // The checked occurrence is the one kept, so the object never reaches the index.
+            (r#"{"name":{"x":1},"name":"A"}"#, r#"{"name":"A"}"#),
+            // Keys compare decoded.
+            (r#"{"name":"A","\u006eame":"B"}"#, r#"{"name":"B"}"#),
+            (
+                r#"{"a":1, "id":7,"x":{"deep":[1]},"a":1.50,"tab\tkey":"t","id":"7"}"#,
+                r#"{"x":{"deep":[1]},"a":1.50,"tab\tkey":"t","id":"7"}"#,
+            ),
+        ] {
+            let line = format!(r#"{{"id":1,"record":{record}}}"#);
+            let row = parse_org_line(line.as_bytes(), Seq::default()).unwrap();
+            assert_eq!(String::from_utf8(row.body).unwrap(), body, "{record}");
+        }
+        // A long discarded value leaves no capacity behind the budget's back.
+        let line = format!(
+            r#"{{"id":1,"record":{{"x":"{}","x":0}}}}"#,
+            "a".repeat(1 << 20)
+        );
+        let row = parse_org_line(line.as_bytes(), Seq::default()).unwrap();
+        assert_eq!(row.body, br#"{"x":0}"#);
+        assert_eq!(row.body.capacity(), row.body.len());
+        // The kind check still reads the last occurrence, and quarantines it when it is wrong.
+        let err = parse_org_line(
+            br#"{"id":1,"record":{"name":"A","name":{"x":1}}}"#,
+            Seq::default(),
+        )
+        .unwrap_err();
         assert_eq!(
             err.reason(),
             "name: expected a string, number or boolean, found an object"

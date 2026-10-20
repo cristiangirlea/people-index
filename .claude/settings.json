@@ -14,6 +14,8 @@
       "Bash(scripts/scrub-check.sh:*)", "PowerShell(bash scripts/scrub-check.sh:*)",
       "Bash(scripts/test-scrub-check.sh:*)", "PowerShell(bash scripts/test-scrub-check.sh:*)",
       "Bash(scripts/test-check-republish.sh:*)", "PowerShell(bash scripts/test-check-republish.sh:*)",
+      "Bash(scripts/check-modes.sh:*)", "PowerShell(bash scripts/check-modes.sh:*)",
+      "Bash(scripts/test-check-modes.sh:*)", "PowerShell(bash scripts/test-check-modes.sh:*)",
       "Bash(git status:*)", "PowerShell(git status:*)",
       "Bash(git diff:*)", "PowerShell(git diff:*)",
       "Bash(git log:*)", "PowerShell(git log:*)"

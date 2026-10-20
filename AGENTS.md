@@ -29,6 +29,8 @@ scripts/check-deploy.sh        # kustomize build | kubeconform, compose config
 scripts/scrub-check.sh
 scripts/test-scrub-check.sh   # the scrub check and hooks, in a throwaway repo and worktree
 scripts/test-check-republish.sh  # the compose republish check, against stub curl and aws
+scripts/test-check-modes.sh   # the mode check, in a throwaway repo
+scripts/check-modes.sh        # hooks and *.sh are stored as 100755
 cargo deny check               # audit job (also weekly)
 ```
 
@@ -51,6 +53,8 @@ first). `make check` runs the list above (cargo-deny when installed); `/check`
 - No forbidden words: `scripts/scrub-check.sh` (pre-commit and commit-msg hooks after
   `git config core.hooksPath .githooks`) reads the list from outside the repository, beside the
   main checkout, from every worktree.
+- Hooks and scripts are stored as 100755: `git update-index --chmod=+x <path>` for a new one
+  (Git for Windows does not set it, `scripts/check-modes.sh` fails without it).
 - No AI attribution lines in commits or pull requests.
 
 ## Working rules

@@ -13,6 +13,7 @@
       "Bash(scripts/check-deploy.sh:*)", "PowerShell(bash scripts/check-deploy.sh:*)",
       "Bash(scripts/scrub-check.sh:*)", "PowerShell(bash scripts/scrub-check.sh:*)",
       "Bash(scripts/test-scrub-check.sh:*)", "PowerShell(bash scripts/test-scrub-check.sh:*)",
+      "Bash(scripts/test-check-republish.sh:*)", "PowerShell(bash scripts/test-check-republish.sh:*)",
       "Bash(git status:*)", "PowerShell(git status:*)",
       "Bash(git diff:*)", "PowerShell(git diff:*)",
       "Bash(git log:*)", "PowerShell(git log:*)"

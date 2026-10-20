@@ -30,6 +30,7 @@ mod extract;
 mod extract_orgs;
 mod extract_persons;
 mod feeder;
+mod ignored_log;
 mod join;
 mod lines;
 mod load;

@@ -1,7 +1,7 @@
 //! From one feed line to the rows the extract stages write.
 //!
-//! These are the only entry points the extract stages need: a line either becomes a row or a
-//! [`MalformedRecord`] to quarantine. Every check that could make the document builder fail
+//! These are the only entry points the extract stages need: a line either becomes a row (with
+//! the [`LineStats`] the stage counts) or a [`MalformedRecord`] to quarantine. Every check that could make the document builder fail
 //! later (other than the size limit) happens here, through the same parser it uses, and so does
 //! the check of the mapped fields' JSON kinds ([`crate::shape`]) that keeps a single record
 //! from failing a bulk request.
@@ -9,6 +9,7 @@
 use crate::envelope::parse_envelope;
 use crate::error::{MalformedKind, MalformedRecord};
 use crate::json::write_string;
+use crate::line_stats::LineStats;
 use crate::raw::RawObject;
 use crate::roles::{PersonFields, distinct_in_order};
 use crate::rows::{OrgRow, PersonRow};
@@ -19,16 +20,18 @@ use crate::shape::{ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS, check_fields
 /// body, it splices it into `organizations[]` as it is; so its mapped fields' JSON kinds are
 /// checked here, and a body that repeats a key is rewritten from the last occurrences
 /// ([`org_body`]).
-pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<OrgRow, MalformedRecord> {
+pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<(OrgRow, LineStats), MalformedRecord> {
     let envelope = parse_envelope(line)?;
     let object = RawObject::parse(envelope.record_text())
         .map_err(|e| MalformedRecord::from_json(MalformedKind::Record, &e))?;
-    check_fields(&object, ORGANIZATION_FIELDS, None)?;
-    Ok(OrgRow {
+    let mut stats = LineStats::default();
+    check_fields(&object, ORGANIZATION_FIELDS, None, &mut stats)?;
+    let row = OrgRow {
         org_id: envelope.id,
         seq,
         body: org_body(envelope.record_text(), &object),
-    })
+    };
+    Ok((row, stats))
 }
 
 /// The body an organization row keeps: `text` as it is, or, when a key repeats, the object
@@ -58,20 +61,22 @@ fn org_body(text: &str, object: &RawObject<'_>) -> Vec<u8> {
 /// Parses a person feed line into its row, validating `roles[].organization_id` and the JSON
 /// kinds of the mapped fields, the record's and each role's. The row's edges are
 /// [`PersonRow::edges`].
-pub fn parse_person_line(line: &[u8], seq: Seq) -> Result<PersonRow, MalformedRecord> {
+pub fn parse_person_line(line: &[u8], seq: Seq) -> Result<(PersonRow, LineStats), MalformedRecord> {
     let envelope = parse_envelope(line)?;
     let record = envelope.record_text();
     let fields = PersonFields::parse(record)?;
-    check_fields(&fields.object, PERSON_FIELDS, None)?;
+    let mut stats = LineStats::default();
+    check_fields(&fields.object, PERSON_FIELDS, None, &mut stats)?;
     for (index, role) in fields.roles.iter().flatten().enumerate() {
-        check_fields(&role.object, ROLE_FIELDS, Some(index))?;
+        check_fields(&role.object, ROLE_FIELDS, Some(index), &mut stats)?;
     }
-    Ok(PersonRow {
+    let row = PersonRow {
         person_id: envelope.id,
         seq,
         body: record.as_bytes().to_vec(),
         org_ids: distinct_in_order(fields.role_organization_ids()),
-    })
+    };
+    Ok((row, stats))
 }
 
 #[cfg(test)]
@@ -81,11 +86,12 @@ mod tests {
 
     #[test]
     fn org_lines_keep_the_raw_record() {
-        let row = parse_org_line(
+        let (row, stats) = parse_org_line(
             br#"{"id":"5","record":{"name":"A","n":1.10,"x":{"deep":[1]}}}"#,
             Seq::new(1, 2),
         )
         .unwrap();
+        assert_eq!(stats, LineStats::default());
         assert_eq!(row.org_id, 5);
         assert_eq!(row.seq, Seq::new(1, 2));
         assert_eq!(row.body, br#"{"name":"A","n":1.10,"x":{"deep":[1]}}"#);
@@ -94,7 +100,8 @@ mod tests {
     #[test]
     fn person_lines_collect_distinct_org_ids() {
         let line = br#"{"id":8,"record":{"roles":[{"organization_id":4},{"organization_id":null},{"organization_id":"4"},{"organization_id":2}]}}"#;
-        let row = parse_person_line(line, Seq::new(0, 1)).unwrap();
+        let (row, stats) = parse_person_line(line, Seq::new(0, 1)).unwrap();
+        assert_eq!(stats, LineStats::default());
         assert_eq!(row.person_id, 8);
         assert_eq!(row.org_ids, [4, 2]);
         assert_eq!(row.edges().len(), 2);
@@ -111,12 +118,20 @@ mod tests {
     fn person_lines_reject_mapped_fields_of_the_wrong_kind() {
         for (record, reason) in [
             (
-                r#"{"open_to_work":"yes"}"#,
-                "open_to_work: expected a boolean, found a string other than \"true\" or \"false\"",
+                r#"{"followers":{"count":3}}"#,
+                "followers: expected a string, number or boolean, found an object",
+            ),
+            (
+                r#"{"open_to_work":[true,{"x":1}]}"#,
+                "open_to_work[1]: expected a string, number or boolean, found an object",
             ),
             (
                 r#"{"id":"abc"}"#,
                 "id: expected a number, found a string that is not a number",
+            ),
+            (
+                r#"{"roles":[{"id":"abc"}]}"#,
+                "roles[0].id: expected a number, found a string that is not a number",
             ),
             (
                 r#"{"roles":[{"title":"a"},{"title":{"text":"b"}}]}"#,
@@ -141,8 +156,34 @@ mod tests {
             "start_date":2020,"end_date":null}],
             "organizations":"replaced","memberships":7}}"#;
         assert_eq!(
-            parse_person_line(line, Seq::default()).unwrap().org_ids,
+            parse_person_line(line, Seq::default()).unwrap().0.org_ids,
             [2]
+        );
+    }
+
+    #[test]
+    fn lines_count_the_values_the_index_skips() {
+        let line = br#"{"id":8,"record":{"followers":"n/a","connections":["x",3],
+            "open_to_work":"yes","roles":[{"organization_id":2}]}}"#;
+        let (row, stats) = parse_person_line(line, Seq::default()).unwrap();
+        assert_eq!(row.org_ids, [2]);
+        // The record is kept as it is: Elasticsearch keeps the values in `_source`.
+        assert!(row.body.windows(5).any(|w| w == b"\"n/a\""));
+        assert_eq!(stats.ignored_by_index, 3);
+        assert_eq!(
+            stats.first_ignored.map(|v| v.field),
+            Some("connections[0]".to_owned())
+        );
+
+        let (_, stats) = parse_org_line(
+            br#"{"id":1,"record":{"founded_year":"long ago","employee_count":[true]}}"#,
+            Seq::default(),
+        )
+        .unwrap();
+        assert_eq!(stats.ignored_by_index, 2);
+        assert_eq!(
+            stats.first_ignored.map(|v| v.field),
+            Some("employee_count[0]".to_owned())
         );
     }
 
@@ -166,6 +207,34 @@ mod tests {
     }
 
     #[test]
+    fn org_lines_count_the_lenient_value_the_body_keeps() {
+        // The count reads the last occurrence of a repeated key, the one the rewritten body
+        // keeps (and the index sees).
+        for (record, body, count) in [
+            (
+                r#"{"founded_year":"long ago","founded_year":1999}"#,
+                r#"{"founded_year":1999}"#,
+                0,
+            ),
+            (
+                r#"{"founded_year":1999,"employee_count":1,"founded_year":"long ago"}"#,
+                r#"{"employee_count":1,"founded_year":"long ago"}"#,
+                1,
+            ),
+            (
+                r#"{"employee_count":{"n":1},"employee_count":["n/a",true]}"#,
+                r#"{"employee_count":["n/a",true]}"#,
+                2,
+            ),
+        ] {
+            let line = format!(r#"{{"id":1,"record":{record}}}"#);
+            let (row, stats) = parse_org_line(line.as_bytes(), Seq::default()).unwrap();
+            assert_eq!(String::from_utf8(row.body).unwrap(), body, "{record}");
+            assert_eq!(stats.ignored_by_index, count, "{record}");
+        }
+    }
+
+    #[test]
     fn org_lines_keep_the_last_of_a_repeated_key() {
         for (record, body) in [
             (r#"{"name":"A","name":"B"}"#, r#"{"name":"B"}"#),
@@ -179,7 +248,7 @@ mod tests {
             ),
         ] {
             let line = format!(r#"{{"id":1,"record":{record}}}"#);
-            let row = parse_org_line(line.as_bytes(), Seq::default()).unwrap();
+            let (row, _) = parse_org_line(line.as_bytes(), Seq::default()).unwrap();
             assert_eq!(String::from_utf8(row.body).unwrap(), body, "{record}");
         }
         // A long discarded value leaves no capacity behind the budget's back.
@@ -187,7 +256,7 @@ mod tests {
             r#"{{"id":1,"record":{{"x":"{}","x":0}}}}"#,
             "a".repeat(1 << 20)
         );
-        let row = parse_org_line(line.as_bytes(), Seq::default()).unwrap();
+        let (row, _) = parse_org_line(line.as_bytes(), Seq::default()).unwrap();
         assert_eq!(row.body, br#"{"x":0}"#);
         assert_eq!(row.body.capacity(), row.body.len());
         // The kind check still reads the last occurrence, and quarantines it when it is wrong.

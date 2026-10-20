@@ -23,7 +23,7 @@
     "skills": {"type": "keyword", "ignore_above": 512},
     "connections": {"type": "long", "ignore_malformed": true},
     "followers": {"type": "long", "ignore_malformed": true},
-    "open_to_work": {"type": "boolean"},
+    "open_to_work": {"type": "boolean", "ignore_malformed": true},
     "roles": {
       "type": "object",
       "properties": {

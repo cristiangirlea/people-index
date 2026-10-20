@@ -188,6 +188,16 @@ being resumed.
 - `runs/<run_id>/summary.json` is written by `publish`: what the run read, joined, quarantined
   and indexed, and the count check that allowed the alias to move. Malformed lines are in
   `runs/<run_id>/quarantine/` with their origin.
+- `values_ignored_by_index` (extract stages, in `summary.json` and
+  `pi_task_counter_total{counter="values_ignored_by_index"}`) counts the values of kept records
+  that Elasticsearch skips under `ignore_malformed` (`"n/a"` in `followers`, `"yes"` in
+  `open_to_work`), following the rules Elasticsearch 9.5.5 was observed to apply (they and the
+  one known divergence are in [ARCHITECTURE.md](ARCHITECTURE.md#the-data)): the malformed
+  values are not indexed and the field is listed in the document's `_ignored`; the record stays
+  searchable by its other fields. An `exists` query on `_ignored` finds those documents; it
+  counts documents, while the counter counts values per extracted line (before person
+  deduplication, an organization's value once however many persons embed it), so the two
+  numbers differ.
 
 What to watch during a load: a rising rate of bulk retries means the cluster is pushing back
 (HTTP 429); task retries and lease takeovers mean workers are dying or stalling.

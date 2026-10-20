@@ -43,6 +43,16 @@ is not an object, or any other `organization_id` makes the line malformed (kind 
 Unknown fields are carried through untouched (the record is kept as raw JSON; only the fields
 the join needs are parsed).
 
+**A number token longer than 1000 characters** (as written: sign, digits, `.`, exponent)
+anywhere in the record, mapped, unknown or inside a disabled object, makes the line malformed
+(kind `record`, the reason names the path, as in `addresses[2].zip: a number of 1001
+characters; Elasticsearch accepts at most 1000`): Elasticsearch 9.5.5 refuses it while parsing
+the document, whatever the field's mapping (observed: 1001 digits fail the bulk item even in a
+`text` field or with `ignore_malformed`, 999 are indexed). Counting the sign, point and
+exponent too is deliberately strict, and so is scanning the record as written: a long number
+under a repeated key the index would not keep still quarantines the line. `pi-model` finds it
+with one pass of its raw-JSON scanner (`scan`) over the record; the limit is `MAX_NUMBER_CHARS`.
+
 **Mapped fields must have the JSON kind their mapping expects**, or the record is malformed
 (kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
 or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must

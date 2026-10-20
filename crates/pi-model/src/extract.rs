@@ -9,32 +9,34 @@
 use crate::envelope::parse_envelope;
 use crate::error::{MalformedKind, MalformedRecord};
 use crate::line_stats::LineStats;
-use crate::number_length::check_number_lengths;
+use std::ops::ControlFlow;
+
+use crate::number_length::LongNumbers;
 use crate::raw::RawObject;
-use crate::repeated_keys::RepeatedKeys;
+use crate::repeated_keys::with_repeated_keys;
 use crate::roles::{PersonFields, distinct_in_order};
 use crate::rows::{OrgRow, PersonRow};
+use crate::scan::scan;
 use crate::seq::Seq;
 use crate::shape::{ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS, check_fields};
 
 /// Parses an organization feed line into its row. The join never reads inside an organization
 /// body, it splices it into `organizations[]` as it is; so its mapped fields' JSON kinds are
-/// checked here (and every number's length, [`check_number_lengths`]), and a body that repeats a
-/// key at any depth keeps each key's last occurrence only ([`RepeatedKeys`]).
+/// checked here (and every number's length, [`LongNumbers`]), and a body that repeats a key at
+/// any depth keeps each key's last occurrence only ([`crate::repeated_keys::RepeatedKeys`]).
 pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<(OrgRow, LineStats), MalformedRecord> {
     let envelope = parse_envelope(line)?;
     let record = envelope.record_text();
     let object = RawObject::parse(record)
         .map_err(|e| MalformedRecord::from_json(MalformedKind::Record, &e))?;
-    let mut repeats = RepeatedKeys::default();
-    check_number_lengths(record, &mut repeats)?;
+    let (body, repeated_keys) = reduce(record)?;
     let mut stats = LineStats::default();
     check_fields(&object, ORGANIZATION_FIELDS, None, &mut stats)?;
-    stats.repeated_keys = repeats.found();
+    stats.repeated_keys = repeated_keys;
     let row = OrgRow {
         org_id: envelope.id,
         seq,
-        body: repeats.into_body(record),
+        body,
     };
     Ok((row, stats))
 }
@@ -42,26 +44,39 @@ pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<(OrgRow, LineStats), Malf
 /// Parses a person feed line into its row, validating `roles[].organization_id` and the JSON
 /// kinds of the mapped fields, the record's and each role's, and the length of every number. A
 /// record that repeats a key at any depth keeps each key's last occurrence only
-/// ([`RepeatedKeys`]), the one the checks read. The row's edges are [`PersonRow::edges`].
+/// ([`crate::repeated_keys::RepeatedKeys`]), the one the checks read. The row's edges are
+/// [`PersonRow::edges`].
 pub fn parse_person_line(line: &[u8], seq: Seq) -> Result<(PersonRow, LineStats), MalformedRecord> {
     let envelope = parse_envelope(line)?;
     let record = envelope.record_text();
     let fields = PersonFields::parse(record)?;
-    let mut repeats = RepeatedKeys::default();
-    check_number_lengths(record, &mut repeats)?;
+    let (body, repeated_keys) = reduce(record)?;
     let mut stats = LineStats::default();
     check_fields(&fields.object, PERSON_FIELDS, None, &mut stats)?;
     for (index, role) in fields.roles.iter().flatten().enumerate() {
         check_fields(&role.object, ROLE_FIELDS, Some(index), &mut stats)?;
     }
-    stats.repeated_keys = repeats.found();
+    stats.repeated_keys = repeated_keys;
     let row = PersonRow {
         person_id: envelope.id,
         seq,
-        body: repeats.into_body(record),
+        body,
         org_ids: distinct_in_order(fields.role_organization_ids()),
     };
     Ok((row, stats))
+}
+
+/// One scan of `record` (valid JSON) for both its too-long numbers and its repeated keys: the
+/// body to keep, each key's last occurrence only ([`crate::repeated_keys::RepeatedKeys`]), and
+/// whether a key repeats; or the quarantine of a too-long number the body keeps.
+fn reduce(record: &str) -> Result<(Vec<u8>, bool), MalformedRecord> {
+    with_repeated_keys(|repeats| {
+        let mut long = LongNumbers::default();
+        let ControlFlow::Continue(()) = scan(record, &mut (&mut long, repeats.watch(record)));
+        repeats.settle();
+        long.check(record, |at| repeats.dropped(at))?;
+        Ok((repeats.body(record), repeats.found()))
+    })
 }
 
 #[cfg(test)]
@@ -307,6 +322,17 @@ mod tests {
                 // `connections` is the person's lenient field, `employee_count` the organization's.
                 1,
             ),
+            // Keys compare decoded; the kept occurrence keeps its spelling.
+            (
+                r#"{"m":[{"\ud83d\ude00":1,"😀":2}],"a\/b":1,"a/b":3}"#,
+                r#"{"m":[{"😀":2}],"a/b":3}"#,
+                0,
+            ),
+            (
+                r#"{"m":[{"😀":1,"\ud83d\ude00":2}],"a/b":1,"a\/b":3}"#,
+                r#"{"m":[{"\ud83d\ude00":2}],"a\/b":3}"#,
+                0,
+            ),
             // Escapes and number text survive byte for byte, whitespace too.
             (
                 r#"{"s": "a\"\u00e9\\", "n": [1.50E+3, -0.0], "q": {"t": "\n", "t": "\u0041"}}"#,
@@ -379,8 +405,10 @@ mod tests {
             (r#"{"x":{"deep":{"n":N}}}"#, "x.deep.n"),
             (r#"{"addresses":[{},{},{"zip":N}]}"#, "addresses[2].zip"),
             (r#"{"roles":[{"x":[0,N]}]}"#, "roles[0].x[1]"),
-            // The scan reads the record as written, so a repeated key's dropped value counts.
-            (r#"{"zip":N,"zip":1}"#, "zip"),
+            // In the kept occurrence of a repeated key.
+            (r#"{"zip":1,"zip":N}"#, "zip"),
+            // The reason names the first number the body keeps.
+            (r#"{"a":{"n":N},"b":[N],"a":0}"#, "b[0]"),
         ] {
             for parse in parsers {
                 let line = |n: &str| format!(r#"{{"id":1,"record":{}}}"#, template.replace('N', n));
@@ -394,6 +422,47 @@ mod tests {
                     )
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lines_keep_a_number_too_long_for_elasticsearch_that_the_body_drops() {
+        // Elasticsearch only sees the body, so a too-long number in an occurrence it drops does
+        // not quarantine the record.
+        let long = "1".repeat(1001);
+        for (record, body) in [
+            (r#"{"zip":N,"zip":1}"#, r#"{"zip":1}"#),
+            (
+                r#"{"addresses":[{"zip":N,"city":"A","zip":2}]}"#,
+                r#"{"addresses":[{"city":"A","zip":2}]}"#,
+            ),
+            (r#"{"x":{"y":[N,{"n":N}]},"x":{}}"#, r#"{"x":{}}"#),
+            // The duplicate sits inside a kept nested object: only its earlier value goes.
+            (
+                r#"{"a":{"b":{"zip":N,"zip":1}}}"#,
+                r#"{"a":{"b":{"zip":1}}}"#,
+            ),
+        ] {
+            for parse in BODY_PARSERS {
+                let line = format!(r#"{{"id":1,"record":{}}}"#, record.replace('N', &long));
+                let (kept, stats) = parse(line.as_bytes()).unwrap();
+                assert_eq!(String::from_utf8(kept).unwrap(), body, "{record}");
+                assert!(stats.repeated_keys, "{record}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_kept_member_with_a_dropped_duplicate_still_quarantines_its_own_long_number() {
+        // A dropped span inside a kept object covers only the dropped member: the kept object's
+        // other too-long number still reaches Elasticsearch, so the record is quarantined.
+        let long = "1".repeat(1001);
+        let record = format!(r#"{{"a":{{"zip":1,"zip":2,"big":{long}}}}}"#);
+        for parse in BODY_PARSERS {
+            let line = format!(r#"{{"id":1,"record":{record}}}"#);
+            let err = parse(line.as_bytes()).unwrap_err();
+            assert_eq!(err.kind(), MalformedKind::Record);
+            assert!(err.reason().starts_with("a.big: "), "{}", err.reason());
         }
     }
 

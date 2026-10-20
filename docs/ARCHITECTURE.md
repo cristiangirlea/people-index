@@ -49,19 +49,22 @@ anywhere in the record, mapped, unknown or inside a disabled object, makes the l
 characters; Elasticsearch accepts at most 1000`): Elasticsearch 9.5.5 refuses it while parsing
 the document, whatever the field's mapping (observed: 1001 digits fail the bulk item even in a
 `text` field or with `ignore_malformed`, 999 are indexed). Counting the sign, point and
-exponent too is deliberately strict, and so is scanning the record as written: a long number
-under a repeated key the index would not keep still quarantines the line. `pi-model` finds it
-with one pass of its raw-JSON scanner (`scan`) over the record; the limit is `MAX_NUMBER_CHARS`.
+exponent too is deliberately strict. Only the numbers the stored body keeps count: one inside
+an earlier occurrence of a repeated key, which the body drops (below), does not quarantine the
+line, and the reason names the first kept one. `pi-model` notes them in the same pass of its
+raw-JSON scanner (`scan`) that finds repeated keys and decides after it; the limit is
+`MAX_NUMBER_CHARS`.
 
 **A key repeated in one object**, at any depth (the top level, a role, an object inside an
 array, an unknown field, a disabled object like `addresses`), is reduced to its last
 occurrence: Elasticsearch 9.5.5 fails the bulk item with "Duplicate field" for a repeat at any
 of those places (observed), and the last occurrence is the one every common JSON parser, and
 the checks here, read. The same scan pass notes the repeats (`RepeatedKeys`, a second visitor;
-keys compare decoded, so `"name"` repeats `"name"`); a record with one is stored without
-each repeated key's earlier occurrences, from its key to the next key of the same object, every
-other byte as written (key spellings, value text, whitespace, order); a record without one,
-nearly all of them, is stored byte for byte. Such a record is kept, not malformed, and counted
+keys compare as written and, when one has an escape, decoded, so `"\u006eame"` repeats
+`"name"`); a record with one is stored without each repeated key's earlier occurrences,
+from its key to the next key of the same object, every other byte as written (key spellings,
+value text, whitespace, order); a record without one, nearly all of them, is stored byte for
+byte. Such a record is kept, not malformed, and counted
 in the extract counter `records_with_repeated_keys` (per extracted line, like
 `values_ignored_by_index`).
 

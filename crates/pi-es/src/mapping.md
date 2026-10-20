@@ -49,7 +49,8 @@ things fail the item in any field, disabled, `text` or `ignore_malformed` alike 
 on 9.5.5):
 
 - a number token longer than 1000 characters: extraction quarantines such a record as `record`,
-  naming the path (`pi_model`'s `MAX_NUMBER_CHARS`);
+  naming the path (`pi_model`'s `MAX_NUMBER_CHARS`), unless the number is in an occurrence of a
+  repeated key that the rewrite below drops;
 - a key repeated in one object ("Duplicate field"), at any depth: extraction rewrites such a
   record to each key's last occurrence and counts it in `records_with_repeated_keys`.
 

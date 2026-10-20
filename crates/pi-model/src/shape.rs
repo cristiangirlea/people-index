@@ -8,7 +8,7 @@
 //! the run.
 //!
 //! Identifiers are strict ([`JsonKind::Number`]): an `id` or `organization_id` that is not a
-//! number is quarantined. Measures are lenient ([`JsonKind::LenientLong`],
+//! number, or a string the id rule accepts ([`crate::parse_decimal_id`]), is quarantined. Measures are lenient ([`JsonKind::LenientLong`],
 //! [`JsonKind::LenientInteger`], [`JsonKind::LenientBoolean`]): their mapping has
 //! `ignore_malformed`, so Elasticsearch skips a scalar it cannot read as the field's type (the
 //! value is not indexed and the field is listed in the document's `_ignored`) and keeps the
@@ -34,14 +34,16 @@ use serde_json::value::RawValue;
 
 use crate::error::{MalformedKind, MalformedRecord};
 use crate::es_number::{self, NumericType, Reading};
+use crate::id::parse_decimal_id;
 use crate::line_stats::LineStats;
 use crate::raw::{RawObject, is_null};
 
 /// The JSON kind a mapped field expects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonKind {
-    /// A number, or a string holding a JSON number (Elasticsearch coerces it): `long`,
-    /// `integer`. Strict, for identifiers: anything else is quarantined.
+    /// A number, or a string of ASCII decimal digits within `u64` (the id rule,
+    /// [`crate::parse_decimal_id`]; Elasticsearch coerces it): `long`, `integer`. Strict, for
+    /// identifiers: anything else is quarantined.
     Number,
     /// `true` or `false`, or the strings `"true"`, `"false"` and `""` (Elasticsearch reads the
     /// empty string as false): `boolean`. Strict: anything else is quarantined.
@@ -258,7 +260,9 @@ fn indices(at: &[usize]) -> String {
 /// Whether the scalar `text` passes a strict kind (true for every other kind).
 fn parses(text: &str, kind: JsonKind) -> bool {
     match kind {
-        JsonKind::Number => is_number(text) || string_value(text).is_some_and(|s| is_number(&s)),
+        JsonKind::Number => {
+            is_number(text) || string_value(text).is_some_and(|s| parse_decimal_id(&s).is_some())
+        }
         JsonKind::Boolean | JsonKind::LenientBoolean => {
             matches!(text, "true" | "false")
                 || string_value(text).is_some_and(|s| matches!(s.as_str(), "true" | "false" | ""))
@@ -710,6 +714,42 @@ mod tests {
             err.reason(),
             "id: expected a number, found a string that is not a number"
         );
+    }
+
+    #[test]
+    fn id_strings_follow_the_id_rule() {
+        let cases = [
+            (PERSON_FIELDS, "id", None),
+            (ORGANIZATION_FIELDS, "id", None),
+            (ROLE_FIELDS, "id", Some(0)),
+            (ROLE_FIELDS, "organization_id", Some(0)),
+        ];
+        for (fields, name, role) in cases {
+            let prefix = role.map_or(String::new(), |i| format!("roles[{i}]."));
+            for value in [r#""007""#, r#""7""#, "7"] {
+                let record = format!(r#"{{"{name}":{value}}}"#);
+                let object = RawObject::parse(&record).unwrap();
+                check_fields(&object, fields, role, &mut LineStats::default())
+                    .unwrap_or_else(|e| panic!("{prefix}{name}={value}: {e}"));
+            }
+            for (value, found) in [
+                (r#""7a""#, "a string that is not a number"),
+                (r#"" 7""#, "a string that is not a number"),
+                (r#""-1""#, "a string that is not a number"),
+                (r#""""#, "a string that is not a number"),
+                ("{}", "an object"),
+            ] {
+                let record = format!(r#"{{"{name}":{value}}}"#);
+                let object = RawObject::parse(&record).unwrap();
+                let err =
+                    check_fields(&object, fields, role, &mut LineStats::default()).unwrap_err();
+                assert_eq!(err.kind(), MalformedKind::Record, "{prefix}{name}={value}");
+                assert_eq!(
+                    err.reason(),
+                    format!("{prefix}{name}: expected a number, found {found}"),
+                );
+            }
+        }
     }
 
     #[test]

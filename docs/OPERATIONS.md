@@ -50,6 +50,14 @@ make compose-clean         # stop and delete every volume
    status: 0 means the run published.
 3. `make compose-verify`: the acceptance queries and the content digest against the alias.
 
+`make compose-e2e` (CI's end-to-end) is `make compose-run`, then a second run (`RUN_ID` with
+`-2` appended) over the same feeds, `make compose-verify` again, and
+`deploy/compose/scripts/check-republish.sh`: the alias points only at the second run's index,
+the first run's index is gone, no other `persons-*` index is left, and the second run's
+`summary.json` lists the first index under `previous` and `deleted` with `not_deleted` empty.
+That second publish is the only place the pipeline user moves the alias off an index and
+deletes it against a real cluster, the calls role `people-index-writer` must allow.
+
 `make compose-up` alone starts Elasticsearch, the store and the one-shot setup services, and
 waits until `certs`, `es-users` and `s3-init` have succeeded:
 
@@ -288,7 +296,8 @@ cluster until they return.
 `.github/workflows/ci.yml` runs on GitHub-hosted runners: `rust` (fmt, clippy with
 `-D warnings`, tests, all `--locked`), `msrv` (check at `rust-version`), `deploy`
 (`scripts/check-deploy.sh` and the scrub check), `lint` (actionlint, shellcheck, hadolint, the
-scrub-check test, hooks and scripts stored as 100755), `image` (docker build, no push), `audit`
-(cargo-deny: advisories, bans, licenses, sources; also weekly), and `e2e` on pushes to main and
-manual dispatch: the compose stack with a small data set through `make compose-run`, logs
-uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+scrub-check and republish-check tests, hooks and scripts stored as 100755), `image` (docker
+build, no push), `audit` (cargo-deny: advisories, bans, licenses, sources; also weekly), and
+`e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
+`make compose-e2e` (two runs, so the second publish replaces the first), logs uploaded on
+failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.

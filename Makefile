@@ -100,6 +100,7 @@ check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub, file mo
 	bash scripts/check-deploy.sh
 	bash scripts/scrub-check.sh
 	bash scripts/test-scrub-check.sh
+	bash scripts/test-check-republish.sh
 	bash scripts/test-check-modes.sh
 	bash scripts/check-modes.sh
 	@if command -v cargo-deny >/dev/null; then cargo deny check; else echo "cargo-deny not installed; skipped (CI runs it)"; fi
@@ -148,10 +149,23 @@ compose-verify: ## Acceptance queries and content digest against the alias
 	$(COMPOSE) --profile verify run --rm verify
 
 .PHONY: compose-run
-compose-run: ## Datagen, a full distributed run, then verify (what CI's e2e job does)
+compose-run: ## Datagen, a full distributed run, then verify
 	$(MAKE) compose-datagen
 	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)
 	$(MAKE) compose-verify
+
+.PHONY: compose-e2e
+compose-e2e: ## compose-run, then a second run that replaces it, verify and the republish checks (CI's e2e)
+	@# The second publish moves the alias off the first run's index and deletes that index, as
+	@# the pipeline user: the calls the people-index-writer role must allow. check-republish.sh
+	@# then reads the cluster (es-users image: curl, the CA) and the second run's summary.json
+	@# (s3-init image: aws, jq). MSYS_NO_PATHCONV keeps Git Bash on Windows from rewriting the
+	@# container path /scripts/... into a Windows path; elsewhere it means nothing.
+	$(MAKE) compose-run RUN_ID=$(RUN_ID)
+	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)-2
+	$(MAKE) compose-verify
+	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh es $(RUN_ID) $(RUN_ID)-2
+	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash s3-init /scripts/check-republish.sh summary $(RUN_ID) $(RUN_ID)-2
 
 .PHONY: compose-scale
 compose-scale: ## Change the worker count of a running run: make compose-scale RUN_ID=<id> WORKERS=6

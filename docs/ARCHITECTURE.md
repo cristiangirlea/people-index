@@ -43,18 +43,74 @@ is not an object, or any other `organization_id` makes the line malformed (kind 
 Unknown fields are carried through untouched (the record is kept as raw JSON; only the fields
 the join needs are parsed).
 
+**A number token longer than 1000 characters** (as written: sign, digits, `.`, exponent)
+anywhere in the record, mapped, unknown or inside a disabled object, makes the line malformed
+(kind `record`, the reason names the path, as in `addresses[2].zip: a number of 1001
+characters; Elasticsearch accepts at most 1000`): Elasticsearch 9.5.5 refuses it while parsing
+the document, whatever the field's mapping (observed: 1001 digits fail the bulk item even in a
+`text` field or with `ignore_malformed`, 999 are indexed). Counting the sign, point and
+exponent too is deliberately strict. Only the numbers the stored body keeps count: one inside
+an earlier occurrence of a repeated key, which the body drops (below), does not quarantine the
+line, and the reason names the first kept one. `pi-model` notes them in the same pass of its
+raw-JSON scanner (`scan`) that finds repeated keys and decides after it; the limit is
+`MAX_NUMBER_CHARS`.
+
+**A key repeated in one object**, at any depth (the top level, a role, an object inside an
+array, an unknown field, a disabled object like `addresses`), is reduced to its last
+occurrence: Elasticsearch 9.5.5 fails the bulk item with "Duplicate field" for a repeat at any
+of those places (observed), and the last occurrence is the one every common JSON parser, and
+the checks here, read. The same scan pass notes the repeats (`RepeatedKeys`, a second visitor;
+keys compare as written and, when one has an escape, decoded, so `"\u006eame"` repeats
+`"name"`); a record with one is stored without each repeated key's earlier occurrences,
+from its key to the next key of the same object, every other byte as written (key spellings,
+value text, whitespace, order); a record without one, nearly all of them, is stored byte for
+byte. Such a record is kept, not malformed, and counted
+in the extract counter `records_with_repeated_keys` (per extracted line, like
+`values_ignored_by_index`).
+
 **Mapped fields must have the JSON kind their mapping expects**, or the record is malformed
 (kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
 or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must
 cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELDS`,
 `ROLE_FIELDS`, `ORGANIZATION_FIELDS`), checked by `extract-persons` (the record and every role)
-and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. `long` and
-`integer` fields take a number or a string holding one, `boolean` fields `true`, `false`,
-`"true"`, `"false"` or `""`, `text`, `keyword` and `date` fields (the lists `skills`,
-`keywords` and `technologies` included) any scalar, which Elasticsearch reads as text (`"city":
-10001`, `"start_date": 2020`), or an array of scalars, but no object at any depth, and `roles`
-an array of objects. `null` is allowed everywhere. Disabled objects (`memberships`, `addresses`, ...) take anything, and the
-names the builder writes (`organizations`, `unresolved_organization_ids`,
+and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. Identifiers (`id`,
+`roles[].id`, `roles[].organization_id`, the organization's `id`) are strict: a number or a
+string the id rule above accepts (decimal digits within `u64`, so `"007"` passes and `"7a"`,
+`" 7"`, `"-1"` and `""` do not). Measures (`connections`, `followers`, `open_to_work`, `employee_count`,
+`founded_year`) are lenient, since their mapping has `ignore_malformed`: any scalar or array
+of scalars passes. Elasticsearch skips a value it cannot read as the field's type: the
+malformed values are not indexed and the field is listed in the document's `_ignored`; the
+record stays searchable by its other fields, and the value stays in `_source`. Extraction keeps
+such a record and counts in the extract counter `values_ignored_by_index` the values
+Elasticsearch skips (not malformed, not against `max_malformed`), following the rules
+Elasticsearch 9.5.5 was observed to apply (`pi-model`'s `es_number`, pinned in its tests):
+- either number type: a boolean is skipped, and so is a string of spaces only; `""` is not;
+- `long` (`connections`, `followers`, `employee_count`): a string must be an exact decimal
+  `[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?` with no surrounding whitespace
+  (`"n/a"`, `" 5"` are skipped), truncated toward zero within `i64`; Java's `BigDecimal` limits
+  also skip a string whose exponent is outside `int`, or whose scale (the digits after the
+  point, as written, minus the exponent) is outside `int` or below -19, whatever its value
+  (`"0e20"`, `"0.0e21"`, `"0.5e-2147483647"` are skipped; `"0e19"`, `"0.0e20"`,
+  `"1e-2147483647"` are not); a JSON integer must be within `i64`; a JSON number with a
+  fraction or exponent is compared as a double with `±2^63`, so values that round to 2^63
+  pass;
+- `integer` (`founded_year`): a string is read by Java's `Double.parseDouble` (trimmed; `NaN`,
+  `Infinity`, `d`/`f` suffixes and hexadecimal accepted; `NaN` indexes as 0), a JSON number as
+  a double, and either is skipped when outside `i32` before truncation (`2147483647.5`). The
+  forms named here were observed; the rest of the grammar is derived from Java's;
+- `boolean`: anything but `true`, `false`, `"true"`, `"false"` and `""`.
+
+Each element of an array counts on its own. One known divergence: a non-ASCII decimal digit in
+a `long` string (`"٥"`) is counted, though Elasticsearch indexes it. The counter counts per
+extracted line, before person deduplication, and an organization's value once however many
+person documents embed it, so it differs from the number of documents an `exists` query on
+`_ignored` finds. Extraction logs the first few such lines per task with file, line, field and
+kind, never the value. `text`, `keyword` and `date` fields (the lists `skills`,
+`keywords` and `technologies` included) take any scalar, which Elasticsearch reads as text
+(`"city": 10001`, `"start_date": 2020`), or an array of scalars. No field but `roles` takes an
+object at any depth, `ignore_malformed` or not, and `roles` takes an array of objects. `null`
+is allowed everywhere. Disabled objects (`memberships`, `addresses`, ...) take anything, and
+the names the builder writes (`organizations`, `unresolved_organization_ids`,
 `roles[].organization_resolved`) are replaced, so neither is checked. A value of the right kind
 that still does not parse (a number out of range, a date in another format) is not indexed for
 that field and stays in `_source` (`ignore_malformed`).
@@ -72,11 +128,12 @@ The person record, plus:
   when there are none.
 
 These three names are owned by the builder: an input field of the same name is replaced. When a
-record repeats a key (top level or inside a role), the last occurrence wins and the output has
-no duplicate keys. Organization bodies are spliced in as raw JSON; they are never re-parsed on
-the person side. A document larger than `max_document_bytes` (clamped to `bulk_max_bytes`
-minus 4 KiB, so every kept document fits in one bulk request) is quarantined as
-`document_too_large` instead of indexed.
+record repeats a key in any object, at any depth, the last occurrence wins and the output has no
+duplicate key anywhere: both extract stages rewrite such a record before it is stored (rather
+than quarantine it; "The data" has the rule), so person bodies and the organization bodies
+spliced in as raw JSON (never re-parsed on the person side) arrive without repeats. A document larger than
+`max_document_bytes` (clamped to `bulk_max_bytes` minus 4 KiB, so every kept document fits in
+one bulk request) is quarantined as `document_too_large` instead of indexed.
 
 Duplicate ids resolve to the **last record in feed order** (input files sorted by key, then
 line number), for organizations and for persons alike, whatever the partition or worker count.
@@ -222,8 +279,10 @@ varint length followed by the `postcard` encoding of the row. Files start with t
 the compressed size reaches `segment_target_bytes` (default 64 MiB), so a segment ends at most
 about one row past the target. Rows (`crates/pi-model`):
 
-- `OrgRow { org_id: u64, seq: Seq, body: Vec<u8> }`: `body` is the raw JSON of the record.
-- `PersonRow { person_id: u64, seq: Seq, body: Vec<u8>, org_ids: Vec<u64> }`: distinct
+- `OrgRow { org_id: u64, seq: Seq, body: Vec<u8> }`: `body` is the raw JSON of the record, its
+  repeated keys, at any depth, reduced to the last occurrence.
+- `PersonRow { person_id: u64, seq: Seq, body: Vec<u8>, org_ids: Vec<u64> }`: `body` as for
+  `OrgRow`; `org_ids` the distinct
   non-null organization ids in role order.
 - `EdgeRow { org_id: u64, person_id: u64, seq: Seq }`
 - `JoinedRow { person_id: u64, org_id: u64, seq: Seq, body: Option<Vec<u8>> }`: `None` means

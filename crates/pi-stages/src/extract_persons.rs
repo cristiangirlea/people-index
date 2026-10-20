@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_coord::{AttemptId, RunContext, Stage, StageName, TaskReport, TaskSpec};
-use pi_model::{EdgeRow, MalformedRecord, Partitioner, PersonRow, Seq, parse_person_line};
+use pi_model::{
+    EdgeRow, LineStats, MalformedRecord, Partitioner, PersonRow, Seq, parse_person_line,
+};
 use pi_store::Dataset;
 
 use crate::channel::Outbox;
@@ -79,9 +81,13 @@ impl PersonSink {
 }
 
 impl LineSink for PersonSink {
-    fn handle(&mut self, line: &[u8], seq: Seq) -> anyhow::Result<Result<(), MalformedRecord>> {
-        let row = match parse_person_line(line, seq) {
-            Ok(row) => row,
+    fn handle(
+        &mut self,
+        line: &[u8],
+        seq: Seq,
+    ) -> anyhow::Result<Result<LineStats, MalformedRecord>> {
+        let (row, stats) = match parse_person_line(line, seq) {
+            Ok(parsed) => parsed,
             Err(m) => return Ok(Err(m)),
         };
         for edge in row.edges() {
@@ -95,7 +101,7 @@ impl LineSink for PersonSink {
         let size = row.body.len() + row.org_ids.len() * 8 + ROW_OVERHEAD;
         let q = self.partitioner.partition(row.person_id);
         self.persons.push(q, row, size)?;
-        Ok(Ok(()))
+        Ok(Ok(stats))
     }
 
     fn finish(self: Box<Self>) -> anyhow::Result<(Written, BTreeMap<&'static str, u64>)> {

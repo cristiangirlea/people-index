@@ -149,7 +149,7 @@ proptest! {
     fn documents_follow_the_output_rules(case in case()) {
         let record = case.record();
         let line = serde_json::to_vec(&json!({"id": 1, "updated_at": "t", "record": record})).unwrap();
-        let row = parse_person_line(&line, Seq::new(0, 1)).unwrap();
+        let (row, _) = parse_person_line(&line, Seq::new(0, 1)).unwrap();
         let table = case.table();
         let built = DocumentBuilder::default().build_row(&row, &table).unwrap();
         let doc: Value = serde_json::from_slice(&built.doc.body).unwrap();

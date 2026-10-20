@@ -50,6 +50,14 @@ make compose-clean         # stop and delete every volume
    status: 0 means the run published.
 3. `make compose-verify`: the acceptance queries and the content digest against the alias.
 
+`make compose-e2e` (CI's end-to-end) is `make compose-run`, then a second run (`RUN_ID` with
+`-2` appended) over the same feeds, `make compose-verify` again, and
+`deploy/compose/scripts/check-republish.sh`: the alias points only at the second run's index,
+the first run's index is gone, no other `persons-*` index is left, and the second run's
+`summary.json` lists the first index under `previous` and `deleted` with `not_deleted` empty.
+That second publish is the only place the pipeline user moves the alias off an index and
+deletes it against a real cluster, the calls role `people-index-writer` must allow.
+
 `make compose-up` alone starts Elasticsearch, the store and the one-shot setup services, and
 waits until `certs`, `es-users` and `s3-init` have succeeded:
 
@@ -188,6 +196,20 @@ being resumed.
 - `runs/<run_id>/summary.json` is written by `publish`: what the run read, joined, quarantined
   and indexed, and the count check that allowed the alias to move. Malformed lines are in
   `runs/<run_id>/quarantine/` with their origin.
+- `values_ignored_by_index` (extract stages, in `summary.json` and
+  `pi_task_counter_total{counter="values_ignored_by_index"}`) counts the values of kept records
+  that Elasticsearch skips under `ignore_malformed` (`"n/a"` in `followers`, `"yes"` in
+  `open_to_work`), following the rules Elasticsearch 9.5.5 was observed to apply (they and the
+  one known divergence are in [ARCHITECTURE.md](ARCHITECTURE.md#the-data)): the malformed
+  values are not indexed and the field is listed in the document's `_ignored`; the record stays
+  searchable by its other fields. An `exists` query on `_ignored` finds those documents; it
+  counts documents, while the counter counts values per extracted line (before person
+  deduplication, an organization's value once however many persons embed it), so the two
+  numbers differ.
+- `records_with_repeated_keys` (extract stages, same places) counts the kept records that
+  repeated a key in some object, at any depth; each was stored with the key's last occurrence
+  only, since Elasticsearch fails a document with a duplicate key anywhere
+  ([ARCHITECTURE.md](ARCHITECTURE.md#the-data)).
 
 What to watch during a load: a rising rate of bulk retries means the cluster is pushing back
 (HTTP 429); task retries and lease takeovers mean workers are dying or stalling.
@@ -277,8 +299,9 @@ cluster until they return.
 
 `.github/workflows/ci.yml` runs on GitHub-hosted runners: `rust` (fmt, clippy with
 `-D warnings`, tests, all `--locked`), `msrv` (check at `rust-version`), `deploy`
-(`scripts/check-deploy.sh` and the scrub check), `lint` (actionlint, shellcheck, hadolint),
-`image` (docker build, no push), `audit` (cargo-deny: advisories, bans, licenses, sources; also
-weekly), and `e2e` on pushes to main and manual dispatch: the compose stack with a small data
-set through `make compose-run`, logs uploaded on failure. `make check` runs the same Rust,
-deploy and scrub checks locally.
+(`scripts/check-deploy.sh` and the scrub check), `lint` (actionlint, shellcheck, hadolint, the
+scrub-check and republish-check tests, hooks and scripts stored as 100755), `image` (docker
+build, no push), `audit` (cargo-deny: advisories, bans, licenses, sources; also weekly), and
+`e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
+`make compose-e2e` (two runs, so the second publish replaces the first), logs uploaded on
+failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.

@@ -7,6 +7,17 @@ pub const LINES: &str = "lines";
 pub const RECORDS: &str = "records";
 /// Malformed lines; summed per feed against `max_malformed`.
 pub const MALFORMED: &str = "malformed";
+/// Values of lenient fields (`connections`, `followers`, `open_to_work`, `employee_count`,
+/// `founded_year`) in kept records that Elasticsearch skips (`ignore_malformed`), following the
+/// rules Elasticsearch 9.5.5 was observed to apply (`pi_model::JsonKind`): the malformed values
+/// are not indexed and the field is listed in the document's `_ignored`; the record stays
+/// searchable by its other fields. Counted per extracted line, before person deduplication; an
+/// organization's value counts once however many person documents embed it.
+pub const VALUES_IGNORED_BY_INDEX: &str = "values_ignored_by_index";
+/// Kept records that repeated a key in some object, at any depth, and were rewritten to each
+/// key's last occurrence (Elasticsearch rejects a duplicate key anywhere in a document).
+/// Counted per extracted line, like [`VALUES_IGNORED_BY_INDEX`].
+pub const RECORDS_WITH_REPEATED_KEYS: &str = "records_with_repeated_keys";
 /// Decompressed bytes of an input file.
 pub const DECOMPRESSED_BYTES: &str = "decompressed_bytes";
 /// Edge rows written by `extract-persons`.

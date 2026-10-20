@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_coord::{AttemptId, RunContext, Stage, StageName, TaskReport, TaskSpec};
-use pi_model::{MalformedRecord, OrgRow, Partitioner, Seq, parse_org_line};
+use pi_model::{LineStats, MalformedRecord, OrgRow, Partitioner, Seq, parse_org_line};
 use pi_store::Dataset;
 
 use crate::channel::Outbox;
@@ -59,15 +59,19 @@ impl OrgSink {
 }
 
 impl LineSink for OrgSink {
-    fn handle(&mut self, line: &[u8], seq: Seq) -> anyhow::Result<Result<(), MalformedRecord>> {
-        let row = match parse_org_line(line, seq) {
-            Ok(row) => row,
+    fn handle(
+        &mut self,
+        line: &[u8],
+        seq: Seq,
+    ) -> anyhow::Result<Result<LineStats, MalformedRecord>> {
+        let (row, stats) = match parse_org_line(line, seq) {
+            Ok(parsed) => parsed,
             Err(m) => return Ok(Err(m)),
         };
         let size = row.body.len() + ROW_OVERHEAD;
         self.orgs
             .push(self.partitioner.partition(row.org_id), row, size)?;
-        Ok(Ok(()))
+        Ok(Ok(stats))
     }
 
     fn finish(self: Box<Self>) -> anyhow::Result<(Written, BTreeMap<&'static str, u64>)> {

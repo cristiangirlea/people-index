@@ -16,7 +16,7 @@ pub struct OrgRow {
     pub org_id: u64,
     /// Where the record sits in feed order, for last-wins deduplication.
     pub seq: Seq,
-    /// The raw JSON of the record (an object).
+    /// The raw JSON of the record (an object), repeated top-level keys reduced to the last one.
     #[serde(with = "serde_bytes")]
     pub body: Vec<u8>,
 }

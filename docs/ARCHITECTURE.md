@@ -72,7 +72,8 @@ cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELD
 `ROLE_FIELDS`, `ORGANIZATION_FIELDS`), checked by `extract-persons` (the record and every role)
 and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. Identifiers (`id`,
 `roles[].id`, `roles[].organization_id`, the organization's `id`) are strict: a number or a
-string holding one. Measures (`connections`, `followers`, `open_to_work`, `employee_count`,
+string the id rule above accepts (decimal digits within `u64`, so `"007"` passes and `"7a"`,
+`" 7"`, `"-1"` and `""` do not). Measures (`connections`, `followers`, `open_to_work`, `employee_count`,
 `founded_year`) are lenient, since their mapping has `ignore_malformed`: any scalar or array
 of scalars passes. Elasticsearch skips a value it cannot read as the field's type: the
 malformed values are not indexed and the field is listed in the document's `_ignored`; the

@@ -93,6 +93,17 @@ mod tests {
     }
 
     #[test]
+    fn ids_with_leading_zeros_pass_extraction_end_to_end() {
+        // The shape check and the id rule agree: "007" passes the check and joins as 7.
+        let line = br#"{"id":"008","record":{"id":"008","roles":[{"id":"03","organization_id":"007"},{"organization_id":7}]}}"#;
+        let (row, _) = parse_person_line(line, Seq::default()).unwrap();
+        assert_eq!(row.person_id, 8);
+        assert_eq!(row.org_ids, [7]);
+        let org = br#"{"id":"0042","record":{"id":"0042","name":"Acme"}}"#;
+        assert_eq!(parse_org_line(org, Seq::default()).unwrap().0.org_id, 42);
+    }
+
+    #[test]
     fn person_lines_reject_bad_roles() {
         let err =
             parse_person_line(br#"{"id":8,"record":{"roles":[3]}}"#, Seq::default()).unwrap_err();

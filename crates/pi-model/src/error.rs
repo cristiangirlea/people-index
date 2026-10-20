@@ -15,7 +15,8 @@ pub enum MalformedKind {
     /// JSON, but not an envelope: not an object, `id` or `record` missing, duplicated or invalid.
     Envelope,
     /// A valid envelope whose record cannot be joined or indexed: `roles`, a role's
-    /// `organization_id`, or a mapped field of the wrong JSON kind.
+    /// `organization_id`, a mapped field of the wrong JSON kind, or a number too long for
+    /// Elasticsearch to parse.
     Record,
 }
 

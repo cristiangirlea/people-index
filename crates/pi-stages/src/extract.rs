@@ -5,7 +5,8 @@
 //! member, each one's CRC and length checked by reading to the very end), splits it into
 //! capped lines, parses each line with pi-model and hands rows to a [`LineSink`]. Lines that
 //! do not parse are quarantined with their origin and counted; past the feed's
-//! `max_malformed` the task fails for good.
+//! `max_malformed` the task fails for good. Values of kept records that Elasticsearch will skip
+//! (`ignore_malformed`) are counted apart, never quarantined, and the first few are logged.
 
 use std::collections::BTreeMap;
 use std::io::{self, BufReader};
@@ -17,7 +18,7 @@ use flate2::bufread::MultiGzDecoder;
 use pi_coord::{
     AttemptId, CancellationToken, Cancelled, RunContext, StageName, TaskReport, TaskSpec, permanent,
 };
-use pi_model::{MalformedRecord, Partitioner, Seq};
+use pi_model::{LineStats, MalformedRecord, Partitioner, Seq};
 use pi_segment::SegmentConfig;
 use pi_store::RunLayout;
 
@@ -26,6 +27,7 @@ use crate::channel_reader::{ChannelReader, is_input_error};
 use crate::config::StagesConfig;
 use crate::counters;
 use crate::feeder::feed_object_stream;
+use crate::ignored_log::IgnoredLog;
 use crate::lines::LineReader;
 use crate::pipeline::run_pipeline;
 use crate::plan_file::{Feed, Plan};
@@ -41,9 +43,13 @@ const CANCEL_CHECK_LINES: u64 = 4096;
 
 /// Where the rows of one extract task go: the feed-specific half.
 pub(crate) trait LineSink: Send + 'static {
-    /// Parses one line and routes its rows. `Ok(Err(..))` is a malformed line; `Err(..)` is a
-    /// failure of the task (writing a segment failed).
-    fn handle(&mut self, line: &[u8], seq: Seq) -> anyhow::Result<Result<(), MalformedRecord>>;
+    /// Parses one line and routes its rows, returning what the parse noticed. `Ok(Err(..))` is
+    /// a malformed line; `Err(..)` is a failure of the task (writing a segment failed).
+    fn handle(
+        &mut self,
+        line: &[u8],
+        seq: Seq,
+    ) -> anyhow::Result<Result<LineStats, MalformedRecord>>;
 
     /// Writes out everything buffered; returns the totals and feed-specific counters.
     fn finish(self: Box<Self>) -> anyhow::Result<(Written, BTreeMap<&'static str, u64>)>;
@@ -162,6 +168,8 @@ pub(crate) async fn run_extract(
     report.add(counters::LINES, counts.lines);
     report.add(counters::RECORDS, counts.records);
     report.add(counters::MALFORMED, counts.malformed);
+    report.add(counters::VALUES_IGNORED_BY_INDEX, counts.ignored.total());
+    report.add(counters::RECORDS_WITH_REPEATED_KEYS, counts.repeated_keys);
     report.add(counters::DECOMPRESSED_BYTES, counts.decompressed);
     report.add(counters::SEGMENTS, counts.written.segments);
     report.partitions = counts.written.partitions;
@@ -186,6 +194,10 @@ struct Counts {
     records: u64,
     malformed: u64,
     malformed_by_kind: BTreeMap<&'static str, u64>,
+    /// Values of kept records Elasticsearch will skip, and the lines logged about them.
+    ignored: IgnoredLog,
+    /// Kept records rewritten to the last occurrence of a repeated key.
+    repeated_keys: u64,
     decompressed: u64,
     written: Written,
     extra: BTreeMap<&'static str, u64>,
@@ -241,12 +253,16 @@ impl Job {
                 ))
             } else {
                 match sink.handle(&buf, Seq::new(self.file_index, info.number))? {
-                    Ok(()) => Ok(()),
+                    Ok(stats) => Ok(stats),
                     Err(m) => Err((m.kind().as_str(), m.reason().to_owned())),
                 }
             };
             match outcome {
-                Ok(()) => counts.records += 1,
+                Ok(stats) => {
+                    counts.records += 1;
+                    counts.repeated_keys += u64::from(stats.repeated_keys);
+                    counts.ignored.note(&self.file, info.number, stats);
+                }
                 Err((kind, reason)) => {
                     counts.malformed += 1;
                     *counts.malformed_by_kind.entry(kind).or_default() += 1;

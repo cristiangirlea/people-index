@@ -23,6 +23,7 @@ mod number_length;
 mod partition;
 mod pass;
 mod raw;
+mod repeated_keys;
 mod roles;
 mod rows;
 mod scan;

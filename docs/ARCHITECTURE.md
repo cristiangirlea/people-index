@@ -49,9 +49,24 @@ anywhere in the record, mapped, unknown or inside a disabled object, makes the l
 characters; Elasticsearch accepts at most 1000`): Elasticsearch 9.5.5 refuses it while parsing
 the document, whatever the field's mapping (observed: 1001 digits fail the bulk item even in a
 `text` field or with `ignore_malformed`, 999 are indexed). Counting the sign, point and
-exponent too is deliberately strict, and so is scanning the record as written: a long number
-under a repeated key the index would not keep still quarantines the line. `pi-model` finds it
-with one pass of its raw-JSON scanner (`scan`) over the record; the limit is `MAX_NUMBER_CHARS`.
+exponent too is deliberately strict. Only the numbers the stored body keeps count: one inside
+an earlier occurrence of a repeated key, which the body drops (below), does not quarantine the
+line, and the reason names the first kept one. `pi-model` notes them in the same pass of its
+raw-JSON scanner (`scan`) that finds repeated keys and decides after it; the limit is
+`MAX_NUMBER_CHARS`.
+
+**A key repeated in one object**, at any depth (the top level, a role, an object inside an
+array, an unknown field, a disabled object like `addresses`), is reduced to its last
+occurrence: Elasticsearch 9.5.5 fails the bulk item with "Duplicate field" for a repeat at any
+of those places (observed), and the last occurrence is the one every common JSON parser, and
+the checks here, read. The same scan pass notes the repeats (`RepeatedKeys`, a second visitor;
+keys compare as written and, when one has an escape, decoded, so `"\u006eame"` repeats
+`"name"`); a record with one is stored without each repeated key's earlier occurrences,
+from its key to the next key of the same object, every other byte as written (key spellings,
+value text, whitespace, order); a record without one, nearly all of them, is stored byte for
+byte. Such a record is kept, not malformed, and counted
+in the extract counter `records_with_repeated_keys` (per extracted line, like
+`values_ignored_by_index`).
 
 **Mapped fields must have the JSON kind their mapping expects**, or the record is malformed
 (kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
@@ -113,12 +128,10 @@ The person record, plus:
   when there are none.
 
 These three names are owned by the builder: an input field of the same name is replaced. When a
-record repeats a key (top level, inside a role, or at the top level of an organization), the
-last occurrence wins and the output has no duplicate keys at those levels. Organization bodies
-are spliced in as raw JSON; they are never re-parsed on the person side. So `extract-orgs` does
-their part: a body that repeats a key is rewritten from the last occurrences, in input order,
-before it is stored (rather than quarantined, so the rule is the same for every record); a body
-without one, nearly all of them, is stored byte for byte. A document larger than
+record repeats a key in any object, at any depth, the last occurrence wins and the output has no
+duplicate key anywhere: both extract stages rewrite such a record before it is stored (rather
+than quarantine it; "The data" has the rule), so person bodies and the organization bodies
+spliced in as raw JSON (never re-parsed on the person side) arrive without repeats. A document larger than
 `max_document_bytes` (clamped to `bulk_max_bytes` minus 4 KiB, so every kept document fits in
 one bulk request) is quarantined as `document_too_large` instead of indexed.
 
@@ -267,8 +280,9 @@ the compressed size reaches `segment_target_bytes` (default 64 MiB), so a segmen
 about one row past the target. Rows (`crates/pi-model`):
 
 - `OrgRow { org_id: u64, seq: Seq, body: Vec<u8> }`: `body` is the raw JSON of the record, its
-  repeated top-level keys reduced to the last occurrence.
-- `PersonRow { person_id: u64, seq: Seq, body: Vec<u8>, org_ids: Vec<u64> }`: distinct
+  repeated keys, at any depth, reduced to the last occurrence.
+- `PersonRow { person_id: u64, seq: Seq, body: Vec<u8>, org_ids: Vec<u64> }`: `body` as for
+  `OrgRow`; `org_ids` the distinct
   non-null organization ids in role order.
 - `EdgeRow { org_id: u64, person_id: u64, seq: Seq }`
 - `JoinedRow { person_id: u64, org_id: u64, seq: Seq, body: Option<Vec<u8>> }`: `None` means

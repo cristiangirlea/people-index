@@ -23,6 +23,9 @@ pub struct LineStats {
     pub ignored_by_index: u64,
     /// The first of them, for a log line.
     pub first_ignored: Option<IgnoredValue>,
+    /// Whether some object of the record, at any depth, repeated a key: the row keeps each
+    /// key's last occurrence only.
+    pub repeated_keys: bool,
 }
 
 impl LineStats {

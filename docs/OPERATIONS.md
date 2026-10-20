@@ -206,6 +206,10 @@ being resumed.
   counts documents, while the counter counts values per extracted line (before person
   deduplication, an organization's value once however many persons embed it), so the two
   numbers differ.
+- `records_with_repeated_keys` (extract stages, same places) counts the kept records that
+  repeated a key in some object, at any depth; each was stored with the key's last occurrence
+  only, since Elasticsearch fails a document with a duplicate key anywhere
+  ([ARCHITECTURE.md](ARCHITECTURE.md#the-data)).
 
 What to watch during a load: a rising rate of bulk retries means the cluster is pushing back
 (HTTP 429); task retries and lease takeovers mean workers are dying or stalling.

@@ -22,7 +22,7 @@
 
 ARG CARGO_CHEF_VERSION=0.1.78
 
-FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS chef
+FROM rust:1.99.1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS chef
 ARG CARGO_CHEF_VERSION
 RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src

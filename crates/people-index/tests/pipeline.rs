@@ -190,7 +190,7 @@ async fn assemble_twice_is_idempotent() {
         .orphans(StageName::Assemble)
         .await
         .unwrap();
-    assert!(!orphans.is_empty());
+    assert_ne!(orphans, [] as [std::string::String; 0]);
     let (deleted, left) = pi_stages::delete_orphans(&ctx).await.unwrap();
     assert_eq!((deleted, left), (orphans.len() as u64, 0));
     assert_eq!(read_docs(&data.store, "run-a").await, before);

@@ -89,7 +89,7 @@ async fn verifier_passes_when_every_count_matches() {
         .expect("verified");
     assert!(report.passed(), "{report:?}");
     assert_eq!(report.checks.len(), 5);
-    assert!(report.failures().is_empty());
+    assert_eq!(report.failures(), [] as [&pi_es::Check; 0]);
 }
 
 #[tokio::test]

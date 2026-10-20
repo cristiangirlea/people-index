@@ -284,6 +284,9 @@ impl FlakyStore {
 }
 
 /// Takes one from `counter` when it is above zero.
+// `fetch_update` is deprecated since Rust 1.99 in favour of `try_update`, which needs 1.95;
+// `rust-version` is 1.90, so the old name stays.
+#[allow(deprecated)]
 fn take_one(counter: &AtomicUsize) -> bool {
     counter
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))

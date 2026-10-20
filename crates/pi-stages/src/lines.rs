@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn no_line_after_the_last_newline() {
         assert_eq!(all(b"a\n", 10, 4).len(), 1);
-        assert!(all(b"", 10, 4).is_empty());
+        assert_eq!(all(b"", 10, 4), []);
     }
 
     #[test]

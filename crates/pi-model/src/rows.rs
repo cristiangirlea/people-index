@@ -37,7 +37,9 @@ pub struct PersonRow {
 
 impl PersonRow {
     /// One edge per distinct organization id, for the `edges/p=<p>/` partitions.
-    #[must_use]
+    // The iterator it returns is already `#[must_use]`; clippy before 1.99 still suggests the
+    // attribute, which 1.99's `double_must_use` rejects.
+    #[allow(clippy::must_use_candidate)]
     pub fn edges(&self) -> impl ExactSizeIterator<Item = EdgeRow> + '_ {
         self.org_ids.iter().map(|&org_id| EdgeRow {
             org_id,

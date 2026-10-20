@@ -16,8 +16,10 @@ pub struct IgnoredValue {
 /// What extraction noticed in a line it kept.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LineStats {
-    /// Values of lenient fields that Elasticsearch skips (lists in `_ignored`), by the rules
-    /// observed on Elasticsearch 9.5.5, every element of an array counted on its own.
+    /// Values of lenient fields that Elasticsearch skips (lists in `_ignored`), following the
+    /// rules observed on Elasticsearch 9.5.5, every element of an array counted on its own. One
+    /// known divergence: a non-ASCII decimal digit in a `long` string is counted, though
+    /// Elasticsearch indexes it.
     pub ignored_by_index: u64,
     /// The first of them, for a log line.
     pub first_ignored: Option<IgnoredValue>,

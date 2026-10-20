@@ -1,12 +1,33 @@
 //! How Elasticsearch reads one scalar into a `long` or `integer` field, so extraction can count
-//! exactly the values a field with `ignore_malformed` skips (and lists in `_ignored`).
+//! the values a field with `ignore_malformed` skips (and lists in `_ignored`).
 //!
-//! The rule, observed against Elasticsearch 9.5.5: a JSON boolean is skipped; the empty string
-//! is indexed (as no value); any other string must be a decimal number with no surrounding
-//! whitespace, `[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?`, or it is skipped;
-//! a number (a JSON number or such a string) is truncated toward zero and skipped when that
-//! is outside the type's range. The range check is exact (decimal digits, no floating point),
-//! so `9223372036854775807` fits a `long` and `9223372036854775808` does not.
+//! The rules follow what Elasticsearch 9.5.5 was observed to do (pinned in
+//! `shape::tests::counts_what_elasticsearch_9_5_5_skips`):
+//!
+//! - A JSON boolean is skipped; the empty string is indexed (as no value) and a string of
+//!   spaces only is skipped, in both types.
+//! - `long`, a string: an exact decimal, `[+-]? (digits [. digits?] | . digits) ([eE] [+-]?
+//!   digits)?` with no surrounding whitespace, truncated toward zero and checked against the
+//!   range of `i64` without floating point. Anything else is skipped, and so is a decimal whose
+//!   exponent is outside `i32`, or whose scale (the digits after the point, as written, minus
+//!   the exponent) is outside `i32` or below -19, whatever its value (`"0e20"`, `"0.0e21"`,
+//!   `"0.5e-2147483647"` are skipped; `"0e19"`, `"0.0e20"`, `"1e-2147483647"` are not): Java's
+//!   `BigDecimal` limits, observed.
+//! - `long`, a JSON integer (no fraction, no exponent): exact, against `i64`.
+//! - `long`, a JSON number with a fraction or an exponent: rounded to a double and skipped when
+//!   it is above `i64::MAX as f64` or below `i64::MIN as f64` (Jackson's comparison), so a value
+//!   that rounds to 2^63 passes.
+//! - `integer`, a string: read by Java's `Double.parseDouble` ([`crate::java_double`]: trimmed,
+//!   `NaN`, `Infinity`, `d`/`f` suffixes and hexadecimal included; those forms observed, the
+//!   rest of the grammar derived from Java's); `integer`, a JSON number:
+//!   rounded to a double. Either is skipped when outside the range of `i32` before truncation
+//!   (`2147483647.5` is skipped); `NaN` is indexed (as 0).
+//!
+//! One known divergence: Elasticsearch accepts a non-ASCII decimal digit in a `long` string
+//! (`"٥"`, U+0665); this grammar does not, so such a value is counted although Elasticsearch
+//! indexes it.
+
+use crate::java_double;
 
 /// The numeric types a lenient field can be mapped as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,52 +38,80 @@ pub(crate) enum NumericType {
     Integer,
 }
 
-impl NumericType {
-    /// The largest magnitude a positive and a negative value can have.
-    fn limits(self) -> (u128, u128) {
-        match self {
-            Self::Long => (
-                u128::from(i64::MAX.unsigned_abs()),
-                u128::from(i64::MIN.unsigned_abs()),
-            ),
-            Self::Integer => (
-                u128::from(i32::MAX.unsigned_abs()),
-                u128::from(i32::MIN.unsigned_abs()),
-            ),
-        }
-    }
-}
-
 /// What Elasticsearch does with one scalar in a numeric field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reading {
     /// Indexed (or, for `""`, taken as no value): not listed in `_ignored`.
     Indexed,
-    /// Skipped: a boolean, or a string that is not a decimal number.
+    /// Skipped: a boolean, or a string the type does not read as a number.
     NotANumber,
-    /// Skipped: a number whose integer part is outside the type's range.
+    /// Skipped: a number outside the type's range.
     OutOfRange,
 }
+
+/// 2^63, `i64::MAX as f64` and `-(i64::MIN as f64)`, exact.
+const TWO_TO_THE_63: f64 = 9_223_372_036_854_775_808.0;
+
+/// The lowest scale (digits after the point minus the exponent) a `long` string may have.
+const MIN_LONG_SCALE: i64 = -19;
 
 /// How a field of type `ty` reads the raw JSON scalar `text` (not null, not an array or
 /// object).
 pub(crate) fn read(text: &str, ty: NumericType) -> Reading {
-    let decoded;
-    let number = if text.starts_with('"') {
-        decoded = serde_json::from_str::<String>(text).ok();
-        match decoded.as_deref() {
-            Some("") => return Reading::Indexed,
-            Some(s) => s,
-            None => return Reading::NotANumber,
-        }
-    } else {
-        // A JSON number always matches the grammar; `true` and `false` never do.
-        text
-    };
-    match Decimal::parse(number) {
-        None => Reading::NotANumber,
-        Some(d) if d.truncation_fits(ty) => Reading::Indexed,
+    match text.as_bytes().first() {
+        Some(b'"') => match serde_json::from_str::<String>(text) {
+            Ok(s) if s.is_empty() => Reading::Indexed,
+            Ok(s) => match ty {
+                NumericType::Long => read_long_string(&s),
+                NumericType::Integer => {
+                    java_double::parse(&s).map_or(Reading::NotANumber, integer_range)
+                }
+            },
+            Err(_) => Reading::NotANumber,
+        },
+        Some(b't' | b'f') => Reading::NotANumber,
+        _ => match ty {
+            NumericType::Long => read_long_number(text),
+            NumericType::Integer => text
+                .parse::<f64>()
+                .map_or(Reading::NotANumber, integer_range),
+        },
+    }
+}
+
+/// A string in a `long` field: an exact decimal within `BigDecimal`'s exponent and scale
+/// limits, truncated.
+fn read_long_string(s: &str) -> Reading {
+    match Decimal::parse(s) {
+        Some(d) if !d.scale_fits_long() => Reading::NotANumber,
+        Some(d) if d.truncation_fits_long() => Reading::Indexed,
         Some(_) => Reading::OutOfRange,
+        None => Reading::NotANumber,
+    }
+}
+
+/// A JSON number in a `long` field: an integer exactly, any other number as a double.
+fn read_long_number(text: &str) -> Reading {
+    if !text.contains(['.', 'e', 'E']) {
+        return match Decimal::parse(text) {
+            Some(d) if d.truncation_fits_long() => Reading::Indexed,
+            Some(_) => Reading::OutOfRange,
+            None => Reading::NotANumber,
+        };
+    }
+    match text.parse::<f64>() {
+        Ok(d) if d > TWO_TO_THE_63 || d < -TWO_TO_THE_63 => Reading::OutOfRange,
+        Ok(_) => Reading::Indexed,
+        Err(_) => Reading::NotANumber,
+    }
+}
+
+/// A double in an `integer` field: checked against `i32` before truncation; `NaN` passes.
+fn integer_range(d: f64) -> Reading {
+    if d > f64::from(i32::MAX) || d < f64::from(i32::MIN) {
+        Reading::OutOfRange
+    } else {
+        Reading::Indexed
     }
 }
 
@@ -134,10 +183,23 @@ impl<'a> Decimal<'a> {
         })
     }
 
-    /// Whether the value truncated toward zero is within `ty`'s range.
-    fn truncation_fits(&self, ty: NumericType) -> bool {
-        let (positive, negative) = ty.limits();
-        let limit = if self.negative { negative } else { positive };
+    /// Whether the exponent and the scale (fraction digits as written minus the exponent) are
+    /// within `i32`, and the scale is at least [`MIN_LONG_SCALE`].
+    fn scale_fits_long(&self) -> bool {
+        let digits = i64::try_from(self.frac.len()).unwrap_or(i64::MAX);
+        let scale = digits.saturating_sub(self.exponent);
+        i32::try_from(self.exponent).is_ok()
+            && i32::try_from(scale).is_ok()
+            && scale >= MIN_LONG_SCALE
+    }
+
+    /// Whether the value truncated toward zero is within the range of `i64`.
+    fn truncation_fits_long(&self) -> bool {
+        let limit = if self.negative {
+            u128::from(i64::MIN.unsigned_abs())
+        } else {
+            u128::from(i64::MAX.unsigned_abs())
+        };
         let len = self.int.len() + self.frac.len();
         // Where the decimal point falls in `int` followed by `frac`.
         let point = i64::try_from(self.int.len())
@@ -196,36 +258,73 @@ mod tests {
         }
     }
 
+    /// The rules at the edges of each type, derived from them (not observed). The observed
+    /// rows are pinned in `shape::tests::counts_what_elasticsearch_9_5_5_skips`.
     #[test]
-    fn the_range_is_exact_at_the_edges() {
+    fn the_rules_at_the_edges() {
         use NumericType::{Integer, Long};
+        use Reading::{Indexed, NotANumber, OutOfRange};
         for (text, ty, reading) in [
-            ("9223372036854775807", Long, Reading::Indexed),
-            ("9223372036854775808", Long, Reading::OutOfRange),
-            ("-9223372036854775808", Long, Reading::Indexed),
-            ("-9223372036854775809", Long, Reading::OutOfRange),
-            ("9223372036854775807.999", Long, Reading::Indexed),
-            ("922337203685477580.7e1", Long, Reading::Indexed),
-            ("922337203685477580.8e1", Long, Reading::OutOfRange),
-            ("2147483647", Integer, Reading::Indexed),
-            ("-2147483648", Integer, Reading::Indexed),
-            ("-2147483649", Integer, Reading::OutOfRange),
-            ("1e18", Long, Reading::Indexed),
-            ("1e19", Long, Reading::OutOfRange),
-            ("1e400", Long, Reading::OutOfRange),
-            ("1e-400", Long, Reading::Indexed),
-            ("0e99999999999999999999999", Long, Reading::Indexed),
-            ("1e99999999999999999999999", Long, Reading::OutOfRange),
-            ("1e-99999999999999999999999", Long, Reading::Indexed),
-            ("0000000000000000000000000001", Long, Reading::Indexed),
-            ("\"\"", Long, Reading::Indexed),
-            ("\"+5\"", Integer, Reading::Indexed),
-            ("\"3000000000\"", Integer, Reading::OutOfRange),
-            ("\"\\u0035\"", Long, Reading::Indexed),
-            ("\" 5\"", Long, Reading::NotANumber),
-            ("true", Long, Reading::NotANumber),
+            // `long`, JSON integers: exact.
+            ("-9223372036854775808", Long, Indexed),
+            ("-9223372036854775809", Long, OutOfRange),
+            ("0000000000000000000000000001", Long, Indexed),
+            // `long`, other JSON numbers: as doubles, against 2^63.
+            ("9223372036854775807.999", Long, Indexed),
+            ("9223372036854776832.0", Long, Indexed), // a tie: to even, 2^63
+            ("9223372036854776833.0", Long, OutOfRange),
+            ("-9223372036854777856.0", Long, OutOfRange),
+            ("1e18", Long, Indexed),
+            ("1e400", Long, OutOfRange),
+            ("1e-400", Long, Indexed),
+            ("0e99999999999999999999999", Long, Indexed),
+            ("1e99999999999999999999999", Long, OutOfRange),
+            ("1e-99999999999999999999999", Long, Indexed),
+            // `long`, strings: exact decimals, the exponent within `i32`.
+            ("\"\\u0035\"", Long, Indexed),
+            ("\"922337203685477580.7e1\"", Long, Indexed),
+            ("\"922337203685477580.8e1\"", Long, OutOfRange),
+            ("\"9223372036854775808.0\"", Long, OutOfRange),
+            ("\"0e2147483648\"", Long, NotANumber),
+            ("\"1e-2147483648\"", Long, NotANumber),
+            ("\"1.5e-2147483646\"", Long, Indexed),
+            ("\"1.55e-2147483646\"", Long, NotANumber),
+            ("\"1e19\"", Long, OutOfRange),
+            ("\"1e20\"", Long, NotANumber),
+            ("\"NaN\"", Long, NotANumber),
+            // `integer`: doubles, against `i32` before truncation.
+            ("-2147483648", Integer, Indexed),
+            ("-2147483649", Integer, OutOfRange),
+            ("2147483647.0000000001", Integer, Indexed),
+            ("-2147483648.0", Integer, Indexed),
+            ("1e400", Integer, OutOfRange),
+            ("\"\"", Integer, Indexed),
+            ("\"+5\"", Integer, Indexed),
+            ("\"-NaN\"", Integer, Indexed),
+            ("\"0x1p30d\"", Integer, Indexed),
+            ("\"0e99999999999\"", Integer, Indexed),
+            ("\"yes\"", Integer, NotANumber),
+            ("false", Integer, NotANumber),
         ] {
             assert_eq!(read(text, ty), reading, "{text} as {ty:?}");
         }
+    }
+
+    #[test]
+    fn very_long_strings_read_without_panic() {
+        let digits = 100_000;
+        let long = format!(r#""0.{}1""#, "0".repeat(digits));
+        assert_eq!(read(&long, NumericType::Long), Reading::Indexed);
+        let long = format!(r#""9.{}""#, "9".repeat(digits));
+        assert_eq!(read(&long, NumericType::Long), Reading::Indexed);
+        let long = format!(r#""{}""#, "9".repeat(digits));
+        assert_eq!(read(&long, NumericType::Long), Reading::OutOfRange);
+        let long = format!(r#""{}e-{}""#, "9".repeat(digits), digits);
+        assert_eq!(read(&long, NumericType::Long), Reading::Indexed);
+        let number = format!("0.{}1", "0".repeat(digits));
+        assert_eq!(read(&number, NumericType::Long), Reading::Indexed);
+        assert_eq!(read(&number, NumericType::Integer), Reading::Indexed);
+        let hex = format!(r#""0x0.{}p0""#, "f".repeat(digits));
+        assert_eq!(read(&hex, NumericType::Integer), Reading::Indexed);
     }
 }

@@ -13,9 +13,12 @@
 //! `ignore_malformed`, so Elasticsearch skips a scalar it cannot read as the field's type (the
 //! value is not indexed and the field is listed in the document's `_ignored`) and keeps the
 //! document, searchable by its other fields. Extraction lets the record through and counts
-//! exactly the values Elasticsearch skips ([`LineStats`]), by the rules it was observed to
-//! follow ([`crate::es_number`] for numbers). An object still fails those fields,
-//! `ignore_malformed` or not, so it is quarantined there too.
+//! the values Elasticsearch skips ([`LineStats`]), following the rules Elasticsearch 9.5.5 was
+//! observed to apply ([`crate::es_number`] for numbers: `long` strings as exact decimals,
+//! `integer` values as Java doubles with the range checked before truncation, JSON floats in a
+//! `long` compared as doubles), with one known divergence: a non-ASCII decimal digit in a
+//! `long` string is counted, though Elasticsearch indexes it. An object still fails those
+//! fields, `ignore_malformed` or not, so it is quarantined there too.
 //!
 //! The tables below list every mapped field Elasticsearch parses, with the JSON kind it expects.
 //! A test in `pi-es` walks `mapping.json` and checks that the two agree, so they cannot drift.
@@ -44,12 +47,14 @@ pub enum JsonKind {
     /// empty string as false): `boolean`. Strict: anything else is quarantined.
     Boolean,
     /// A `long` field with `ignore_malformed`: any scalar or an array of scalars (nested arrays
-    /// included). Each scalar Elasticsearch skips (a boolean, a string other than `""` that is
-    /// not a decimal number, a number whose integer part is outside `i64`) is counted
-    /// ([`LineStats`]); only an object, alone or inside an array, is quarantined.
+    /// included). Each scalar Elasticsearch skips is counted ([`LineStats`]) by the rules of
+    /// `es_number`: a boolean, a string other than `""` that is not an exact decimal
+    /// or whose integer part is outside `i64`, a JSON integer outside `i64`, a JSON float
+    /// beyond `±2^63` as a double. Only an object, alone or inside an array, is quarantined.
     LenientLong,
-    /// An `integer` field with `ignore_malformed`: as [`Self::LenientLong`], with the range of
-    /// `i32`.
+    /// An `integer` field with `ignore_malformed`: as [`Self::LenientLong`], but a value is
+    /// read as a double (a string by Java's `Double.parseDouble`) and skipped when outside
+    /// `i32` before truncation.
     LenientInteger,
     /// A `boolean` field with `ignore_malformed`: as [`Self::LenientLong`], with the values
     /// [`Self::Boolean`] accepts as the only ones Elasticsearch indexes.
@@ -418,60 +423,162 @@ mod tests {
         }
     }
 
+    // The observed rows of `counts_what_elasticsearch_9_5_5_skips`: (JSON value, skipped).
+    const LONG: &[(&str, bool)] = &[
+        ("5", false),
+        ("5.7", false),
+        (r#""5""#, false),
+        (r#""5.0""#, false),
+        (r#""1e3""#, false),
+        (r#""+5""#, false),
+        (r#"".5""#, false),
+        (r#""5.""#, false),
+        (r#""007""#, false),
+        (r#""""#, false),
+        ("-0", false),
+        ("[]", false),
+        ("9223372036854775807", false),
+        (r#"" 5""#, true),
+        (r#""5 ""#, true),
+        (r#""7 8""#, true),
+        (r#""n/a""#, true),
+        ("true", true),
+        ("9223372036854775808", true),
+        ("1e19", true),
+        (r#"[5,"x"]"#, true),
+        // JSON numbers with a fraction or exponent compare as doubles against 2^63.
+        ("9223372036854775808.0", false),
+        ("922337203685477580.8e1", false),
+        ("-9223372036854775809.0", false),
+        ("9223372036854775807.9", false),
+        // Strings are exact decimals, truncated; the exponent must fit an `int`.
+        (r#""9223372036854775807.9""#, false),
+        (r#""-9223372036854775808.9""#, false),
+        (r#""0e99999999999""#, true),
+        (r#""1e-3000000000""#, true),
+        // Stored as 9223372036854775807: both round to 2^63 as doubles.
+        ("9.223372036854775807e18", false),
+        ("9.2233720368547758e18", false),
+        ("9.223372036854777e18", true),
+        // Unlike `integer`, no trimming and no Java suffix.
+        (r#""   ""#, true),
+        (r#""5d""#, true),
+        // `BigDecimal`'s limits: the exponent and the scale (fraction digits as written
+        // minus the exponent) within `int`, and the scale at least -19, whatever the value.
+        (r#""0.5e-2147483647""#, true),
+        (r#""0.0e-2147483647""#, true),
+        (r#""0e2147483647""#, true),
+        (r#""0e20""#, true),
+        (r#""0e100""#, true),
+        (r#""0e999""#, true),
+        (r#""0e1000""#, true),
+        (r#""0e1000000""#, true),
+        (r#""0e100000000""#, true),
+        (r#""0e600000000""#, true),
+        (r#""0e646456992""#, true),
+        (r#""0e646456993""#, true),
+        (r#""0e700000000""#, true),
+        (r#""0e1500000000""#, true),
+        (r#""0.0e1000""#, true),
+        (r#""0.00e2147483647""#, true),
+        (r#""0.0e21""#, true),
+        (r#""00e20""#, true),
+        (r#""-0e20""#, true),
+        (r#""0E20""#, true),
+        // Stored values in brackets.
+        (r#""1e-2147483647""#, false), // [0]
+        (r#""1e-600000000""#, false),  // [0]
+        (r#""1e-500000000""#, false),  // [0]
+        (r#""1e-100000000""#, false),  // [0]
+        (r#""5e-1""#, false),          // [0]
+        (r#""0e0""#, false),           // [0]
+        (r#""0e1""#, false),           // [0]
+        (r#""0e2""#, false),           // [0]
+        (r#""0e18""#, false),          // [0]
+        (r#""0e19""#, false),          // [0]
+        (r#""0.0e1""#, false),         // [0]
+        (r#""0.0e5""#, false),         // [0]
+        (r#""00e5""#, false),          // [0]
+        (r#""-0e5""#, false),          // [0]
+        (r#""0e-5""#, false),          // [0]
+        (r#""1e18""#, false),          // [1000000000000000000]
+        (r#""5e0""#, false),           // [5]
+        (r#""1e2""#, false),           // [100]
+        (r#""1.5e2""#, false),         // [150]
+        (r#""0.5e1""#, false),         // [5]
+        (r#""10e17""#, false),         // [1000000000000000000]
+        (r#""9.2e18""#, false),        // [9200000000000000000]
+        (r#""0.0e20""#, false),        // [0]
+        (r#""0.00e21""#, false),       // [0]
+        (r#""0.000e22""#, false),      // [0]
+        (r#""0.5e19""#, false),        // [5000000000000000000]
+        (r#""0.05e20""#, false),       // [5000000000000000000]
+    ];
+    const INTEGER: &[(&str, bool)] = &[
+        ("2147483647", false),
+        ("1.9", false),
+        ("2147483648", true),
+        ("3000000000", true),
+        (r#""3000000000""#, true),
+        // Strings go through Java's `Double.parseDouble`.
+        (r#"" 5""#, false),
+        (r#""5 ""#, false),
+        (r#"" 1999""#, false),
+        (r#""1999""#, false),
+        (r#""NaN""#, false),
+        (r#""5d""#, false),
+        (r#""5f""#, false),
+        (r#""0x1p3""#, false),
+        (r#""Infinity""#, true),
+        // The range is checked before truncation, for strings and JSON numbers alike.
+        (r#""2147483647.5""#, true),
+        ("2147483647.5", true),
+        ("-2147483648.5", true),
+        (r#""-2147483648.9""#, true),
+        ("2147483647.9", true),
+        // Further Java-double forms; the stored value in brackets.
+        (r#""0x1p30""#, false),          // [1073741824]
+        (r#""0x1.fffffffcp30""#, false), // [2147483647]
+        (r#""1e1d""#, false),            // [10]
+        (r#""5.5e0f""#, false),          // [5]
+        (r#""\t7""#, false),             // a tab before 7 [7]
+        (r#""+NaN""#, false),            // [0], as "NaN"
+        (r#""1e9""#, false),             // [1000000000]
+        (r#""   ""#, true),              // trimmed to nothing: not a number
+        (r#""-Infinity""#, true),
+        (r#""0x1p31""#, true),
+        (r#""0x""#, true),
+        (r#""1_000""#, true),
+        (r#""2147483647.4""#, true),
+        ("-2147483648.4", true),
+        (r#""1e10""#, true),
+    ];
+    const BOOLEAN: &[(&str, bool)] = &[
+        ("true", false),
+        ("false", false),
+        (r#""true""#, false),
+        (r#""false""#, false),
+        (r#""""#, false),
+        (r#""yes""#, true),
+        (r#""TRUE""#, true),
+        ("1", true),
+        ("0", true),
+        (r#""1""#, true),
+        (r#"[true,"x"]"#, true),
+    ];
+
     /// What Elasticsearch 9.5.5 did with each value, observed against a real 9.5.5 instance
     /// (fields mapped `long`, `integer` and `boolean` with `ignore_malformed: true`, `_ignored`
     /// read back per document): `false` means indexed (not in `_ignored`), `true` skipped (the
-    /// field listed in `_ignored`). The count must be exactly what Elasticsearch skips.
+    /// field listed in `_ignored`). The count must match every row; the one known divergence
+    /// is pinned apart below.
     #[test]
     fn counts_what_elasticsearch_9_5_5_skips() {
-        let long = [
-            ("5", false),
-            ("5.7", false),
-            (r#""5""#, false),
-            (r#""5.0""#, false),
-            (r#""1e3""#, false),
-            (r#""+5""#, false),
-            (r#"".5""#, false),
-            (r#""5.""#, false),
-            (r#""007""#, false),
-            (r#""""#, false),
-            ("-0", false),
-            ("[]", false),
-            ("9223372036854775807", false),
-            (r#"" 5""#, true),
-            (r#""5 ""#, true),
-            (r#""7 8""#, true),
-            (r#""n/a""#, true),
-            ("true", true),
-            ("9223372036854775808", true),
-            ("1e19", true),
-            (r#"[5,"x"]"#, true),
-        ];
-        let integer = [
-            ("2147483647", false),
-            ("1.9", false),
-            ("2147483648", true),
-            ("3000000000", true),
-            (r#""3000000000""#, true),
-        ];
-        let boolean = [
-            ("true", false),
-            ("false", false),
-            (r#""true""#, false),
-            (r#""false""#, false),
-            (r#""""#, false),
-            (r#""yes""#, true),
-            (r#""TRUE""#, true),
-            ("1", true),
-            ("0", true),
-            (r#""1""#, true),
-            (r#"[true,"x"]"#, true),
-        ];
         for (field, fields, table) in [
-            ("followers", PERSON_FIELDS, &long[..]),
-            ("employee_count", ORGANIZATION_FIELDS, &long[..]),
-            ("founded_year", ORGANIZATION_FIELDS, &integer[..]),
-            ("open_to_work", PERSON_FIELDS, &boolean[..]),
+            ("followers", PERSON_FIELDS, LONG),
+            ("employee_count", ORGANIZATION_FIELDS, LONG),
+            ("founded_year", ORGANIZATION_FIELDS, INTEGER),
+            ("open_to_work", PERSON_FIELDS, BOOLEAN),
         ] {
             for (value, skipped) in table {
                 let record = format!(r#"{{"{field}":{value}}}"#);
@@ -479,6 +586,11 @@ mod tests {
                 assert_eq!(stats.ignored_by_index, u64::from(*skipped), "{record}");
             }
         }
+        // The known divergence: Elasticsearch 9.5.5 indexes a `long` string of a non-ASCII
+        // decimal digit (U+0665, ARABIC-INDIC DIGIT FIVE); the grammar here is ASCII only, so
+        // the counter counts it.
+        let stats = check("{\"followers\":\"\u{0665}\"}", PERSON_FIELDS).unwrap();
+        assert_eq!(stats.ignored_by_index, 1);
     }
 
     #[test]

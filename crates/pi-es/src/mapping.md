@@ -72,12 +72,21 @@ quarantined, and `ignore_malformed` stays on them as a second line. Measures (`c
 `followers`, `open_to_work`, `organizations.employee_count`, `organizations.founded_year`) are
 lenient (`JsonKind::LenientLong`, `LenientInteger` for `founded_year`, `LenientBoolean`): any
 scalar or array of scalars passes, and only an object is quarantined. `values_ignored_by_index`
-counts exactly the values Elasticsearch skips (lists in `_ignored`), by the rules observed on
-9.5.5 and pinned in `pi-model`'s tests: in a number field a boolean, a non-empty string that is
-not a decimal number (no surrounding whitespace), or a number whose integer part is outside the
-type's range (`i64` for `long`, `i32` for `integer`); in a `boolean` field anything but
-`true`, `false`, `"true"`, `"false"` and `""`. A lenient field must be mapped as its own type
-with `ignore_malformed: true`; the agreement test fails otherwise. `roles.start_date` and `end_date` accept full dates,
+counts the values Elasticsearch skips (lists in `_ignored`), following the rules observed on
+9.5.5 and pinned in `pi-model`'s tests (`pi_model` `es_number`): in either number type a
+boolean; in a `long` a string other than `""` that is not an exact decimal (no surrounding
+whitespace) or whose integer part is outside `i64`, or whose exponent is outside `int` or
+scale (fraction digits as written minus the exponent) outside `int` or below -19, whatever its
+value (`BigDecimal`'s limits: `"0e20"` is skipped, `"0e19"` is not), a JSON integer
+outside `i64`, or a JSON float beyond `±2^63` compared as a double (so values that round to
+2^63 pass); in an `integer` a value Java's `Double.parseDouble` rejects (it trims, so a string
+of spaces only is rejected, and takes `NaN`, `Infinity`, `d`/`f` suffixes and hexadecimal;
+those forms were observed, the rest of the grammar is derived from Java's) or one outside
+`i32` before truncation; in a `boolean` anything but `true`, `false`, `"true"`, `"false"` and `""`. One known divergence: a
+non-ASCII decimal digit in a `long` string (`"٥"`) is counted, though Elasticsearch indexes it.
+The counter counts per extracted line, before person deduplication, and an organization's
+value once however many person documents embed it. A lenient field must be mapped as its own
+type with `ignore_malformed: true`; the agreement test fails otherwise. `roles.start_date` and `end_date` accept full dates,
 `yyyy-MM` and `yyyy` (a JSON number such as `2020` is read as text, so as a year), so range
 queries work on partial dates.
 

@@ -14,6 +14,7 @@ mod error;
 mod es_number;
 mod extract;
 mod id;
+mod java_double;
 mod joined;
 mod json;
 mod line_stats;

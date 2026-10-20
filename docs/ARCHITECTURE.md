@@ -55,14 +55,30 @@ string holding one. Measures (`connections`, `followers`, `open_to_work`, `emplo
 of scalars passes. Elasticsearch skips a value it cannot read as the field's type: the
 malformed values are not indexed and the field is listed in the document's `_ignored`; the
 record stays searchable by its other fields, and the value stays in `_source`. Extraction keeps
-such a record and counts in the extract counter `values_ignored_by_index` exactly the values
-Elasticsearch skips (not malformed, not against `max_malformed`), by the rules observed on
-Elasticsearch 9.5.5 (`pi-model`'s `es_number`): in a `long` or `integer` field a boolean, a
-string other than `""` that is not a decimal number `[+-]? (digits [. digits?] | . digits)
-([eE] [+-]? digits)?` with no surrounding whitespace (`"n/a"`, `" 5"`), or a number whose
-truncation toward zero is outside `i64` (`long`) or `i32` (`integer`; `founded_year`); in a
-`boolean` field anything but `true`, `false`, `"true"`, `"false"` and `""`. Each element of an
-array counts on its own. It logs the first few such lines per task with file, line, field and
+such a record and counts in the extract counter `values_ignored_by_index` the values
+Elasticsearch skips (not malformed, not against `max_malformed`), following the rules
+Elasticsearch 9.5.5 was observed to apply (`pi-model`'s `es_number`, pinned in its tests):
+- either number type: a boolean is skipped, and so is a string of spaces only; `""` is not;
+- `long` (`connections`, `followers`, `employee_count`): a string must be an exact decimal
+  `[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?` with no surrounding whitespace
+  (`"n/a"`, `" 5"` are skipped), truncated toward zero within `i64`; Java's `BigDecimal` limits
+  also skip a string whose exponent is outside `int`, or whose scale (the digits after the
+  point, as written, minus the exponent) is outside `int` or below -19, whatever its value
+  (`"0e20"`, `"0.0e21"`, `"0.5e-2147483647"` are skipped; `"0e19"`, `"0.0e20"`,
+  `"1e-2147483647"` are not); a JSON integer must be within `i64`; a JSON number with a
+  fraction or exponent is compared as a double with `±2^63`, so values that round to 2^63
+  pass;
+- `integer` (`founded_year`): a string is read by Java's `Double.parseDouble` (trimmed; `NaN`,
+  `Infinity`, `d`/`f` suffixes and hexadecimal accepted; `NaN` indexes as 0), a JSON number as
+  a double, and either is skipped when outside `i32` before truncation (`2147483647.5`). The
+  forms named here were observed; the rest of the grammar is derived from Java's;
+- `boolean`: anything but `true`, `false`, `"true"`, `"false"` and `""`.
+
+Each element of an array counts on its own. One known divergence: a non-ASCII decimal digit in
+a `long` string (`"٥"`) is counted, though Elasticsearch indexes it. The counter counts per
+extracted line, before person deduplication, and an organization's value once however many
+person documents embed it, so it differs from the number of documents an `exists` query on
+`_ignored` finds. Extraction logs the first few such lines per task with file, line, field and
 kind, never the value. `text`, `keyword` and `date` fields (the lists `skills`,
 `keywords` and `technologies` included) take any scalar, which Elasticsearch reads as text
 (`"city": 10001`, `"start_date": 2020`), or an array of scalars. No field but `roles` takes an

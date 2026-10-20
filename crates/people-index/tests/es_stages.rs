@@ -318,6 +318,11 @@ async fn prepare_and_publish_against_a_mock_cluster() {
     assert_eq!(summary.stages.len(), 8);
     assert_eq!(summary.stages.last().unwrap().stage, StageName::Publish);
     assert!(summary.persons_per_second > 0.0);
+    // The generated feeds have no values the index would skip; the counter is there anyway.
+    for stage in [StageName::ExtractOrgs, StageName::ExtractPersons] {
+        let extract = summary.stages.iter().find(|s| s.stage == stage).unwrap();
+        assert_eq!(extract.counters.get("values_ignored_by_index"), Some(&0));
+    }
     assert_eq!(reports[2].counter("documents"), documents);
 }
 

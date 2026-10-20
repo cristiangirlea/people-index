@@ -53,19 +53,31 @@ doing that:
 
 - Extraction checks the JSON kind of every field this mapping parses (`pi_model::PERSON_FIELDS`,
   `ROLE_FIELDS`, `ORGANIZATION_FIELDS`; docs/ARCHITECTURE.md, "The data") and quarantines a
-  record with the wrong kind (`"yes"` in `open_to_work`, `"n/a"` in `followers`, a string where
-  `roles` expects objects, an object in a `text`, `keyword` or `date` field) as `record`, naming
-  the field. `text`, `keyword` and `date` fields take any scalar or an array of scalars:
-  Elasticsearch reads a number or a boolean as text. The test
-  `extract_shapes_agree_with_the_mapping` in `mapping.rs` fails when a field is added here
-  without a table entry, or a type changes under one.
+  record with the wrong kind (`"abc"` in an `id`, a string where `roles` expects objects, an
+  object in any field but an `object` one) as `record`, naming the field. `text`, `keyword` and
+  `date` fields take any scalar or an array of scalars: Elasticsearch reads a number or a
+  boolean as text. The test `extract_shapes_agree_with_the_mapping` in `mapping.rs` fails when a
+  field is added here without a table entry, or a type changes under one.
 - Numbers and dates, the top-level `id` included, carry `ignore_malformed: true` (checked by
-  `numbers_and_dates_ignore_malformed_values`) for the values of the right kind that still do
-  not parse: a number past the range of `long`, a date string in another format. The value
-  stays in `_source`; only that field is not indexed for that document.
+  `numbers_and_dates_ignore_malformed_values`), and so does `open_to_work`. Elasticsearch then
+  skips a scalar that does not parse (a number past the range of `long`, a date string in
+  another format, `"n/a"` in a `long`, `"yes"` in a `boolean`) and keeps the document: the
+  malformed values are not indexed and the field is listed in the document's `_ignored`; the
+  record stays searchable by its other fields, and the value stays in `_source`. An object
+  still fails the item, `ignore_malformed` or not.
 
-`boolean` has no `ignore_malformed` here; the extract check accepts only what it parses (`true`,
-`false`, `"true"`, `"false"`, `""`). `roles.start_date` and `end_date` accept full dates,
+Identifiers (`id`, `roles.id`, `roles.organization_id`, `organizations.id`) are strict at
+extract time (`JsonKind::Number`): a value that is not a number, or a string holding one, is
+quarantined, and `ignore_malformed` stays on them as a second line. Measures (`connections`,
+`followers`, `open_to_work`, `organizations.employee_count`, `organizations.founded_year`) are
+lenient (`JsonKind::LenientLong`, `LenientInteger` for `founded_year`, `LenientBoolean`): any
+scalar or array of scalars passes, and only an object is quarantined. `values_ignored_by_index`
+counts exactly the values Elasticsearch skips (lists in `_ignored`), by the rules observed on
+9.5.5 and pinned in `pi-model`'s tests: in a number field a boolean, a non-empty string that is
+not a decimal number (no surrounding whitespace), or a number whose integer part is outside the
+type's range (`i64` for `long`, `i32` for `integer`); in a `boolean` field anything but
+`true`, `false`, `"true"`, `"false"` and `""`. A lenient field must be mapped as its own type
+with `ignore_malformed: true`; the agreement test fails otherwise. `roles.start_date` and `end_date` accept full dates,
 `yyyy-MM` and `yyyy` (a JSON number such as `2020` is read as text, so as a year), so range
 queries work on partial dates.
 

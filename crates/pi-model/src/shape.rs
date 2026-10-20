@@ -1,10 +1,21 @@
 //! The JSON kind each mapped field must have, checked at extract time.
 //!
 //! The index mapping (`crates/pi-es/src/mapping.json`) gives a type to some of the record's
-//! fields. A value Elasticsearch cannot read as that type (`"yes"` for a boolean, a string where
-//! an object is mapped) makes the bulk item fail with a mapper error, which would fail the whole
-//! load. So extraction checks those fields first and quarantines the record as `record`, naming
-//! the field: one bad record costs that record, not the run.
+//! fields. A value Elasticsearch cannot read as that type (an object where a number or a string
+//! is mapped, a string where `roles` expects objects) makes the bulk item fail with a mapper
+//! error, which would fail the whole load. So extraction checks those fields first and
+//! quarantines the record as `record`, naming the field: one bad record costs that record, not
+//! the run.
+//!
+//! Identifiers are strict ([`JsonKind::Number`]): an `id` or `organization_id` that is not a
+//! number is quarantined. Measures are lenient ([`JsonKind::LenientLong`],
+//! [`JsonKind::LenientInteger`], [`JsonKind::LenientBoolean`]): their mapping has
+//! `ignore_malformed`, so Elasticsearch skips a scalar it cannot read as the field's type (the
+//! value is not indexed and the field is listed in the document's `_ignored`) and keeps the
+//! document, searchable by its other fields. Extraction lets the record through and counts
+//! exactly the values Elasticsearch skips ([`LineStats`]), by the rules it was observed to
+//! follow ([`crate::es_number`] for numbers). An object still fails those fields,
+//! `ignore_malformed` or not, so it is quarantined there too.
 //!
 //! The tables below list every mapped field Elasticsearch parses, with the JSON kind it expects.
 //! A test in `pi-es` walks `mapping.json` and checks that the two agree, so they cannot drift.
@@ -14,21 +25,35 @@
 //! When a key repeats in a person, role or organization object, only its last occurrence is
 //! checked, the one the document keeps.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use serde_json::value::RawValue;
 
 use crate::error::{MalformedKind, MalformedRecord};
+use crate::es_number::{self, NumericType, Reading};
+use crate::line_stats::LineStats;
 use crate::raw::{RawObject, is_null};
 
 /// The JSON kind a mapped field expects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonKind {
-    /// A number, or a string holding a JSON number (Elasticsearch coerces it): `long`, `integer`.
+    /// A number, or a string holding a JSON number (Elasticsearch coerces it): `long`,
+    /// `integer`. Strict, for identifiers: anything else is quarantined.
     Number,
     /// `true` or `false`, or the strings `"true"`, `"false"` and `""` (Elasticsearch reads the
-    /// empty string as false): `boolean`.
+    /// empty string as false): `boolean`. Strict: anything else is quarantined.
     Boolean,
+    /// A `long` field with `ignore_malformed`: any scalar or an array of scalars (nested arrays
+    /// included). Each scalar Elasticsearch skips (a boolean, a string other than `""` that is
+    /// not a decimal number, a number whose integer part is outside `i64`) is counted
+    /// ([`LineStats`]); only an object, alone or inside an array, is quarantined.
+    LenientLong,
+    /// An `integer` field with `ignore_malformed`: as [`Self::LenientLong`], with the range of
+    /// `i32`.
+    LenientInteger,
+    /// A `boolean` field with `ignore_malformed`: as [`Self::LenientLong`], with the values
+    /// [`Self::Boolean`] accepts as the only ones Elasticsearch indexes.
+    LenientBoolean,
     /// One value: `text`, `keyword`, `date`. Elasticsearch takes any scalar (it reads a number
     /// or a boolean as text, and a date field ignores what it cannot parse) or an array of
     /// scalars; only an object fails it, alone or inside an array.
@@ -46,7 +71,11 @@ impl JsonKind {
         match self {
             Self::Number => "a number",
             Self::Boolean => "a boolean",
-            Self::String | Self::StringArray => "a string, number or boolean",
+            Self::LenientLong
+            | Self::LenientInteger
+            | Self::LenientBoolean
+            | Self::String
+            | Self::StringArray => "a string, number or boolean",
             Self::ObjectArray => "an array of objects",
         }
     }
@@ -85,9 +114,9 @@ pub const PERSON_FIELDS: &[FieldShape] = &[
     field("industry", JsonKind::String),
     field("profile_url", JsonKind::String),
     field("skills", JsonKind::StringArray),
-    field("connections", JsonKind::Number),
-    field("followers", JsonKind::Number),
-    field("open_to_work", JsonKind::Boolean),
+    field("connections", JsonKind::LenientLong),
+    field("followers", JsonKind::LenientLong),
+    field("open_to_work", JsonKind::LenientBoolean),
     field("roles", JsonKind::ObjectArray),
 ];
 
@@ -114,8 +143,8 @@ pub const ORGANIZATION_FIELDS: &[FieldShape] = &[
     field("country", JsonKind::String),
     field("city", JsonKind::String),
     field("size_range", JsonKind::String),
-    field("employee_count", JsonKind::Number),
-    field("founded_year", JsonKind::Number),
+    field("employee_count", JsonKind::LenientLong),
+    field("founded_year", JsonKind::LenientInteger),
     field("keywords", JsonKind::StringArray),
     field("technologies", JsonKind::StringArray),
     field("description", JsonKind::String),
@@ -130,74 +159,135 @@ pub const BUILDER_OWNED: &[&str] = &[
 ];
 
 /// Checks the fields of `object` listed in `fields`; `role` is the index of the role `object`
-/// is (`None` for a whole record), so the reason names the field as `roles[3].title`.
+/// is (`None` for a whole record), so the reason names the field as `roles[3].title`. The
+/// values of lenient fields that Elasticsearch will skip are counted in `stats`.
 pub(crate) fn check_fields(
     object: &RawObject<'_>,
     fields: &[FieldShape],
     role: Option<usize>,
+    stats: &mut LineStats,
 ) -> Result<(), MalformedRecord> {
+    let prefix = role.map(|i| format!("roles[{i}].")).unwrap_or_default();
     for shape in fields {
         if let Some(value) = object.get(shape.name) {
-            check_value(value, shape.kind)
-                .map_err(|(at, found)| mismatch(role, *shape, at.as_deref(), found))?;
+            let mut ignored = |at: &[usize], found| {
+                stats.ignore(|| format!("{prefix}{}{}", shape.name, indices(at)), found);
+            };
+            check_value(value, shape.kind, &mut ignored)
+                .map_err(|(at, found)| mismatch(&prefix, *shape, &at, found))?;
         }
     }
     Ok(())
 }
 
-/// What a value was, in words: the element index (for an array) and the kind found.
-type Mismatch = (Option<String>, &'static str);
+/// What a value was, in words: the element indices (for an array) and the kind found.
+type Mismatch = (String, &'static str);
 
-fn check_value(value: &RawValue, kind: JsonKind) -> Result<(), Mismatch> {
+/// Told of each scalar of a lenient field the index skips: its element indices and kind.
+type OnIgnored<'a> = dyn FnMut(&[usize], &'static str) + 'a;
+
+fn check_value(
+    value: &RawValue,
+    kind: JsonKind,
+    ignored: &mut OnIgnored<'_>,
+) -> Result<(), Mismatch> {
     if is_null(value) {
         return Ok(());
     }
     let text = value.get();
-    let ok = match kind {
-        JsonKind::Number => is_number(text) || string_value(text).is_some_and(|s| is_number(&s)),
-        JsonKind::Boolean => {
-            matches!(text, "true" | "false")
-                || string_value(text).is_some_and(|s| matches!(s.as_str(), "true" | "false" | ""))
+    match kind {
+        JsonKind::Number | JsonKind::Boolean if parses(text, kind) => Ok(()),
+        JsonKind::Number | JsonKind::Boolean => Err((String::new(), found(text, kind))),
+        JsonKind::LenientLong | JsonKind::LenientInteger | JsonKind::LenientBoolean => {
+            walk_scalars(text, &mut Vec::new(), &mut |scalar, at| {
+                if let Some(found) = skipped(scalar, kind) {
+                    ignored(at, found);
+                }
+            })
         }
-        JsonKind::String | JsonKind::StringArray => return check_no_object(text),
-        JsonKind::ObjectArray => return check_elements(text, '{'),
-    };
-    if ok {
-        Ok(())
-    } else {
-        Err((None, found(text, kind)))
+        JsonKind::String | JsonKind::StringArray => {
+            walk_scalars(text, &mut Vec::new(), &mut |_, _| {})
+        }
+        JsonKind::ObjectArray => check_elements(text, '{'),
     }
 }
 
-/// `text` is a scalar or an array of them (nested arrays included): no object at any depth.
-fn check_no_object(text: &str) -> Result<(), Mismatch> {
+/// Walks `text`, a scalar or an array of them (nested arrays included), calling `scalar` with
+/// each non-null scalar and the element indices that lead to it; an object at any depth is a
+/// mismatch.
+fn walk_scalars(
+    text: &str,
+    at: &mut Vec<usize>,
+    scalar: &mut dyn FnMut(&str, &[usize]),
+) -> Result<(), Mismatch> {
     if text.starts_with('{') {
-        return Err((None, "an object"));
+        return Err((indices(at), "an object"));
     }
     if !text.starts_with('[') {
+        if text != "null" {
+            scalar(text, at);
+        }
         return Ok(());
     }
     let Ok(items) = serde_json::from_str::<Vec<&RawValue>>(text) else {
-        return Err((None, "an array"));
+        return Err((indices(at), "an array"));
     };
     for (index, item) in items.iter().enumerate() {
-        check_no_object(item.get())
-            .map_err(|(at, found)| (Some(format!("[{index}]{}", at.unwrap_or_default())), found))?;
+        at.push(index);
+        walk_scalars(item.get(), at, scalar)?;
+        at.pop();
     }
     Ok(())
+}
+
+/// Element indices as a reason writes them: `[1][0]`, or nothing for the value itself.
+fn indices(at: &[usize]) -> String {
+    let mut out = String::new();
+    for i in at {
+        // Writing to a String cannot fail.
+        let _ = write!(out, "[{i}]");
+    }
+    out
+}
+
+/// Whether the scalar `text` passes a strict kind (true for every other kind).
+fn parses(text: &str, kind: JsonKind) -> bool {
+    match kind {
+        JsonKind::Number => is_number(text) || string_value(text).is_some_and(|s| is_number(&s)),
+        JsonKind::Boolean | JsonKind::LenientBoolean => {
+            matches!(text, "true" | "false")
+                || string_value(text).is_some_and(|s| matches!(s.as_str(), "true" | "false" | ""))
+        }
+        _ => true,
+    }
+}
+
+/// What the scalar `text` is, in words, when Elasticsearch skips it in a lenient field of
+/// `kind`; `None` when it indexes it.
+fn skipped(text: &str, kind: JsonKind) -> Option<&'static str> {
+    let ty = match kind {
+        JsonKind::LenientLong => NumericType::Long,
+        JsonKind::LenientInteger => NumericType::Integer,
+        JsonKind::LenientBoolean => return (!parses(text, kind)).then(|| found(text, kind)),
+        _ => return None,
+    };
+    let string = text.starts_with('"');
+    match es_number::read(text, ty) {
+        Reading::Indexed => None,
+        Reading::NotANumber => Some(found(text, kind)),
+        Reading::OutOfRange if string => Some("a string holding a number out of range"),
+        Reading::OutOfRange => Some("a number out of range"),
+    }
 }
 
 /// Every element of the array `text` is null or starts with `first`.
 fn check_elements(text: &str, first: char) -> Result<(), Mismatch> {
     let Ok(items) = serde_json::from_str::<Vec<&RawValue>>(text) else {
-        return Err((None, found(text, JsonKind::String)));
+        return Err((String::new(), found(text, JsonKind::String)));
     };
     for (index, item) in items.iter().enumerate() {
         if !is_null(item) && !item.get().starts_with(first) {
-            return Err((
-                Some(format!("[{index}]")),
-                found(item.get(), JsonKind::String),
-            ));
+            return Err((indices(&[index]), found(item.get(), JsonKind::String)));
         }
     }
     Ok(())
@@ -205,9 +295,14 @@ fn check_elements(text: &str, first: char) -> Result<(), Mismatch> {
 
 /// The kind of a raw JSON value in words; `expected` refines the description of a string.
 fn found(text: &str, expected: JsonKind) -> &'static str {
+    let number = matches!(
+        expected,
+        JsonKind::Number | JsonKind::LenientLong | JsonKind::LenientInteger
+    );
+    let boolean = matches!(expected, JsonKind::Boolean | JsonKind::LenientBoolean);
     match text.as_bytes().first() {
-        Some(b'"') if expected == JsonKind::Number => "a string that is not a number",
-        Some(b'"') if expected == JsonKind::Boolean => "a string other than \"true\" or \"false\"",
+        Some(b'"') if number => "a string that is not a number",
+        Some(b'"') if boolean => "a string other than \"true\" or \"false\"",
         Some(b'"') => "a string",
         Some(b'{') => "an object",
         Some(b'[') => "an array",
@@ -231,14 +326,7 @@ fn string_value(text: &str) -> Option<String> {
     }
 }
 
-fn mismatch(
-    role: Option<usize>,
-    shape: FieldShape,
-    at: Option<&str>,
-    found: &str,
-) -> MalformedRecord {
-    let path = role.map(|i| format!("roles[{i}].")).unwrap_or_default();
-    let at = at.unwrap_or("");
+fn mismatch(prefix: &str, shape: FieldShape, at: &str, found: &str) -> MalformedRecord {
     let expected = match (at.is_empty(), shape.kind) {
         (false, JsonKind::ObjectArray) => "an object",
         (_, kind) => kind.describe(),
@@ -246,7 +334,7 @@ fn mismatch(
     MalformedRecord::new(
         MalformedKind::Record,
         format!(
-            "{path}{}{at}: expected {expected}, found {found}",
+            "{prefix}{}{at}: expected {expected}, found {found}",
             shape.name
         ),
     )
@@ -255,16 +343,19 @@ fn mismatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::line_stats::IgnoredValue;
 
-    fn check(record: &str, fields: &[FieldShape]) -> Result<(), MalformedRecord> {
-        check_fields(&RawObject::parse(record).unwrap(), fields, None)
+    fn check(record: &str, fields: &[FieldShape]) -> Result<LineStats, MalformedRecord> {
+        let mut stats = LineStats::default();
+        check_fields(&RawObject::parse(record).unwrap(), fields, None, &mut stats)?;
+        Ok(stats)
     }
 
     #[test]
     fn valid_values_and_nulls_pass() {
         for record in [
             r#"{"id":5,"connections":-3,"followers":1.5e3,"open_to_work":true}"#,
-            r#"{"id":"12","followers":"-7.5","connections":1e400,"open_to_work":"false"}"#,
+            r#"{"id":"12","followers":"-7.5","connections":1e18,"open_to_work":"false"}"#,
             r#"{"open_to_work":""}"#,
             r#"{"first_name":"A","skills":["x",null,"y"],"roles":[{},null]}"#,
             r#"{"skills":[],"roles":[]}"#,
@@ -275,38 +366,162 @@ mod tests {
             r#"{"city":3,"headline":true,"summary":1.5,"first_name":["A","B"]}"#,
             r#"{"skills":"rust","industry":[1,[false,null]]}"#,
             r#"{"skills":["a",7,true,null,["b"]]}"#,
+            // Measures take arrays too; values that parse are not counted.
+            r#"{"followers":[5,"6",[null]],"connections":[],"open_to_work":[true,"false"]}"#,
         ] {
-            check(record, PERSON_FIELDS).unwrap_or_else(|e| panic!("{record}: {e}"));
+            let stats = check(record, PERSON_FIELDS).unwrap_or_else(|e| panic!("{record}: {e}"));
+            assert_eq!(stats, LineStats::default(), "{record}");
         }
+    }
+
+    #[test]
+    fn lenient_fields_count_the_values_the_index_skips() {
+        for (record, count, first, kind) in [
+            (
+                r#"{"followers":"n/a"}"#,
+                1,
+                "followers",
+                "a string that is not a number",
+            ),
+            (r#"{"followers":[5]}"#, 0, "", ""),
+            (
+                r#"{"followers":["x",3]}"#,
+                1,
+                "followers[0]",
+                "a string that is not a number",
+            ),
+            (
+                r#"{"open_to_work":"yes"}"#,
+                1,
+                "open_to_work",
+                "a string other than \"true\" or \"false\"",
+            ),
+            (r#"{"open_to_work":[true]}"#, 0, "", ""),
+            (r#"{"open_to_work":null,"followers":null}"#, 0, "", ""),
+            (r#"{"open_to_work":1}"#, 1, "open_to_work", "a number"),
+            (r#"{"connections":true}"#, 1, "connections", "a boolean"),
+            // Every element counts; the first in table order is the one named.
+            (
+                r#"{"open_to_work":"no","followers":" 7","connections":[1,["7 8",[false]]]}"#,
+                4,
+                "connections[1][0]",
+                "a string that is not a number",
+            ),
+        ] {
+            let stats = check(record, PERSON_FIELDS).unwrap_or_else(|e| panic!("{record}: {e}"));
+            assert_eq!(stats.ignored_by_index, count, "{record}");
+            let want = (count > 0).then(|| IgnoredValue {
+                field: first.to_owned(),
+                found: kind,
+            });
+            assert_eq!(stats.first_ignored, want, "{record}");
+        }
+    }
+
+    /// What Elasticsearch 9.5.5 did with each value, observed against a real 9.5.5 instance
+    /// (fields mapped `long`, `integer` and `boolean` with `ignore_malformed: true`, `_ignored`
+    /// read back per document): `false` means indexed (not in `_ignored`), `true` skipped (the
+    /// field listed in `_ignored`). The count must be exactly what Elasticsearch skips.
+    #[test]
+    fn counts_what_elasticsearch_9_5_5_skips() {
+        let long = [
+            ("5", false),
+            ("5.7", false),
+            (r#""5""#, false),
+            (r#""5.0""#, false),
+            (r#""1e3""#, false),
+            (r#""+5""#, false),
+            (r#"".5""#, false),
+            (r#""5.""#, false),
+            (r#""007""#, false),
+            (r#""""#, false),
+            ("-0", false),
+            ("[]", false),
+            ("9223372036854775807", false),
+            (r#"" 5""#, true),
+            (r#""5 ""#, true),
+            (r#""7 8""#, true),
+            (r#""n/a""#, true),
+            ("true", true),
+            ("9223372036854775808", true),
+            ("1e19", true),
+            (r#"[5,"x"]"#, true),
+        ];
+        let integer = [
+            ("2147483647", false),
+            ("1.9", false),
+            ("2147483648", true),
+            ("3000000000", true),
+            (r#""3000000000""#, true),
+        ];
+        let boolean = [
+            ("true", false),
+            ("false", false),
+            (r#""true""#, false),
+            (r#""false""#, false),
+            (r#""""#, false),
+            (r#""yes""#, true),
+            (r#""TRUE""#, true),
+            ("1", true),
+            ("0", true),
+            (r#""1""#, true),
+            (r#"[true,"x"]"#, true),
+        ];
+        for (field, fields, table) in [
+            ("followers", PERSON_FIELDS, &long[..]),
+            ("employee_count", ORGANIZATION_FIELDS, &long[..]),
+            ("founded_year", ORGANIZATION_FIELDS, &integer[..]),
+            ("open_to_work", PERSON_FIELDS, &boolean[..]),
+        ] {
+            for (value, skipped) in table {
+                let record = format!(r#"{{"{field}":{value}}}"#);
+                let stats = check(&record, fields).unwrap_or_else(|e| panic!("{record}: {e}"));
+                assert_eq!(stats.ignored_by_index, u64::from(*skipped), "{record}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeated_lenient_key_counts_its_last_occurrence() {
+        for (record, count) in [
+            (r#"{"followers":{"n":1},"followers":5}"#, 0),
+            (r#"{"followers":5,"followers":"n/a"}"#, 1),
+            (r#"{"followers":"n/a","followers":5}"#, 0),
+        ] {
+            let stats = check(record, PERSON_FIELDS).unwrap_or_else(|e| panic!("{record}: {e}"));
+            assert_eq!(stats.ignored_by_index, count, "{record}");
+        }
+        let err = check(r#"{"followers":5,"followers":{"n":1}}"#, PERSON_FIELDS).unwrap_err();
+        assert!(err.reason().starts_with("followers:"), "{err}");
     }
 
     #[test]
     fn mismatches_name_the_field() {
         for (record, reason) in [
             (
-                r#"{"open_to_work":"yes"}"#,
-                "open_to_work: expected a boolean, found a string other than \"true\" or \"false\"",
-            ),
-            (
-                r#"{"open_to_work":1}"#,
-                "open_to_work: expected a boolean, found a number",
-            ),
-            (
                 r#"{"id":"abc"}"#,
                 "id: expected a number, found a string that is not a number",
             ),
             (r#"{"id":true}"#, "id: expected a number, found a boolean"),
             (
-                r#"{"followers":" 7"}"#,
-                "followers: expected a number, found a string that is not a number",
-            ),
-            (
-                r#"{"followers":"7 8"}"#,
-                "followers: expected a number, found a string that is not a number",
-            ),
-            (
                 r#"{"id":5,"id":[5]}"#,
                 "id: expected a number, found an array",
+            ),
+            (
+                r#"{"followers":{"n":1}}"#,
+                "followers: expected a string, number or boolean, found an object",
+            ),
+            (
+                r#"{"connections":[1,[2,{"n":3}]]}"#,
+                "connections[1][1]: expected a string, number or boolean, found an object",
+            ),
+            (
+                r#"{"open_to_work":{"value":true}}"#,
+                "open_to_work: expected a string, number or boolean, found an object",
+            ),
+            (
+                r#"{"open_to_work":["yes",{}]}"#,
+                "open_to_work[1]: expected a string, number or boolean, found an object",
             ),
             (
                 r#"{"first_name":{"given":"A"}}"#,
@@ -345,23 +560,44 @@ mod tests {
 
     #[test]
     fn the_path_prefixes_the_reason() {
+        let mut stats = LineStats::default();
         let object = RawObject::parse(r#"{"title":{"x":1}}"#).unwrap();
-        let err = check_fields(&object, ROLE_FIELDS, Some(2)).unwrap_err();
+        let err = check_fields(&object, ROLE_FIELDS, Some(2), &mut stats).unwrap_err();
         assert_eq!(
             err.reason(),
             "roles[2].title: expected a string, number or boolean, found an object"
+        );
+        let object = RawObject::parse(r#"{"id":"abc"}"#).unwrap();
+        let err = check_fields(&object, ROLE_FIELDS, Some(0), &mut stats).unwrap_err();
+        assert_eq!(
+            err.reason(),
+            "roles[0].id: expected a number, found a string that is not a number"
         );
     }
 
     #[test]
     fn organization_fields() {
-        check(
+        let stats = check(
             r#"{"id":1,"name":"A","employee_count":"40","keywords":["k"],"addresses":"x"}"#,
             ORGANIZATION_FIELDS,
         )
         .unwrap();
-        let err = check(r#"{"founded_year":"long ago"}"#, ORGANIZATION_FIELDS).unwrap_err();
+        assert_eq!(stats.ignored_by_index, 0);
+        let stats = check(
+            r#"{"founded_year":"long ago","employee_count":["n/a",12]}"#,
+            ORGANIZATION_FIELDS,
+        )
+        .unwrap();
+        assert_eq!(stats.ignored_by_index, 2);
+        let first = stats.first_ignored.unwrap();
+        assert_eq!(first.field, "employee_count[0]");
+        let err = check(r#"{"founded_year":{"year":1999}}"#, ORGANIZATION_FIELDS).unwrap_err();
         assert!(err.reason().starts_with("founded_year:"), "{err}");
+        let err = check(r#"{"id":"abc"}"#, ORGANIZATION_FIELDS).unwrap_err();
+        assert_eq!(
+            err.reason(),
+            "id: expected a number, found a string that is not a number"
+        );
     }
 
     #[test]

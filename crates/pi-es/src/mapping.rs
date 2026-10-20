@@ -99,6 +99,57 @@ mod tests {
         table
     }
 
+    /// Whether extraction's `kind` fits the field mapped as `node`. A lenient kind lets a value
+    /// Elasticsearch cannot parse through, so its field must skip that value
+    /// (`ignore_malformed`) rather than fail the document, and it counts by the range of one
+    /// type, so the type must match; a strict one may have `ignore_malformed` too.
+    fn kind_fits(path: &str, node: &Value, kind: JsonKind) -> bool {
+        let ignores_malformed = node["ignore_malformed"] == Value::Bool(true);
+        match node["type"].as_str() {
+            Some(ty @ ("long" | "integer")) => match kind {
+                JsonKind::Number => true,
+                JsonKind::LenientLong => ty == "long" && ignores_malformed,
+                JsonKind::LenientInteger => ty == "integer" && ignores_malformed,
+                _ => false,
+            },
+            Some("boolean") => match kind {
+                JsonKind::Boolean => true,
+                JsonKind::LenientBoolean => ignores_malformed,
+                _ => false,
+            },
+            Some("text" | "keyword" | "date") => {
+                matches!(kind, JsonKind::String | JsonKind::StringArray)
+            }
+            Some("object") => kind == JsonKind::ObjectArray,
+            other => panic!("{path}: no rule for mapping type {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lenient_kinds_need_ignore_malformed() {
+        for (ty, kind, other) in [
+            ("long", JsonKind::LenientLong, JsonKind::LenientInteger),
+            ("integer", JsonKind::LenientInteger, JsonKind::LenientLong),
+        ] {
+            let lenient = serde_json::json!({"type": ty, "ignore_malformed": true});
+            let strict = serde_json::json!({"type": ty});
+            assert!(kind_fits("n", &lenient, kind), "{ty}");
+            assert!(kind_fits("n", &lenient, JsonKind::Number), "{ty}");
+            assert!(kind_fits("n", &strict, JsonKind::Number), "{ty}");
+            assert!(!kind_fits("n", &strict, kind), "{ty}");
+            // The range a lenient number counts by must be the mapped type's.
+            assert!(!kind_fits("n", &lenient, other), "{ty}");
+            assert!(!kind_fits("n", &lenient, JsonKind::LenientBoolean), "{ty}");
+        }
+
+        let lenient = serde_json::json!({"type": "boolean", "ignore_malformed": true});
+        let strict = serde_json::json!({"type": "boolean"});
+        assert!(kind_fits("b", &lenient, JsonKind::LenientBoolean));
+        assert!(kind_fits("b", &strict, JsonKind::Boolean));
+        assert!(!kind_fits("b", &strict, JsonKind::LenientBoolean));
+        assert!(!kind_fits("b", &lenient, JsonKind::LenientLong));
+    }
+
     /// Extraction's type check and the mapping cannot drift: every field Elasticsearch parses
     /// (not disabled, not written by the document builder) has a table entry of the kind its
     /// type expects, and every table entry is such a field.
@@ -124,16 +175,10 @@ mod tests {
                 !owned,
                 "{path} is builder-owned: the input value is replaced"
             );
-            let ok = match node["type"].as_str() {
-                Some("long" | "integer") => *kind == JsonKind::Number,
-                Some("boolean") => *kind == JsonKind::Boolean,
-                Some("text" | "keyword" | "date") => {
-                    matches!(kind, JsonKind::String | JsonKind::StringArray)
-                }
-                Some("object") => *kind == JsonKind::ObjectArray,
-                other => panic!("{path}: no rule for mapping type {other:?}"),
-            };
-            assert!(ok, "{path}: mapped {}, checked as {kind}", node["type"]);
+            assert!(
+                kind_fits(path, node, *kind),
+                "{path}: mapped {node}, checked as {kind:?}"
+            );
             seen.push(path.to_owned());
         });
         let missing: Vec<&String> = table.keys().filter(|k| !seen.contains(k)).collect();

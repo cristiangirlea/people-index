@@ -48,13 +48,27 @@ the join needs are parsed).
 or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must
 cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELDS`,
 `ROLE_FIELDS`, `ORGANIZATION_FIELDS`), checked by `extract-persons` (the record and every role)
-and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. `long` and
-`integer` fields take a number or a string holding one, `boolean` fields `true`, `false`,
-`"true"`, `"false"` or `""`, `text`, `keyword` and `date` fields (the lists `skills`,
-`keywords` and `technologies` included) any scalar, which Elasticsearch reads as text (`"city":
-10001`, `"start_date": 2020`), or an array of scalars, but no object at any depth, and `roles`
-an array of objects. `null` is allowed everywhere. Disabled objects (`memberships`, `addresses`, ...) take anything, and the
-names the builder writes (`organizations`, `unresolved_organization_ids`,
+and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. Identifiers (`id`,
+`roles[].id`, `roles[].organization_id`, the organization's `id`) are strict: a number or a
+string holding one. Measures (`connections`, `followers`, `open_to_work`, `employee_count`,
+`founded_year`) are lenient, since their mapping has `ignore_malformed`: any scalar or array
+of scalars passes. Elasticsearch skips a value it cannot read as the field's type: the
+malformed values are not indexed and the field is listed in the document's `_ignored`; the
+record stays searchable by its other fields, and the value stays in `_source`. Extraction keeps
+such a record and counts in the extract counter `values_ignored_by_index` exactly the values
+Elasticsearch skips (not malformed, not against `max_malformed`), by the rules observed on
+Elasticsearch 9.5.5 (`pi-model`'s `es_number`): in a `long` or `integer` field a boolean, a
+string other than `""` that is not a decimal number `[+-]? (digits [. digits?] | . digits)
+([eE] [+-]? digits)?` with no surrounding whitespace (`"n/a"`, `" 5"`), or a number whose
+truncation toward zero is outside `i64` (`long`) or `i32` (`integer`; `founded_year`); in a
+`boolean` field anything but `true`, `false`, `"true"`, `"false"` and `""`. Each element of an
+array counts on its own. It logs the first few such lines per task with file, line, field and
+kind, never the value. `text`, `keyword` and `date` fields (the lists `skills`,
+`keywords` and `technologies` included) take any scalar, which Elasticsearch reads as text
+(`"city": 10001`, `"start_date": 2020`), or an array of scalars. No field but `roles` takes an
+object at any depth, `ignore_malformed` or not, and `roles` takes an array of objects. `null`
+is allowed everywhere. Disabled objects (`memberships`, `addresses`, ...) take anything, and
+the names the builder writes (`organizations`, `unresolved_organization_ids`,
 `roles[].organization_resolved`) are replaced, so neither is checked. A value of the right kind
 that still does not parse (a number out of range, a date in another format) is not indexed for
 that field and stays in `_source` (`ignore_malformed`).

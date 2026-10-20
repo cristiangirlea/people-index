@@ -14,6 +14,10 @@ pub const MALFORMED: &str = "malformed";
 /// searchable by its other fields. Counted per extracted line, before person deduplication; an
 /// organization's value counts once however many person documents embed it.
 pub const VALUES_IGNORED_BY_INDEX: &str = "values_ignored_by_index";
+/// Kept records that repeated a key in some object, at any depth, and were rewritten to each
+/// key's last occurrence (Elasticsearch rejects a duplicate key anywhere in a document).
+/// Counted per extracted line, like [`VALUES_IGNORED_BY_INDEX`].
+pub const RECORDS_WITH_REPEATED_KEYS: &str = "records_with_repeated_keys";
 /// Decompressed bytes of an input file.
 pub const DECOMPRESSED_BYTES: &str = "decompressed_bytes";
 /// Edge rows written by `extract-persons`.

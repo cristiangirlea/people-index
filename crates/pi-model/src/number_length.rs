@@ -4,6 +4,7 @@
 //! document, before any mapping applies, so the bulk item fails whatever field holds it: text,
 //! `ignore_malformed`, unknown or `enabled: false`. Extraction quarantines such a record instead.
 
+use std::convert::Infallible;
 use std::ops::ControlFlow;
 
 use crate::error::{MalformedKind, MalformedRecord};
@@ -37,9 +38,13 @@ impl<'a> ScanVisitor<'a> for TooLong {
     }
 }
 
-/// Checks every number in `record` (valid JSON) against [`MAX_NUMBER_CHARS`].
-pub(crate) fn check_number_lengths(record: &str) -> Result<(), MalformedRecord> {
-    match scan(record, &mut TooLong) {
+/// Checks every number in `record` (valid JSON) against [`MAX_NUMBER_CHARS`], in one scan that
+/// `watcher` sees too (`()` for none).
+pub(crate) fn check_number_lengths<'a>(
+    record: &'a str,
+    watcher: impl ScanVisitor<'a, Break = Infallible>,
+) -> Result<(), MalformedRecord> {
+    match scan(record, &mut (TooLong, watcher)) {
         ControlFlow::Continue(()) => Ok(()),
         ControlFlow::Break(err) => Err(err),
     }
@@ -52,9 +57,9 @@ mod tests {
     #[test]
     fn counts_the_token_as_written() {
         let at_limit = format!("-{}.5e+1", "9".repeat(MAX_NUMBER_CHARS - 6));
-        assert!(check_number_lengths(&format!(r#"{{"n":{at_limit}}}"#)).is_ok());
+        assert!(check_number_lengths(&format!(r#"{{"n":{at_limit}}}"#), ()).is_ok());
         let over = format!("-{}.5e+1", "9".repeat(MAX_NUMBER_CHARS - 5));
-        let err = check_number_lengths(&format!(r#"{{"a":[0,{{"n":{over}}}]}}"#)).unwrap_err();
+        let err = check_number_lengths(&format!(r#"{{"a":[0,{{"n":{over}}}]}}"#), ()).unwrap_err();
         assert_eq!(err.kind(), MalformedKind::Record);
         assert_eq!(
             err.reason(),
@@ -65,6 +70,6 @@ mod tests {
     #[test]
     fn long_digit_strings_are_not_numbers() {
         let digits = "9".repeat(MAX_NUMBER_CHARS * 2);
-        assert!(check_number_lengths(&format!(r#"{{"s":"{digits}"}}"#)).is_ok());
+        assert!(check_number_lengths(&format!(r#"{{"s":"{digits}"}}"#), ()).is_ok());
     }
 }

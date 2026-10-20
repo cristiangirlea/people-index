@@ -169,6 +169,7 @@ pub(crate) async fn run_extract(
     report.add(counters::RECORDS, counts.records);
     report.add(counters::MALFORMED, counts.malformed);
     report.add(counters::VALUES_IGNORED_BY_INDEX, counts.ignored.total());
+    report.add(counters::RECORDS_WITH_REPEATED_KEYS, counts.repeated_keys);
     report.add(counters::DECOMPRESSED_BYTES, counts.decompressed);
     report.add(counters::SEGMENTS, counts.written.segments);
     report.partitions = counts.written.partitions;
@@ -195,6 +196,8 @@ struct Counts {
     malformed_by_kind: BTreeMap<&'static str, u64>,
     /// Values of kept records Elasticsearch will skip, and the lines logged about them.
     ignored: IgnoredLog,
+    /// Kept records rewritten to the last occurrence of a repeated key.
+    repeated_keys: u64,
     decompressed: u64,
     written: Written,
     extra: BTreeMap<&'static str, u64>,
@@ -257,6 +260,7 @@ impl Job {
             match outcome {
                 Ok(stats) => {
                     counts.records += 1;
+                    counts.repeated_keys += u64::from(stats.repeated_keys);
                     counts.ignored.note(&self.file, info.number, stats);
                 }
                 Err((kind, reason)) => {

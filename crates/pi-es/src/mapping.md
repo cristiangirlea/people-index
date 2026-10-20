@@ -43,11 +43,17 @@ analysed.
 `memberships`, `educations`, `certifications`, `languages`, `organizations.addresses`,
 `organizations.locations`, `organizations.funding_rounds`: nested structures with fields of
 their own that no query needs. `enabled: false` skips mapping their contents entirely, so their
-shape (or a malformed value) can never fail a bulk item, and they cost nothing but `_source`.
-The one exception is the JSON parser's own limit, which applies before any mapping: a number
-token longer than 1000 characters fails the item in any field, disabled, `text` or
-`ignore_malformed` alike (observed on 9.5.5), so extraction quarantines such a record as
-`record`, naming the path (`pi_model`'s `MAX_NUMBER_CHARS`; docs/ARCHITECTURE.md, "The data").
+shape (or a malformed value) cannot fail a bulk item, and they cost nothing but `_source`.
+The JSON parser still reads their tokens, and its own rules apply before any mapping, so two
+things fail the item in any field, disabled, `text` or `ignore_malformed` alike (both observed
+on 9.5.5):
+
+- a number token longer than 1000 characters: extraction quarantines such a record as `record`,
+  naming the path (`pi_model`'s `MAX_NUMBER_CHARS`);
+- a key repeated in one object ("Duplicate field"), at any depth: extraction rewrites such a
+  record to each key's last occurrence and counts it in `records_with_repeated_keys`.
+
+docs/ARCHITECTURE.md, "The data", has both rules.
 
 ## Robust scalar types
 

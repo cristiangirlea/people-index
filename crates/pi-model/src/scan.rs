@@ -7,6 +7,7 @@
 //! `serde_json` has already read); on anything else the pass still ends without panicking, but
 //! its events are unspecified.
 
+use std::convert::Infallible;
 use std::fmt;
 use std::ops::ControlFlow;
 
@@ -23,6 +24,13 @@ pub(crate) enum Segment<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct JsonPath<'a> {
     segments: Vec<Segment<'a>>,
+}
+
+impl<'a> JsonPath<'a> {
+    /// The innermost step, if any.
+    pub(crate) fn last(&self) -> Option<Segment<'a>> {
+        self.segments.last().copied()
+    }
 }
 
 /// Written as the quarantine names fields: `roles[2].title`, keys decoded.
@@ -67,9 +75,10 @@ pub(crate) trait ScanVisitor<'a> {
         ControlFlow::Continue(())
     }
 
-    /// A key of the innermost open object; `path` ends with it.
-    fn key(&mut self, path: &JsonPath<'a>) -> ControlFlow<Self::Break> {
-        let _ = path;
+    /// A key of the innermost open object; `path` ends with it, `at` is the byte offset of its
+    /// opening quote.
+    fn key(&mut self, path: &JsonPath<'a>, at: usize) -> ControlFlow<Self::Break> {
+        let _ = (path, at);
         ControlFlow::Continue(())
     }
 
@@ -77,6 +86,61 @@ pub(crate) trait ScanVisitor<'a> {
     fn number(&mut self, path: &JsonPath<'a>, token: &'a str) -> ControlFlow<Self::Break> {
         let _ = (path, token);
         ControlFlow::Continue(())
+    }
+}
+
+/// Watches nothing: the second of a pair when there is nothing else to see.
+impl ScanVisitor<'_> for () {
+    type Break = Infallible;
+}
+
+impl<'a, V: ScanVisitor<'a>> ScanVisitor<'a> for &mut V {
+    type Break = V::Break;
+
+    fn object_start(&mut self, path: &JsonPath<'a>) -> ControlFlow<V::Break> {
+        (**self).object_start(path)
+    }
+
+    fn object_end(&mut self, path: &JsonPath<'a>) -> ControlFlow<V::Break> {
+        (**self).object_end(path)
+    }
+
+    fn key(&mut self, path: &JsonPath<'a>, at: usize) -> ControlFlow<V::Break> {
+        (**self).key(path, at)
+    }
+
+    fn number(&mut self, path: &JsonPath<'a>, token: &'a str) -> ControlFlow<V::Break> {
+        (**self).number(path, token)
+    }
+}
+
+/// Two visitors on one pass: the first may stop the scan, the second only watches. Each event
+/// reaches the second even when the first stops on it.
+impl<'a, A, B> ScanVisitor<'a> for (A, B)
+where
+    A: ScanVisitor<'a>,
+    B: ScanVisitor<'a, Break = Infallible>,
+{
+    type Break = A::Break;
+
+    fn object_start(&mut self, path: &JsonPath<'a>) -> ControlFlow<A::Break> {
+        let ControlFlow::Continue(()) = self.1.object_start(path);
+        self.0.object_start(path)
+    }
+
+    fn object_end(&mut self, path: &JsonPath<'a>) -> ControlFlow<A::Break> {
+        let ControlFlow::Continue(()) = self.1.object_end(path);
+        self.0.object_end(path)
+    }
+
+    fn key(&mut self, path: &JsonPath<'a>, at: usize) -> ControlFlow<A::Break> {
+        let ControlFlow::Continue(()) = self.1.key(path, at);
+        self.0.key(path, at)
+    }
+
+    fn number(&mut self, path: &JsonPath<'a>, token: &'a str) -> ControlFlow<A::Break> {
+        let ControlFlow::Continue(()) = self.1.number(path, token);
+        self.0.number(path, token)
     }
 }
 
@@ -159,7 +223,7 @@ pub(crate) fn scan<'a, V: ScanVisitor<'a>>(
                     *has_key = true;
                     path.segments
                         .push(Segment::Key(text.get(start..end).unwrap_or_default()));
-                    visitor.key(&path)?;
+                    visitor.key(&path, start - 1)?;
                 }
             }
             b'-' | b'0'..=b'9' => {
@@ -200,7 +264,7 @@ mod tests {
             ControlFlow::Continue(())
         }
 
-        fn key(&mut self, path: &JsonPath<'a>) -> ControlFlow<()> {
+        fn key(&mut self, path: &JsonPath<'a>, _: usize) -> ControlFlow<()> {
             self.0.push(format!("key {path}"));
             ControlFlow::Continue(())
         }
@@ -297,6 +361,42 @@ mod tests {
                 "} "
             ]
         );
+    }
+
+    #[test]
+    fn key_offsets_point_at_the_opening_quote() {
+        struct Offsets(Vec<usize>);
+        impl<'a> ScanVisitor<'a> for Offsets {
+            type Break = ();
+            fn key(&mut self, _: &JsonPath<'a>, at: usize) -> ControlFlow<()> {
+                self.0.push(at);
+                ControlFlow::Continue(())
+            }
+        }
+        let text = r#"{"a": "b", "c\"": [{ "d": 1}]}"#;
+        let mut offsets = Offsets(Vec::new());
+        let _ = scan(text, &mut offsets);
+        assert_eq!(offsets.0, [1, 11, 21]);
+        for at in offsets.0 {
+            assert_eq!(text.as_bytes()[at], b'"');
+        }
+    }
+
+    #[test]
+    fn a_pair_of_visitors_sees_every_event_in_one_pass() {
+        struct Numbers(usize);
+        impl<'a> ScanVisitor<'a> for Numbers {
+            type Break = Infallible;
+            fn number(&mut self, _: &JsonPath<'a>, _: &'a str) -> ControlFlow<Infallible> {
+                self.0 += 1;
+                ControlFlow::Continue(())
+            }
+        }
+        let mut log = Log::default();
+        let mut numbers = Numbers(0);
+        let _ = scan(r#"{"a": [1, {"b": 2}]}"#, &mut (&mut log, &mut numbers));
+        assert_eq!(numbers.0, 2);
+        assert_eq!(log.0, events(r#"{"a": [1, {"b": 2}]}"#));
     }
 
     #[test]

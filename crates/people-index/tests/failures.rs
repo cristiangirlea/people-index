@@ -165,6 +165,43 @@ async fn mapped_fields_of_the_wrong_type_are_quarantined_not_fatal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keys_repeated_at_any_depth_keep_their_last_occurrence_and_count() {
+    let orgs = "{\"id\":1,\"record\":{\"name\":\"O\",\"addresses\":[{\"city\":\"X1\",\"city\":\"Y1\"}]}}\n\
+                {\"id\":2,\"record\":{\"name\":\"P\"}}\n";
+    let persons = "{\"id\":5,\"record\":{\"memberships\":[{\"name\":\"X2\",\"name\":\"Y2\"}],\"x\":{\"a\":{\"b\":1,\"b\":2}},\"roles\":[{\"organization_id\":1}]}}\n\
+         {\"id\":6,\"record\":{\"roles\":[{\"organization_id\":2}]}}\n";
+    let (_dir, store) = store_with(gzip(persons)).await;
+    store
+        .put("raw/organizations/part-00000.ndjson.gz", gzip(orgs))
+        .await
+        .unwrap();
+    let mut cfg = config(1);
+    cfg.max_malformed = 0;
+    run_stages(&store, "run-repeats", cfg, &OFFLINE)
+        .await
+        .unwrap();
+
+    let docs = common::read_docs(&store, "run-repeats").await;
+    let text = std::str::from_utf8(&docs[&5]).unwrap();
+    for dropped in ["X1", "X2", "\"b\":1"] {
+        assert!(!text.contains(dropped), "{text}");
+    }
+    let doc: serde_json::Value = serde_json::from_slice(&docs[&5]).unwrap();
+    assert_eq!(doc["memberships"][0]["name"], "Y2");
+    assert_eq!(doc["x"]["a"]["b"], 2);
+    assert_eq!(doc["organizations"][0]["addresses"][0]["city"], "Y1");
+    for stage in [StageName::ExtractOrgs, StageName::ExtractPersons] {
+        let counted = counters(&store, "run-repeats", stage).await;
+        assert_eq!(counted.get("malformed"), Some(&0), "{stage:?}");
+        assert_eq!(
+            counted.get("records_with_repeated_keys"),
+            Some(&1),
+            "{stage:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn values_the_index_skips_do_not_count_as_malformed() {
     let orgs = "{\"id\":1,\"record\":{\"name\":\"A\",\"founded_year\":\"long ago\",\"employee_count\":3000000000}}\n";
     let persons = "{\"id\":5,\"record\":{\"followers\":\"n/a\",\"connections\":[5,\"x\"],\"open_to_work\":\"yes\",\"roles\":[{\"organization_id\":1}]}}\n\

@@ -215,6 +215,10 @@ What has not been done or measured yet, plainly:
   numbers for any data size, on any hardware. The defaults (256 MiB partitions, 64 MiB
   segments, 8 MiB bulk requests, 2 senders per task) are reasoned starting points, not tuned
   values.
+- **The local `file://` store is not reliable on Windows.** A write can fail now and then with
+  "Access is denied" when another handle holds the object (about 1 run in 100 to 300 of the
+  store's own conformance test); a longer retry did not help, and the cause is unknown (#43).
+  Linux, and the S3 store used by compose and Kubernetes, are not affected.
 - **Memory per worker is unmeasured.** It is bounded by configuration (task memory, buffer
   budget, segment size, concurrency) rather than input size, with `join` and `assemble` running
   a partition in several passes when it is estimated larger than `PI_TASK_MEMORY_BYTES`, but

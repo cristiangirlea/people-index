@@ -217,7 +217,7 @@ services:
       start_period: 5s
 
   s3-init:
-    image: amazon/aws-cli:2.38.0@sha256:ed3233c28ad56d6a66e9e7623a495ab2d7eb08d425f8eea0fdbdfacb12de2ba8
+    image: amazon/aws-cli:2.38.2@sha256:5d39fd52f236ed01c5c25fba66c9aebcfc6cbb88e7bb1b727c5fe1f150540597
     entrypoint: ["bash", "/scripts/s3-init.sh"]
     depends_on:
       s3: { condition: service_healthy }

@@ -217,7 +217,7 @@ services:
       start_period: 5s
 
   s3-init:
-    image: amazon/aws-cli:2.38.0@sha256:ed3233c28ad56d6a66e9e7623a495ab2d7eb08d425f8eea0fdbdfacb12de2ba8
+    image: amazon/aws-cli:2.38.4@sha256:de807aa682dd3f45d6de5f431b93762691c53f1134b318936dda39f99e321244
     entrypoint: ["bash", "/scripts/s3-init.sh"]
     depends_on:
       s3: { condition: service_healthy }
@@ -297,7 +297,7 @@ services:
       - --digest
 
   prometheus:
-    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     profiles: [metrics]
     command:
       - --config.file=/etc/prometheus/prometheus.yml

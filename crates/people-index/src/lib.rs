@@ -82,14 +82,23 @@ async fn dispatch(command: Command) -> ExitCode {
         }),
         Command::Verify(args) => commands::verify::run(args).await.map(|outcome| {
             let passed = outcome.report.passed();
-            print_json(&json!({
+            let mut printed = json!({
                 "passed": passed,
                 "report": outcome.report,
                 "digest": outcome.digest,
-            }));
+            });
+            if let Some(run_id) = outcome.run_id {
+                printed["run_id"] = json!(run_id);
+            }
+            print_json(&printed);
             if !passed {
                 tracing::error!(
                     failures = outcome.report.failures().len(),
+                    alias_passed = outcome
+                        .report
+                        .alias
+                        .as_ref()
+                        .is_none_or(pi_es::AliasCheck::passed),
                     "verification failed"
                 );
             }

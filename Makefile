@@ -145,7 +145,7 @@ compose-resume: ## Resume a failed run from its commits: make compose-resume RUN
 	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)
 
 .PHONY: compose-verify
-compose-verify: ## Acceptance queries and content digest against the alias
+compose-verify: ## Acceptance queries and content digest against the alias (VERIFY_SOURCE=summary for a run's summary.json)
 	$(COMPOSE) --profile verify run --rm verify
 
 .PHONY: compose-run
@@ -160,10 +160,13 @@ compose-e2e: ## compose-run, then a second run that replaces it, verify and the 
 	@# the pipeline user: the calls the people-index-writer role must allow. check-republish.sh
 	@# then reads the cluster (es-users image: curl, the CA) and the second run's summary.json
 	@# (s3-init image: aws, jq). MSYS_NO_PATHCONV keeps Git Bash on Windows from rewriting the
-	@# container path /scripts/... into a Windows path; elsewhere it means nothing.
+	@# container path /scripts/... into a Windows path; elsewhere it means nothing. The summary
+	@# verify checks the alias against the summary.json of the run it serves (the second one,
+	@# found from the alias as on real feeds; check-republish.sh confirms which).
 	$(MAKE) compose-run RUN_ID=$(RUN_ID)
 	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)-2
 	$(MAKE) compose-verify
+	VERIFY_SOURCE=summary $(MAKE) compose-verify
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh es $(RUN_ID) $(RUN_ID)-2
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash s3-init /scripts/check-republish.sh summary $(RUN_ID) $(RUN_ID)-2
 
@@ -265,7 +268,7 @@ resume: ## Resume a failed run from its commits: make resume RUN_ID=<id> (replac
 	$(MAKE) run RUN_ID=$(RUN_ID)
 
 .PHONY: verify
-verify: ## Acceptance queries and content digest against the alias, as a Job
+verify: ## Acceptance queries and content digest against the alias, as a Job (VERIFY_SOURCE from jobs.vars)
 	@mkdir -p $(JOBS_OUT)
 	JOB_ID=$(RUN_ID) $(RENDER) verify --overlay $(OVERLAY) > $(JOBS_OUT)/verify-$(RUN_ID).yaml
 	$(KUBECTL) create -f $(JOBS_OUT)/verify-$(RUN_ID).yaml

@@ -49,9 +49,12 @@ make compose-clean         # stop and delete every volume
    `RUN_ID` (UTC time, e.g. `20261015-140501`), waits for the coordinator and exits with its
    status: 0 means the run published.
 3. `make compose-verify`: the acceptance queries and the content digest against the alias.
+   `VERIFY_SOURCE=summary make compose-verify` checks it against a run's `summary.json`
+   instead (see "Verifying a published index" below; `VERIFY_RUN_ID` picks the run).
 
 `make compose-e2e` (CI's end-to-end) is `make compose-run`, then a second run (`RUN_ID` with
-`-2` appended) over the same feeds, `make compose-verify` again, and
+`-2` appended) over the same feeds, `make compose-verify` again in both modes (the summary one
+finds the second run from the alias), and
 `deploy/compose/scripts/check-republish.sh`: the alias points only at the second run's index,
 the first run's index is gone, no other `persons-*` index is left, and the second run's
 `summary.json` lists the first index under `previous` and `deleted` with `not_deleted` empty.
@@ -120,9 +123,47 @@ make k3d-down        # delete the cluster
   and applies those local files (server-side). On a mismatch it keeps nothing and stops before
   applying; `scripts/check-deploy.sh` validates the same files, pinned the same way.
 - `make verify` renders `deploy/k8s/jobs/verify.yaml` (pod security, credentials and CA as the
-  run Jobs), runs `people-index verify --expected s3://people-index/raw/expected.json --digest`
-  against the alias, waits for the Job and prints its output; a failed check fails the target.
-  Size it with `VERIFY_CPU`, `VERIFY_MEMORY` and `VERIFY_DEADLINE_SECONDS` in `jobs.vars`.
+  run Jobs), runs `people-index verify --digest` against the alias, waits for the Job and prints
+  its output; a failed check fails the target. `VERIFY_SOURCE` in `jobs.vars` picks the mode:
+  `expected` (the local overlay: `s3://people-index/raw/expected.json` from `make datagen`) or
+  `summary` (the production example: the summary of the run the alias serves, no datagen).
+  `VERIFY_SOURCE=summary make verify` overrides it. Size it with `VERIFY_CPU`, `VERIFY_MEMORY`
+  and `VERIFY_DEADLINE_SECONDS` in `jobs.vars`.
+
+## Verifying a published index
+
+`people-index verify` has two modes (`--source`, `PI_VERIFY_SOURCE`):
+
+- `expected` (the default): datagen's `expected.json` (`--expected`, `PI_EXPECTED`) holds exact
+  counts for the synthetic feeds: the document count, `persons_with_unresolved`, and term
+  counts per role title and organization name. Only `datagen` writes it.
+- `summary`: for real feeds, where no expected file exists. The run's own
+  `runs/<id>/summary.json` (written by `publish`) is the reference. The run is `--run-id`
+  (`PI_VERIFY_RUN_ID`), by default the run in the store whose index the alias points at (index
+  names are lowercased run ids, so it is found by listing `runs/`); a summary that is missing
+  (the run never published) or names another alias is an error. Every query reads the run's
+  index itself, not the alias, so a publish in the middle cannot answer for another run. The
+  checks:
+
+  | Check | Passes when | What it shows |
+  |---|---|---|
+  | `alias` | the alias points at the run's `index` and nothing else, before and after the queries | the swap completed, nothing else is served, nothing moved meanwhile |
+  | `count` | documents in the index = `publish.docs` | nothing was lost or added since publish counted |
+  | `sample:ids` | one document, searched by its `_id`, is found exactly once | ids are unique and retrievable |
+  | `sample:full_name` | a match on the sample's first and last name (all terms) finds at least one document | full-text search on `full_name` works |
+  | `sample:organization_id` | a term query on the sample's first joined organization id finds at least one document | the joined organizations are searchable |
+
+  The sample is a document with a last name and a joined organization when the index has one;
+  the last two checks run only when the sample has text names, and an organization id up to
+  `i64::MAX` (the `long` mapping drops larger ones), so persons without names or without
+  resolved organizations never fail them. A non-empty index that returns no sample fails
+  `sample:ids`; an empty index gets only `alias` and `count`. A
+  failure means the index or the alias is wrong, not the data. Checking an older run with
+  `--run-id` fails `alias` once a newer run has replaced it.
+
+Both print one JSON object (`passed`, `report`, `digest`, and `run_id` in summary mode) and exit
+1 when a check fails; `--digest` adds the content digest in either mode (of the run's index in
+summary mode).
 
 ## Scaling
 

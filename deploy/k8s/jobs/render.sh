@@ -47,7 +47,8 @@ elif [[ "$kind" == datagen ]]; then
   names=(JOB_ID IMAGE IMAGE_PULL_POLICY PERSONS ORGANIZATIONS FILES SEED DATAGEN_CPU
     DATAGEN_MEMORY DATAGEN_DEADLINE_SECONDS TMP_SIZE)
 else
-  names=(JOB_ID IMAGE IMAGE_PULL_POLICY VERIFY_CPU VERIFY_MEMORY VERIFY_DEADLINE_SECONDS)
+  names=(JOB_ID IMAGE IMAGE_PULL_POLICY VERIFY_SOURCE VERIFY_CPU VERIFY_MEMORY
+    VERIFY_DEADLINE_SECONDS)
 fi
 
 declare -A value
@@ -81,6 +82,7 @@ pattern_for() {
     RUN_ID | JOB_ID) echo "$id" ;;
     IMAGE) echo '^[A-Za-z0-9][A-Za-z0-9./:_@-]*$' ;;
     IMAGE_PULL_POLICY) echo '^(Always|IfNotPresent|Never)$' ;;
+    VERIFY_SOURCE) echo '^(expected|summary)$' ;;
     *_CPU | *_MEMORY | TMP_SIZE) echo "$quantity" ;;
     *) echo "$int" ;;
   esac

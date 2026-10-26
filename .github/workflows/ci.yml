@@ -115,6 +115,8 @@ jobs:
       # jq --version first: on the runner the summary cases must run, not skip.
       - name: the compose republish check passes and fails as it should
         run: jq --version && bash scripts/test-check-republish.sh
+      - name: the pinned-image resolve check passes and fails as it should
+        run: bash scripts/test-check-pins-resolve.sh
       - name: hooks and scripts are stored as 100755
         # Git skips a hook that is not executable; Git for Windows hides a missing bit.
         run: |
@@ -156,6 +158,28 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check ${{ matrix.checks }}
+
+  pins:
+    # A registry can delete a pinned digest (a tag re-pushed in place) with nothing changing
+    # here; the weekly run reports a vanished digest at the next scheduled run.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+      KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install kubeconform (checksum verified)
+        run: |
+          curl -fsSL -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+      - name: every pinned image still resolves
+        run: bash scripts/check-pins-resolve.sh
 
   e2e:
     # The whole stack (three Elasticsearch nodes, the S3 store, coordinator, workers) on one

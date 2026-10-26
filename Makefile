@@ -28,6 +28,10 @@ RUN_ID_GIVEN := no
 else
 RUN_ID_GIVEN := yes
 endif
+# compose-e2e's failed run: a minute before now, so older than a generated RUN_ID (the cleanup
+# compares start seconds, docs/ARCHITECTURE.md "Stages"). Simply expanded, like RUN_ID; empty
+# without GNU date, which compose-e2e refuses.
+E2E_FAILED_ID := $(shell date -u -d '1 minute ago' +%Y%m%d-%H%M%S 2>/dev/null)
 
 # Sizes are not defaulted here, so each deployment keeps its own defaults (compose.yaml for
 # compose, deploy/k8s/overlays/<overlay>/jobs.vars for k8s). Set one to override both, e.g.
@@ -155,17 +159,30 @@ compose-run: ## Datagen, a full distributed run, then verify
 	$(MAKE) compose-verify
 
 .PHONY: compose-e2e
-compose-e2e: ## compose-run, then a second run that replaces it, verify and the republish checks (CI's e2e)
-	@# The second publish moves the alias off the first run's index and deletes that index, as
-	@# the pipeline user: the calls the people-index-writer role must allow. check-republish.sh
-	@# then reads the cluster (es-users image: curl, the CA) and the second run's summary.json
-	@# (s3-init image: aws, jq). MSYS_NO_PATHCONV keeps Git Bash on Windows from rewriting the
-	@# container path /scripts/... into a Windows path; elsewhere it means nothing.
-	$(MAKE) compose-run RUN_ID=$(RUN_ID)
+compose-e2e: ## A run that fails in publish, compose-run, then a second run that replaces it, verify and the republish checks (CI's e2e)
+	@# The failed run loads its index and then cannot publish it: 3 replicas on 3 data nodes
+	@# never reach green. Its id is a minute older than RUN_ID, so the first good publish
+	@# deletes that index as an older run's. The second publish moves the alias off the first
+	@# run's index and deletes it. Both deletes run as the pipeline user: the calls the
+	@# people-index-writer role must allow. check-republish.sh then reads the cluster
+	@# (es-users image: curl, the CA) and the runs' summary.json (s3-init image: aws, jq).
+	@# MSYS_NO_PATHCONV keeps Git Bash on Windows from rewriting the container path
+	@# /scripts/... into a Windows path; elsewhere it means nothing.
+	@# Compare start stamps (YYYYMMDD, T or -, HHMMSS), as publish does, not whole ids.
+	@f='$(E2E_FAILED_ID)'; r='$(RUN_ID)'; stamped='^[0-9]{8}[-Tt][0-9]{6}([^0-9]|$$)'; \
+	[[ "$$f" =~ $$stamped && "$$r" =~ $$stamped && "$${f:0:8}$${f:9:6}" < "$${r:0:8}$${r:9:6}" ]] || \
+	  { echo "compose-e2e needs GNU date and a RUN_ID that starts with a time stamp later than the failed run's ('$$f'); got '$$r'" >&2; exit 1; }
+	$(MAKE) compose-datagen
+	@if PI_INDEX_REPLICAS=3 PI_HEALTH_TIMEOUT=10s PI_TASK_ATTEMPTS=1 $(MAKE) compose-pipeline RUN_ID=$(E2E_FAILED_ID); then \
+	  echo "run $(E2E_FAILED_ID) published; it should have failed in publish" >&2; exit 1; \
+	fi
+	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh left $(E2E_FAILED_ID)
+	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)
+	$(MAKE) compose-verify
 	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)-2
 	$(MAKE) compose-verify
-	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh es $(RUN_ID) $(RUN_ID)-2
-	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash s3-init /scripts/check-republish.sh summary $(RUN_ID) $(RUN_ID)-2
+	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh es $(RUN_ID) $(RUN_ID)-2 $(E2E_FAILED_ID)
+	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash s3-init /scripts/check-republish.sh summary $(RUN_ID) $(RUN_ID)-2 $(E2E_FAILED_ID)
 
 .PHONY: compose-scale
 compose-scale: ## Change the worker count of a running run: make compose-scale RUN_ID=<id> WORKERS=6

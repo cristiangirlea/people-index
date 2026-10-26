@@ -7,6 +7,8 @@
 #                     the run's index `persons-<run_id>`: HEAD and PUT (create), _bulk,
 #                     PUT _settings, _refresh, _flush, _count, POST _pit, search and DELETE
 #                     _pit through it (verify), DELETE of the indexes the alias left behind;
+#                     `persons-*`: GET persons-*/_alias (older runs' indexes no alias serves)
+#                     and DELETE of those;
 #                     the alias `persons`: GET _alias, POST _aliases (move it), _count and _pit
 # No index templates: the index is created with its mapping and settings in the request body.
 # A different PI_ALIAS needs its own two names here (`<alias>` and `<alias>-*`).

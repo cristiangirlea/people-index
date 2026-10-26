@@ -31,6 +31,8 @@ scripts/test-scrub-check.sh   # the scrub check and hooks, in a throwaway repo a
 scripts/test-check-republish.sh  # the compose republish check, against stub curl and aws
 scripts/test-check-modes.sh   # the mode check, in a throwaway repo
 scripts/check-modes.sh        # hooks and *.sh are stored as 100755
+scripts/test-check-s3.sh      # the S3 check, against stub docker and cargo
+scripts/check-s3.sh           # store conformance and leases on the compose SeaweedFS (Docker)
 cargo deny check               # audit job (also weekly)
 ```
 

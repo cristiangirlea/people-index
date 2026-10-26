@@ -1,10 +1,10 @@
 //! Conformance of every backend to the semantics the commit and lease protocol relies on.
 //!
 //! The same checks run against the in-memory store and a local directory always, and against
-//! a real S3-compatible endpoint when `PI_TEST_S3_ENDPOINT` is set (`MinIO` in CI or locally:
-//! `PI_TEST_S3_ENDPOINT=http://localhost:9000 PI_TEST_S3_BUCKET=... AWS_ACCESS_KEY_ID=...
-//! AWS_SECRET_ACCESS_KEY=... cargo test -p pi-store`). Without it the S3 cases print a note
-//! and pass, so the suite needs no network by default.
+//! a real S3-compatible endpoint when `PI_TEST_S3_ENDPOINT` is set. `scripts/check-s3.sh` (CI,
+//! or `make test-s3`) sets it, with the bucket and credentials, against the compose `SeaweedFS`
+//! store and fails if a case skips. Without it the S3 cases print a note and pass, so
+//! `cargo test` needs no network by default.
 
 use std::sync::Arc;
 

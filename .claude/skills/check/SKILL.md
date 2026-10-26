@@ -14,5 +14,7 @@ Run each from the repository root and report pass or fail, with the first error 
 7. `scripts/test-check-republish.sh`
 8. `scripts/test-check-modes.sh`
 9. `scripts/check-modes.sh`
+10. `scripts/test-check-s3.sh`
+11. `scripts/check-s3.sh` (needs Docker: the store and lease tests against SeaweedFS)
 
 Do not fix anything unless asked; say what failed and where.

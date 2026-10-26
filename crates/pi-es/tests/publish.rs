@@ -671,7 +671,7 @@ async fn a_failed_listing_is_reported_not_fatal() {
         .publish(&stamped_spec())
         .await
         .expect("published although the listing failed");
-    assert!(report.deleted.is_empty());
+    assert_eq!(report.deleted, [] as [std::string::String; 0]);
     assert_eq!(report.not_deleted.len(), 1, "{:?}", report.not_deleted);
     assert_eq!(report.not_deleted[0].0, "persons-*");
 }
@@ -794,7 +794,7 @@ async fn a_listing_that_matches_nothing_deletes_nothing() {
         .publish(&stamped_spec())
         .await
         .expect("published");
-    assert!(report.deleted.is_empty());
+    assert_eq!(report.deleted, [] as [std::string::String; 0]);
     assert!(report.not_deleted.is_empty(), "{:?}", report.not_deleted);
 }
 

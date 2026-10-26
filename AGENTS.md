@@ -29,6 +29,7 @@ scripts/check-deploy.sh        # kustomize build | kubeconform, compose config
 scripts/scrub-check.sh
 scripts/test-scrub-check.sh   # the scrub check and hooks, in a throwaway repo and worktree
 scripts/test-check-republish.sh  # the compose republish check, against stub curl and aws
+scripts/test-check-pins-resolve.sh  # the pinned-image resolve check, against a stub docker
 scripts/test-check-modes.sh   # the mode check, in a throwaway repo
 scripts/check-modes.sh        # hooks and *.sh are stored as 100755
 cargo deny check               # audit job (also weekly)

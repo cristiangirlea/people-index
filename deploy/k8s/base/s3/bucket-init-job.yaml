@@ -23,15 +23,17 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       securityContext:
-        # curl_user in quay.io/curl/curl; numeric so runAsNonRoot can check it.
+        # The seaweed user of the SeaweedFS image; numeric so runAsNonRoot can check it.
         runAsNonRoot: true
-        runAsUser: 100
-        runAsGroup: 101
+        runAsUser: 1000
+        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: bucket-init
-          image: quay.io/curl/curl:8.23.0@sha256:11e64e28c5f58c8d93ee95fcf22ac055f48b0bc440e0ce7d8013bbb5ad6aa8ac
+          # The store's own image (it has curl): no separate image whose pinned digest a registry
+          # could delete, and Dependabot bumps it with the store.
+          image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
           command: ["/bin/sh", "/scripts/bucket-init.sh"]
           env:
             - name: S3_ENDPOINT

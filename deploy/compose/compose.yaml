@@ -11,7 +11,9 @@
 #   datagen      profile datagen: writes both feeds to s3://people-index/raw/
 #   coordinator  people-index run (PI_EXECUTOR=distributed)
 #   worker       people-index worker, `--scale worker=N`
-#   verify       profile verify: acceptance queries and the content digest against the alias
+#   verify       profile verify: acceptance queries and the content digest against the alias;
+#                VERIFY_SOURCE=summary checks a run's summary.json instead of expected.json
+#                (VERIFY_RUN_ID, default the run the alias serves)
 #   prometheus   profile metrics: scrapes the coordinator, every worker and the store
 #
 # Usage is in docs/OPERATIONS.md (make compose-up / compose-run / compose-down). Every value
@@ -290,7 +292,11 @@ services:
     depends_on:
       es-users: { condition: service_completed_successfully }
       s3-init: { condition: service_completed_successfully }
-    environment: *pipeline-env
+    environment:
+      <<: *pipeline-env
+      PI_VERIFY_SOURCE: ${VERIFY_SOURCE:-expected}
+      # Empty means the run whose index the alias points at.
+      PI_VERIFY_RUN_ID: ${VERIFY_RUN_ID:-}
     command:
       - verify
       - --expected=${VERIFY_EXPECTED:-s3://people-index/raw/expected.json}

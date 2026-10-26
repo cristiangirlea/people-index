@@ -26,13 +26,15 @@ spec:
       enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 100
-        runAsGroup: 101
+        runAsUser: 1000
+        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: bootstrap
-          image: quay.io/curl/curl:8.23.0@sha256:11e64e28c5f58c8d93ee95fcf22ac055f48b0bc440e0ce7d8013bbb5ad6aa8ac
+          # The image the cluster itself runs (it has curl): no separate image whose pinned digest a
+          # registry could delete, and Dependabot bumps it with the cluster.
+          image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
           command: ["/bin/sh", "/scripts/bootstrap.sh"]
           env:
             - name: ES_URL

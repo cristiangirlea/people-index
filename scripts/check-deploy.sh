@@ -130,7 +130,9 @@ check_ref() {
     # Built from this repository, never pulled; the Job templates' placeholder (jobs.vars).
     people-index:local | "\${IMAGE}") return ;;
   esac
-  [[ "$2" =~ $pinned_ref ]] || unpinned+=("$1: $2")
+  [[ "$2" =~ $pinned_ref ]] || { unpinned+=("$1: $2"); return; }
+  # scripts/check-pins-resolve.sh collects every pinned reference this way.
+  [[ -z "${PINNED_REFS_OUT:-}" ]] || printf '%s\n' "$2" >>"$PINNED_REFS_OUT"
 }
 # The value of every `image:` key in YAML read from stdin, quotes dropped.
 yaml_images() {

@@ -48,7 +48,7 @@ pub enum Command {
     Worker(WorkerArgs),
     /// Generates both feeds and their expected counts.
     Datagen(DatagenArgs),
-    /// Checks the published alias against expected counts.
+    /// Checks the published alias against expected counts or a run's summary.
     Verify(VerifyArgs),
     /// Runs one task (or every task) of one stage, for debugging.
     Stage(StageArgs),
@@ -275,12 +275,31 @@ pub struct DatagenArgs {
     pub store: StoreArgs,
 }
 
+/// What `verify` checks the alias against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum VerifySource {
+    /// The counts datagen wrote to expected.json (synthetic feeds only).
+    Expected,
+    /// What the run recorded in runs/<id>/summary.json: its index and document count, plus
+    /// sample queries that hold for any data.
+    Summary,
+}
+
 /// `people-index verify`.
 #[derive(Debug, Clone, Args)]
 pub struct VerifyArgs {
+    /// What to check against: expected (datagen's counts) or summary (the run's own summary,
+    /// for real feeds).
+    #[arg(long, env = "PI_VERIFY_SOURCE", value_enum, default_value_t = VerifySource::Expected)]
+    pub source: VerifySource,
     /// expected.json: a local path or a store URL (default: expected.json beside the inputs).
+    /// Read only with --source expected.
     #[arg(long, env = "PI_EXPECTED")]
     pub expected: Option<String>,
+    /// The run whose summary to check with --source summary (default, or when empty: the run
+    /// whose index the alias points at, <alias>-<run_id>).
+    #[arg(long, env = "PI_VERIFY_RUN_ID")]
+    pub run_id: Option<String>,
     /// Also print an order-independent digest of every `_id` and `_source`.
     #[arg(long, default_value_t = false)]
     pub digest: bool,
@@ -363,6 +382,39 @@ mod tests {
         assert_eq!(
             run.pipeline.task_memory_bytes,
             pi_stages::DEFAULT_TASK_MEMORY_BYTES
+        );
+    }
+
+    fn verify_args(args: &[&str]) -> VerifyArgs {
+        let cli = Cli::try_parse_from(["people-index", "verify"].iter().chain(args)).unwrap();
+        let Command::Verify(verify) = cli.command else {
+            panic!("not verify")
+        };
+        verify
+    }
+
+    #[test]
+    fn verify_defaults_to_the_expected_counts() {
+        let verify = verify_args(&["--expected", "s3://people-index/raw/expected.json"]);
+        assert_eq!(verify.source, VerifySource::Expected);
+        assert_eq!(
+            verify.expected.as_deref(),
+            Some("s3://people-index/raw/expected.json")
+        );
+        assert_eq!(verify.run_id, None);
+    }
+
+    #[test]
+    fn verify_summary_takes_an_optional_run_id() {
+        let verify = verify_args(&["--source", "summary", "--digest"]);
+        assert_eq!(verify.source, VerifySource::Summary);
+        assert_eq!(verify.run_id, None);
+        assert!(verify.digest);
+        let verify = verify_args(&["--source=summary", "--run-id", "20261026-120000"]);
+        assert_eq!(verify.run_id.as_deref(), Some("20261026-120000"));
+        assert!(
+            Cli::try_parse_from(["people-index", "verify", "--source", "datagen"]).is_err(),
+            "an unknown source is refused"
         );
     }
 }

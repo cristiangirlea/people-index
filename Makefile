@@ -93,7 +93,7 @@ help: ## List the targets
 ##@ Checks
 
 .PHONY: check
-check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub, file modes (and cargo-deny if installed)
+check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub, file modes, S3 tests (and cargo-deny if installed)
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo test --workspace --locked
@@ -104,7 +104,13 @@ check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub, file mo
 	bash scripts/test-check-pins-resolve.sh
 	bash scripts/test-check-modes.sh
 	bash scripts/check-modes.sh
+	bash scripts/test-check-s3.sh
+	bash scripts/check-s3.sh
 	@if command -v cargo-deny >/dev/null; then cargo deny check; else echo "cargo-deny not installed; skipped (CI runs it)"; fi
+
+.PHONY: test-s3
+test-s3: ## Store conformance and lease tests against the compose SeaweedFS store (needs Docker)
+	bash scripts/check-s3.sh
 
 .PHONY: scrub
 scrub: ## Fail on a forbidden word in tracked files or commit messages

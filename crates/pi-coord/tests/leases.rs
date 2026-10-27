@@ -459,7 +459,7 @@ async fn racing_commits_have_exactly_one_winner() {
 }
 
 /// The lease protocol against a real S3-compatible endpoint, when `PI_TEST_S3_ENDPOINT` is set
-/// (see pi-store's conformance tests for the variables). Skipped otherwise.
+/// (`scripts/check-s3.sh` sets it in CI; see pi-store's conformance tests). Skipped otherwise.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leases_hold_on_a_real_s3_endpoint() {
     let Ok(endpoint) = std::env::var("PI_TEST_S3_ENDPOINT") else {

@@ -15,5 +15,7 @@ Run each from the repository root and report pass or fail, with the first error 
 8. `scripts/test-check-pins-resolve.sh`
 9. `scripts/test-check-modes.sh`
 10. `scripts/check-modes.sh`
+11. `scripts/test-check-s3.sh`
+12. `scripts/check-s3.sh` (needs Docker: the store and lease tests against SeaweedFS)
 
 Do not fix anything unless asked; say what failed and where.

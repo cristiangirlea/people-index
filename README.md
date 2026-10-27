@@ -183,7 +183,7 @@ likely to touch: `PI_STORE_URL`, `PI_S3_ENDPOINT`, `PI_ES_URL` and its credentia
 ## Testing
 
 ```bash
-make check    # fmt, clippy -D warnings, all tests, deploy manifests, forbidden-word scan
+make check    # fmt, clippy -D warnings, all tests, deploy manifests, forbidden-word scan, S3 tests (Docker)
 ```
 
 - **Unit and property tests** in each crate: partitioning (range, splitting when `P`
@@ -191,8 +191,8 @@ make check    # fmt, clippy -D warnings, all tests, deploy manifests, forbidden-
   arbitrary input), segment round trips and damage detection (truncation at every byte, bit
   flips, bad magic, oversized lengths).
 - **Store conformance** for memory, local and S3 backends, and lease and commit races. The S3
-  cases run when `PI_TEST_S3_ENDPOINT` points at an S3-compatible server; they have passed
-  against SeaweedFS 4.48.
+  cases and the lease race on S3 run in CI on every pull request against the SeaweedFS image
+  the deployment pins (`scripts/check-s3.sh`, `make test-s3`); a plain `cargo test` skips them.
 - **Executors** with fake stages: retries, permanent errors, panics, cancellation, three
   workers on one run, two workers racing for one task, lease takeover after a crash, stage
   timeout, and resume after a crash or a failure.
@@ -205,7 +205,9 @@ make check    # fmt, clippy -D warnings, all tests, deploy manifests, forbidden-
   and re-runs commit once and leave only orphans that publish removes.
 - **Deployment**: `scripts/check-deploy.sh` validates every Kustomize build and Job template
   with kubeconform, the k3d config and the compose file. CI adds an MSRV check, actionlint,
-  shellcheck, hadolint, cargo-deny, an image build, and the compose end-to-end on `main`.
+  shellcheck, hadolint, cargo-deny, an image build, and on `main` the compose end-to-end:
+  the whole distributed stack on one runner (three Elasticsearch nodes, SeaweedFS, a
+  coordinator and two workers), two runs, verified against `expected.json`.
 
 ## Limitations
 
@@ -223,11 +225,11 @@ What has not been done or measured yet, plainly:
   budget, segment size, concurrency) rather than input size, with `join` and `assemble` running
   a partition in several passes when it is estimated larger than `PI_TASK_MEMORY_BYTES`, but
   the estimate is a model and the actual peak has not been profiled.
-- **No real cluster has run it yet.** The Kubernetes manifests pass schema validation and their
-  pieces were checked against Elasticsearch and SeaweedFS containers, but ECK reconciliation,
-  NetworkPolicy enforcement and a distributed run through the binary on k3d have not been
-  exercised. The compose infrastructure has been started; the full compose run has not been
-  completed against the finished binary.
+- **No Kubernetes cluster has run it yet.** The Kubernetes manifests pass schema validation and
+  their pieces were checked against Elasticsearch and SeaweedFS containers, but ECK
+  reconciliation, NetworkPolicy enforcement and a distributed run on k3d have not been
+  exercised. The distributed run itself is tested only on Docker Compose (CI's end-to-end on
+  `main`, a small generated data set on one runner).
 - **One coordinator per run** is assumed (the Kubernetes Job and compose guarantee it); there
   is no coordinator lease.
 - **Leases depend on clocks**: expiry is wall-clock time plus a skew allowance (5 s). Large

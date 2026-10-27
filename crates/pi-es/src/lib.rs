@@ -7,7 +7,8 @@
 //! - [`BulkIndexer`]: byte-bounded, reused bulk buffers with bounded concurrency, item-level
 //!   retries and permanent-failure reporting (`load`).
 //! - [`Publisher`]: the `publish` step; the alias moves only after every check passed.
-//! - [`Verifier`]: the acceptance counts of `expected.json` and an order-independent digest.
+//! - [`Verifier`]: the acceptance counts of `expected.json`, or the checks against what a run
+//!   published, and an order-independent digest.
 //! - [`mapping()`]: the explicit mapping (`mapping.json`, reasons in `mapping.md`).
 
 mod admin;
@@ -42,4 +43,4 @@ pub use reqwest::Method;
 pub use retry::RetryPolicy;
 pub use settings::{Codec, IndexSpec, ServingSettings};
 pub use shards::{ShardCounts, require_complete};
-pub use verifier::{Check, Verifier, VerifyReport};
+pub use verifier::{AliasCheck, Check, Published, Verifier, VerifyReport};

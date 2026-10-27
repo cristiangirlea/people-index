@@ -254,7 +254,7 @@ runs/<run_id>/<stage>/_lease/<task>.json
 runs/<run_id>/<stage>/data/<dataset>/<p|q>=<n>/<task>-<attempt>-<n>.seg
 runs/<run_id>/quarantine/<task>-<attempt>.ndjson
 runs/<run_id>/publish.json             the indexes the alias served before (create-if-absent)
-runs/<run_id>/summary.json
+runs/<run_id>/summary.json             written by publish, read by verify --source summary
 snapshots/                             reserved for Elasticsearch snapshots (k8s component)
 ```
 
@@ -427,7 +427,9 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_METRICS_ADDR` | Prometheus endpoint, `off` to disable | `0.0.0.0:9464` |
 | `PI_LOG_FORMAT` | `json` or `pretty` (filter with `RUST_LOG`) | `json` |
 | `PI_DATAGEN_PERSONS`, `_ORGANIZATIONS`, `_FILES`, `_SEED`, `_CONFIG`, `_OUT` | `datagen` | 10000, 2000, 4, 1, unset, `<inputs>` |
-| `PI_EXPECTED` | `verify`: local path or store URL | `expected.json` beside the inputs |
+| `PI_VERIFY_SOURCE` | `verify`: `expected` (datagen's counts) or `summary` (the run's `summary.json`) | `expected` |
+| `PI_EXPECTED` | `verify --source expected`: local path or store URL | `expected.json` beside the inputs |
+| `PI_VERIFY_RUN_ID` | `verify --source summary`: the run to check | the run the alias points at |
 
 ## Commands
 
@@ -441,7 +443,9 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
   `organizations/`, `persons/` and `expected.json` under `--out`.
 - `people-index verify --expected <file|url>`: runs the acceptance queries against the alias
   (count, `persons_with_unresolved`, title and organization-name term counts) and exits 1 when
-  a check fails; `--digest` prints an order-independent (additive) SHA-256 digest of every
+  a check fails. `--source summary [--run-id R]` checks the alias against a run's
+  `summary.json` instead (alias target, document count, sample queries; for real feeds, see
+  docs/OPERATIONS.md, "Verifying a published index"). `--digest` prints an order-independent (additive) SHA-256 digest of every
   `_id` and `_source`, read through a point in time. The digest is an integrity check for
   comparing two indexes, not a defence against crafted collisions.
 - `people-index stage <name> --run-id R [--task T]`: one task (or every task) of one stage,

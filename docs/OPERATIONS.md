@@ -49,12 +49,15 @@ make compose-clean         # stop and delete every volume
    `RUN_ID` (UTC time, e.g. `20261015-140501`), waits for the coordinator and exits with its
    status: 0 means the run published.
 3. `make compose-verify`: the acceptance queries and the content digest against the alias.
+   `VERIFY_SOURCE=summary make compose-verify` checks it against a run's `summary.json`
+   instead (see "Verifying a published index" below; `VERIFY_RUN_ID` picks the run).
 
 `make compose-e2e` (CI's end-to-end) starts with `make compose-datagen` and a run that must
 fail in `publish` (id a minute older than `RUN_ID`; `PI_INDEX_REPLICAS=3` on 3 data nodes never
 reaches green within `PI_HEALTH_TIMEOUT=10s`, `PI_TASK_ATTEMPTS=1`), which leaves its loaded
 index behind. Then `RUN_ID` runs and is verified, a second run (`RUN_ID` with `-2` appended)
-over the same feeds is verified again, and `deploy/compose/scripts/check-republish.sh` checks:
+over the same feeds is verified again in both modes (the summary one finds the second run
+from the alias), and `deploy/compose/scripts/check-republish.sh` checks:
 the failed run's index existed off the alias before the good runs, the alias points only at
 the second run's index, the first run's and the failed run's indexes are gone, no other
 `persons-*` index is left, the second run's `summary.json` lists the first index under
@@ -125,9 +128,47 @@ make k3d-down        # delete the cluster
   and applies those local files (server-side). On a mismatch it keeps nothing and stops before
   applying; `scripts/check-deploy.sh` validates the same files, pinned the same way.
 - `make verify` renders `deploy/k8s/jobs/verify.yaml` (pod security, credentials and CA as the
-  run Jobs), runs `people-index verify --expected s3://people-index/raw/expected.json --digest`
-  against the alias, waits for the Job and prints its output; a failed check fails the target.
-  Size it with `VERIFY_CPU`, `VERIFY_MEMORY` and `VERIFY_DEADLINE_SECONDS` in `jobs.vars`.
+  run Jobs), runs `people-index verify --digest` against the alias, waits for the Job and prints
+  its output; a failed check fails the target. `VERIFY_SOURCE` in `jobs.vars` picks the mode:
+  `expected` (the local overlay: `s3://people-index/raw/expected.json` from `make datagen`) or
+  `summary` (the production example: the summary of the run the alias serves, no datagen).
+  `VERIFY_SOURCE=summary make verify` overrides it. Size it with `VERIFY_CPU`, `VERIFY_MEMORY`
+  and `VERIFY_DEADLINE_SECONDS` in `jobs.vars`.
+
+## Verifying a published index
+
+`people-index verify` has two modes (`--source`, `PI_VERIFY_SOURCE`):
+
+- `expected` (the default): datagen's `expected.json` (`--expected`, `PI_EXPECTED`) holds exact
+  counts for the synthetic feeds: the document count, `persons_with_unresolved`, and term
+  counts per role title and organization name. Only `datagen` writes it.
+- `summary`: for real feeds, where no expected file exists. The run's own
+  `runs/<id>/summary.json` (written by `publish`) is the reference. The run is `--run-id`
+  (`PI_VERIFY_RUN_ID`), by default the run in the store whose index the alias points at (index
+  names are lowercased run ids, so it is found by listing `runs/`); a summary that is missing
+  (the run never published) or names another alias is an error. Every query reads the run's
+  index itself, not the alias, so a publish in the middle cannot answer for another run. The
+  checks:
+
+  | Check | Passes when | What it shows |
+  |---|---|---|
+  | `alias` | the alias points at the run's `index` and nothing else, before and after the queries | the swap completed, nothing else is served, nothing moved meanwhile |
+  | `count` | documents in the index = `publish.docs` | nothing was lost or added since publish counted |
+  | `sample:ids` | one document, searched by its `_id`, is found exactly once | ids are unique and retrievable |
+  | `sample:full_name` | a match on the sample's first and last name (all terms) finds at least one document | full-text search on `full_name` works |
+  | `sample:organization_id` | a term query on the sample's first joined organization id finds at least one document | the joined organizations are searchable |
+
+  The sample is a document with a last name and a joined organization when the index has one;
+  the last two checks run only when the sample has text names, and an organization id up to
+  `i64::MAX` (the `long` mapping drops larger ones), so persons without names or without
+  resolved organizations never fail them. A non-empty index that returns no sample fails
+  `sample:ids`; an empty index gets only `alias` and `count`. A
+  failure means the index or the alias is wrong, not the data. Checking an older run with
+  `--run-id` fails `alias` once a newer run has replaced it.
+
+Both print one JSON object (`passed`, `report`, `digest`, and `run_id` in summary mode) and exit
+1 when a check fails; `--digest` adds the content digest in either mode (of the run's index in
+summary mode).
 
 ## Scaling
 
@@ -315,5 +356,5 @@ scrub-check, republish-check and pin-resolve tests, hooks and scripts stored as 
 `pins` weekly and on manual dispatch (`scripts/check-pins-resolve.sh`: every pinned image digest
 still exists in its registry, since a registry can delete one when a tag is re-pushed), and
 `e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
-`make compose-e2e` (two runs, so the second publish replaces the first), logs uploaded on
-failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+`make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
+the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.

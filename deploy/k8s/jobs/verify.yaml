@@ -1,7 +1,11 @@
-# Checks the published alias: `people-index verify` runs the acceptance queries against the
-# counts in s3://people-index/raw/expected.json (written by the datagen Job) and prints the
-# content digest. Rendered by render.sh like run.yaml; same pod security, credentials and CA
-# as the run Jobs, without a run id: it reads whatever the alias points at.
+# Checks the published alias and prints the content digest. VERIFY_SOURCE (jobs.vars) picks
+# what `people-index verify` checks against:
+#   expected  the counts in s3://people-index/raw/expected.json (written by the datagen Job);
+#   summary   the summary.json of the run whose index the alias points at: the alias serves
+#             that index alone, the document count is what publish counted, and sample
+#             queries find what they should (docs/OPERATIONS.md). For real feeds: no datagen.
+# Rendered by render.sh like run.yaml; same pod security, credentials and CA as the run Jobs,
+# without a run id: it reads whatever the alias points at.
 #
 # The binary exits 1 both for a failed check and for an error (Elasticsearch or the store
 # unreachable), so the Job cannot tell them apart: it retries up to backoffLimit, which is
@@ -50,13 +54,16 @@ spec:
           imagePullPolicy: ${IMAGE_PULL_POLICY}
           args:
             - verify
-            - --expected
-            - s3://people-index/raw/expected.json
             - --digest
           envFrom:
             - configMapRef:
                 name: people-index-config
           env:
+            - name: PI_VERIFY_SOURCE
+              value: ${VERIFY_SOURCE}
+            # Read only when VERIFY_SOURCE is expected.
+            - name: PI_EXPECTED
+              value: s3://people-index/raw/expected.json
             - name: PI_ES_USERNAME
               valueFrom:
                 secretKeyRef:

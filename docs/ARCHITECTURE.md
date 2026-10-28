@@ -205,10 +205,16 @@ once the previous one has committed every task:
   `refresh_interval: -1`, `translog.durability: async`, the codec, and `shards` primaries
   (default: 2 per data node, read from `_nodes`); an existing index counts as created, so a
   retry succeeds.
-- `publish` refreshes and flushes while replicas are still 0 (so the complete-shard check covers
-  every copy), checks that the index count equals the sum of `assemble`'s `documents` counters,
+- `publish` first checks the run's own feed bounds, before contacting Elasticsearch: the
+  unresolved role organization share (no references gives a share of zero) and at least one
+  indexed organization, unless allowed; these are skipped once `publish.json` exists, since an
+  attempt only writes it after they passed. It then refreshes and flushes while replicas are
+  still 0 (so the complete-shard check covers every copy), checks that the index count equals the sum of `assemble`'s `documents` counters,
   then restores replicas (default 1), `refresh_interval: 1s` and request durability, waits for
-  the cluster health (`green` by default), records the indexes the alias points at in
+  the cluster health (`green` by default), rejects a newer serving run, and checks the new
+  count against the sum of the serving indexes (unless the minimum share is zero). A first publish skips the
+  count comparison. A failed bound is permanent and leaves the alias and new index in place.
+  The summary records the counts and configured bounds. Publish then records the indexes in
   `publish.json` (create-if-absent; a later attempt reads the first attempt's list back), moves
   the alias in one `_aliases` request, and deletes the recorded indexes and any others the alias
   pointed at (never the run's own; a 404 counts as deleted). The removes carry
@@ -279,12 +285,13 @@ snapshots/                             reserved for Elasticsearch snapshots (k8s
   creates it; workers and the coordinator stop when they see it; resuming a failed run clears it.
 - Quarantine: one NDJSON line per entry, `{feed, file, line, kind, reason, sample}` with a
   sample of at most 1 KiB; kinds `syntax | envelope | record | too_long | document_too_large`.
-- `publish.json`: `{alias, index, previous}`, the indexes the alias pointed at (the run's own
+- `publish.json`: `{alias, index, previous, previous_docs}`, the indexes the alias pointed at (the run's own
   excluded) when the first publish attempt was about to move it; every attempt deletes
   these after the swap.
 - `summary.json`: `{run_id, alias, index, partitions, started_at, finished_at, wall_ms,
   documents, persons_per_second, input_bytes, stages: [{stage, tasks, wall_ms, task_ms,
-  bytes_in, bytes_out, counters}], publish: {docs, previous, deleted, not_deleted},
+  bytes_in, bytes_out, counters}], publish: {docs, previous_docs, resolved_roles, unresolved_roles, indexed_organizations,
+  min_share, max_unresolved, allow_empty_organizations, previous, deleted, not_deleted},
   orphans_deleted, orphans_left}`.
 
 ### Segment files
@@ -423,6 +430,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_BULK_MAX_BYTES`, `PI_SENDERS_PER_WORKER` | load pressure | 8 MiB, 2 |
 | `PI_LOAD_BUFFER_BYTES` | decoded documents a load task holds waiting for the bulk indexer | 2 × `PI_BULK_MAX_BYTES` |
 | `PI_INDEX_SHARDS`, `PI_INDEX_REPLICAS`, `PI_INDEX_CODEC` | the index | 2 per data node, 1, `best_compression` |
+| `PI_PUBLISH_MIN_SHARE`, `PI_PUBLISH_MAX_UNRESOLVED`, `PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS` | minimum new/previous document share (0 disables), maximum unresolved role organization share (1 disables), allow zero indexed organizations | 0.9, 0.25, false |
 | `PI_PUBLISH_HEALTH`, `PI_HEALTH_TIMEOUT` | health publish waits for | `green`, `30m` |
 | `PI_METRICS_ADDR` | Prometheus endpoint, `off` to disable | `0.0.0.0:9464` |
 | `PI_LOG_FORMAT` | `json` or `pretty` (filter with `RUST_LOG`) | `json` |

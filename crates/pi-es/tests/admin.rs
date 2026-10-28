@@ -76,7 +76,11 @@ async fn create_index_sends_mapping_and_load_settings() {
     let spec = IndexSpec::new(4, Codec::BestCompression);
     Mock::given(method("PUT"))
         .and(path("/persons-r1"))
-        .and(body_json(spec.create_body()))
+        .and(body_json({
+            let mut body = spec.create_body();
+            body["mappings"]["_meta"] = json!({"people_index": {"run_id": "R1"}});
+            body
+        }))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "acknowledged": true, "shards_acknowledged": true, "index": "persons-r1"
         })))
@@ -93,16 +97,32 @@ async fn create_index_sends_mapping_and_load_settings() {
         .with_priority(2)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/persons-r1/_mapping"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"persons-r1": {"mappings": {"_meta": {"people_index": {"run_id": "R1"}}}}}),
+        ))
+        .mount(&server)
+        .await;
     let admin = IndexAdmin::new(client(&server));
     assert_eq!(
-        admin.create_index("persons-r1", &spec).await.ok(),
+        admin.create_index("persons-r1", &spec, "R1").await.ok(),
         Some(CreateOutcome::Created)
     );
     assert_eq!(
-        admin.create_index("persons-r1", &spec).await.ok(),
+        admin.create_index("persons-r1", &spec, "R1").await.ok(),
         Some(CreateOutcome::AlreadyExists)
     );
-    assert!(admin.create_index("Persons", &spec).await.is_err());
+    let err = admin
+        .create_index("persons-r1", &spec, "r1")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EsError::IndexOwnership { owner: Some(ref owner), .. } if owner == "R1"));
+    assert_eq!(
+        err.to_string(),
+        "index persons-r1 belongs to run R1; this run is r1"
+    );
+    assert!(admin.create_index("Persons", &spec, "R1").await.is_err());
 }
 
 #[tokio::test]
@@ -306,6 +326,73 @@ async fn oversized_responses_are_refused() {
     let outcome = admin.alias_targets("big").await;
     assert!(
         matches!(outcome, Err(EsError::ResponseTooLarge { .. })),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn existing_index_without_owner_is_refused() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/persons-r1"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"error": {"type": "resource_already_exists_exception"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/persons-r1/_mapping"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"persons-r1": {"mappings": {}}})),
+        )
+        .mount(&server)
+        .await;
+    let err = IndexAdmin::new(client(&server))
+        .create_index("persons-r1", &IndexSpec::new(1, Codec::Default), "r1")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EsError::IndexOwnership { owner: None, .. }));
+    assert_eq!(
+        err.to_string(),
+        "index persons-r1 has no owning run recorded (created before ownership was recorded, or by hand); this run is r1"
+    );
+}
+
+#[tokio::test]
+async fn existing_index_mapping_read_retries_busy_answer() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/persons-r1"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"error": {"type": "resource_already_exists_exception"}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/persons-r1/_mapping"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/persons-r1/_mapping"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"persons-r1": {"mappings": {"_meta": {"people_index": {"run_id": "R1"}}}}}),
+        ))
+        .with_priority(2)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let outcome = IndexAdmin::new(client(&server))
+        .create_index("persons-r1", &IndexSpec::new(1, Codec::Default), "R1")
+        .await;
+    assert!(
+        matches!(outcome, Ok(CreateOutcome::AlreadyExists)),
         "{outcome:?}"
     );
 }

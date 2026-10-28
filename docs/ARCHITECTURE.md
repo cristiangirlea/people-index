@@ -227,8 +227,9 @@ once the previous one has committed every task:
   load task's memory is about `(senders_per_worker + 1) × bulk_max_bytes + load_buffer_bytes`.
 - `prepare-index` creates `<alias>-<run_id>` (lowercased) with `number_of_replicas: 0`,
   `refresh_interval: -1`, `translog.durability: async`, the codec, and `shards` primaries
-  (default: 2 per data node, read from `_nodes`); an existing index counts as created, so a
-  retry succeeds.
+  (default: 2 per data node, read from `_nodes`). Its mapping `_meta.people_index.run_id`
+  records the exact run id. A retry reuses an existing index only when that id matches
+  case-sensitively; a different or missing owner fails the run permanently before loading.
 - `publish` refreshes and flushes while replicas are still 0 (so the complete-shard check covers
   every copy), checks that the index count equals the sum of `assemble`'s `documents` counters,
   then restores replicas (default 1), `refresh_interval: 1s` and request durability, waits for

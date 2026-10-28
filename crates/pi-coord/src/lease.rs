@@ -337,6 +337,49 @@ impl LeaseManager {
         Ok(None)
     }
 
+    /// Claims the alias lease, allowing a replacement coordinator for the same run.
+    pub async fn claim_run(&self, alias: &str, run_id: &str) -> StoreResult<Option<LeaseGuard>> {
+        let key = pi_store::alias_lease(alias)?;
+        let holder = Uuid::now_v7().simple().to_string();
+        for _ in 0..2 {
+            let now = OffsetDateTime::now_utc();
+            let fresh = Lease {
+                worker: run_id.to_owned(),
+                holder: holder.clone(),
+                expires_at: add(now, self.config.ttl),
+                acquired_at: now,
+                renewals: 0,
+                released: false,
+            };
+            if let CreateOutcome::Created(version) =
+                self.store.put_json_create_if_absent(&key, &fresh).await?
+            {
+                return Ok(Some(self.guard(key, fresh, version, false)));
+            }
+            let Some(existing) = self.store.get_opt(&key).await? else {
+                continue;
+            };
+            let old: Lease =
+                serde_json::from_slice(&existing.bytes).map_err(|e| StoreError::Json {
+                    key: key.clone(),
+                    source: e,
+                })?;
+            if old.worker != run_id && !old.is_expired(now, self.config.clock_skew) {
+                return Ok(None);
+            }
+            return match self
+                .store
+                .put_json_update_if_match(&key, &fresh, &existing.version)
+                .await
+            {
+                Ok(version) => Ok(Some(self.guard(key, fresh, version, true))),
+                Err(StoreError::PreconditionFailed { .. }) => Ok(None),
+                Err(e) => Err(e),
+            };
+        }
+        Ok(None)
+    }
+
     fn guard(
         &self,
         key: String,
@@ -571,5 +614,88 @@ mod tests {
             LeaseConfig::new(Duration::from_millis(400)).clock_skew,
             Duration::from_millis(100)
         );
+    }
+}
+
+#[cfg(test)]
+mod run_lease_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn alias_lock_excludes_other_runs_and_allows_resume_and_release() {
+        let store = Store::memory();
+        let config = LeaseConfig::new(Duration::from_secs(60));
+        let manager =
+            LeaseManager::new(store.clone(), RunLayout::new("one").unwrap(), "one", config);
+        let first = manager.claim_run("persons", "one").await.unwrap().unwrap();
+        assert!(manager.claim_run("persons", "two").await.unwrap().is_none());
+        let resumed = manager.claim_run("persons", "one").await.unwrap().unwrap();
+        first.release().await.unwrap();
+        assert!(manager.claim_run("persons", "two").await.unwrap().is_none());
+        resumed.release().await.unwrap();
+        let next = manager.claim_run("persons", "two").await.unwrap().unwrap();
+        next.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_runs_and_unreadable_lease() {
+        let store = Store::memory();
+        let manager = LeaseManager::new(
+            store.clone(),
+            RunLayout::new("one").unwrap(),
+            "one",
+            LeaseConfig::new(Duration::from_secs(1)),
+        );
+        let (a, b) = tokio::join!(
+            manager.claim_run("persons", "one"),
+            manager.claim_run("persons", "two")
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_ne!(a.is_some(), b.is_some());
+        if let Some(guard) = a.or(b) {
+            guard.release().await.unwrap();
+        }
+        store
+            .put("_run-leases/bad.json", Vec::from(&b"bad"[..]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            manager.claim_run("bad", "one").await,
+            Err(StoreError::Json { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn same_run_takeover_notifies_original() {
+        let store = Store::memory();
+        let manager = LeaseManager::new(
+            store,
+            RunLayout::new("one").unwrap(),
+            "one",
+            LeaseConfig::new(Duration::from_millis(150)),
+        );
+        let first = manager.claim_run("persons", "one").await.unwrap().unwrap();
+        let lost = first.lost_token();
+        let second = manager.claim_run("persons", "one").await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lost.cancelled())
+            .await
+            .unwrap();
+        first.release().await.unwrap();
+        second.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_run_lease_is_taken_over() {
+        let store = Store::memory();
+        let config = LeaseConfig {
+            ttl: Duration::ZERO,
+            clock_skew: Duration::ZERO,
+        };
+        let manager = LeaseManager::new(store, RunLayout::new("one").unwrap(), "one", config);
+        let first = manager.claim_run("persons", "one").await.unwrap().unwrap();
+        let second = manager.claim_run("persons", "two").await.unwrap().unwrap();
+        assert!(second.took_over());
+        first.release().await.unwrap();
+        second.release().await.unwrap();
     }
 }

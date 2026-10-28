@@ -4,7 +4,8 @@
 #   cluster monitor   GET _nodes/settings (shard count per data node) and
 #                     GET _cluster/health[/<index>] (wait for green/yellow)
 #   persons, persons-* all
-#                     the run's index `persons-<run_id>`: HEAD and PUT (create), _bulk,
+#                     the run's index `persons-<run_id>`: HEAD and PUT (create), GET _mapping
+#                     (read the owning run id from _meta on reuse), _bulk,
 #                     PUT _settings, _refresh, _flush, _count, POST _pit, search and DELETE
 #                     _pit through it (verify), DELETE of the indexes the alias left behind;
 #                     `persons-*`: GET persons-*/_alias (older runs' indexes no alias serves)

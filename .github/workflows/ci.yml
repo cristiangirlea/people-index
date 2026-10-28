@@ -98,6 +98,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: install PyYAML
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
       - name: install kubeconform (checksum verified)
         run: |
           curl -fsSL -o /tmp/kubeconform.tar.gz \
@@ -141,6 +143,8 @@ jobs:
         run: |
           bash scripts/test-check-modes.sh
           bash scripts/check-modes.sh
+      - name: schedule pod comparison catches differences
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml && bash scripts/test-check-schedule.sh
       - name: the S3 check passes and fails as it should
         run: bash scripts/test-check-s3.sh
 
@@ -193,6 +197,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: install PyYAML
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
       - name: install kubeconform (checksum verified)
         run: |
           curl -fsSL -o /tmp/kubeconform.tar.gz \

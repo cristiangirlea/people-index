@@ -63,6 +63,12 @@ pub fn validate_id(kind: &'static str, value: &str) -> Result<(), LayoutError> {
     Ok(())
 }
 
+/// Store-wide coordinator lease for an Elasticsearch alias.
+pub fn alias_lease(alias: &str) -> Result<String, LayoutError> {
+    validate_id("alias", alias)?;
+    Ok(format!("_run-leases/{alias}.json"))
+}
+
 /// The kinds of segment data the stages exchange, each partitioned by one key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dataset {
@@ -352,6 +358,9 @@ mod tests {
 
     #[test]
     fn every_path_matches_the_contract() {
+        assert_eq!(alias_lease("persons").unwrap(), "_run-leases/persons.json");
+        assert!(alias_lease("../x").is_err());
+        assert!(alias_lease("").is_err());
         let l = layout();
         let r = "runs/20261015T120000Z-ab12";
         assert_eq!(l.raw_organizations(), "raw/organizations");

@@ -23,6 +23,10 @@ Role `people-index-writer` grants cluster `monitor` and every privilege on `pers
 and `persons-*` (its `persons-<run_id>` indexes) and nothing else; `roles.yml` lists the calls
 this covers. If you change `PI_ALIAS`, the role's index names follow it in compose (`es-users`
 reads `PI_ALIAS`); on Kubernetes change `deploy/k8s/base/elasticsearch/roles.yml` too.
+Both deployments block auto-creation of run indexes while allowing other indexes. Compose
+sets `action.auto_create_index` from `PI_ALIAS` (default `-persons-*,+*`); on Kubernetes,
+for another `PI_ALIAS`, edit the excluded pattern to match its lowercased `<alias>-*` in
+every Elasticsearch node set.
 
 The store must refuse a conditional write that does not hold (HTTP 412 for `If-None-Match: *` on
 an existing key and for a stale `If-Match`): commits and leases depend on it. SeaweedFS 4.48
@@ -339,9 +343,11 @@ shards unassigned; free space, or for a throwaway dev stack set
 | the coordinator dies | k3d: the Job restarts it and it resumes from the commits; compose: the run stops | compose: `make compose-resume RUN_ID=<id>` |
 | an existing run index has a different or missing mapping `_meta.people_index.run_id` | `prepare-index` fails permanently before loading, including when run ids differ only in case; an index left by a run interrupted inside `prepare-index` before this release has no owner and is refused after upgrade | delete that index if the run is abandoned, or start a new run |
 | an Elasticsearch data node is lost during the load | bulk requests are retried with backoff and only failed items are resent; `publish` refuses to move the alias while shards are missing or the count differs | restore the node and resume; a count mismatch fails the run for good (its load tasks are already committed), so start a new run |
+| the run index is missing during load | the task fails permanently before sending bulk requests; auto-creation is also blocked for run indexes | start a new run; resume cannot recreate the index or restore already committed load tasks |
 | too many malformed lines (`PI_MAX_MALFORMED`) | one file over the limit fails its extract task at once; a feed over the limit in total fails the next stage (`extract-persons` for organizations, `join` for persons); quarantined lines are in `runs/<run_id>/quarantine/` | fix the input, start a new run |
 | a Windows `file://` run fails a write with "Access is denied" | the local store renames a staging file over an object another handle holds for a moment (observed in the store's own conformance test, about 1 run in 100 to 300; a retry on a 5 s budget did not prevent it, and the cause is unknown) | rerun or `make compose-resume`; use the S3 store (compose, k3d) for anything that matters; the local store is for one-machine tries and tests, and Linux is unaffected (#43) |
 | the store refuses conditional writes | `s3-init` (compose) stops the stack before any run; never run the distributed executor on such a store | use a conforming S3 server |
+| publish refuses a feed bound | the alias stays on its current index and the new index is kept for inspection until a newer run publishes, which deletes it; resuming after that fails because the index is gone, so start a new run | inspect the feed and counts; correct the feed and start a new run, or relax the appropriate bounds and resume (see [Resuming a failed run](#resuming-a-failed-run)). `PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS=true` alone does not allow an empty organizations feed when references are unresolved: the unresolved-share bound still refuses unless `PI_PUBLISH_MAX_UNRESOLVED=1` |
 | a run fails at any stage | the alias still points at the previous index, which keeps serving | resume or start a new run |
 
 Things outside the model: losing the object store loses the run's intermediate state (inputs

@@ -29,6 +29,8 @@ x-logging: &logging
     max-file: "3"
 
 x-es-env: &es-env
+  # A different PI_ALIAS needs the matching pattern; interpolation supplies it here.
+  action.auto_create_index: "-${PI_ALIAS:-persons}-*,+*"
   cluster.name: people-index
   cluster.initial_master_nodes: es01,es02,es03
   node.roles: master,data,ingest
@@ -96,6 +98,9 @@ x-pipeline-env: &pipeline-env
   # The binary's defaults; `make compose-e2e` overrides them for the run that must fail.
   PI_INDEX_REPLICAS: ${PI_INDEX_REPLICAS:-1}
   PI_HEALTH_TIMEOUT: ${PI_HEALTH_TIMEOUT:-30m}
+  PI_PUBLISH_MIN_SHARE: ${PI_PUBLISH_MIN_SHARE:-0.9}
+  PI_PUBLISH_MAX_UNRESOLVED: ${PI_PUBLISH_MAX_UNRESOLVED:-0.25}
+  PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS: ${PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS:-false}
   PI_TASK_ATTEMPTS: ${PI_TASK_ATTEMPTS:-3}
   # Per-task memory (docs/OPERATIONS.md, Sizing): about 384 MiB + 128 MiB + 8 x 32 MiB +
   # 32 MiB = 800 MiB, within WORKER_MEMORY / WORKER_CONCURRENCY (2g / 2) and the 1g

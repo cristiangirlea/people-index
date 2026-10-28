@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi_coord::{AttemptId, RunContext, Stage, StageName, TaskReport, TaskSpec};
 use pi_model::{
-    EdgeRow, LineStats, MalformedRecord, Partitioner, PersonRow, Seq, parse_person_line,
+    EdgeRow, LineStats, MalformedRecord, Partitioner, PersonRow, Seq, parse_person_line_with_names,
 };
 use pi_store::Dataset;
 
@@ -85,8 +85,9 @@ impl LineSink for PersonSink {
         &mut self,
         line: &[u8],
         seq: Seq,
+        collect_names: bool,
     ) -> anyhow::Result<Result<LineStats, MalformedRecord>> {
-        let (row, stats) = match parse_person_line(line, seq) {
+        let (row, stats) = match parse_person_line_with_names(line, seq, collect_names) {
             Ok(parsed) => parsed,
             Err(m) => return Ok(Err(m)),
         };

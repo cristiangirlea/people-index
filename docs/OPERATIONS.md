@@ -234,6 +234,8 @@ being resumed.
 
 ## Metrics, logs and the run summary
 
+`fields_not_indexed` counts unknown top-level keys in kept records, summed in stage summaries.
+
 - Every pipeline process serves Prometheus metrics on `PI_METRICS_ADDR` (`:9464`, path
   `/metrics`): tasks committed, failed and retried, task and stage durations, lease takeovers
   and losses, malformed lines, and bulk requests, retries, retried items, indexed documents and
@@ -388,3 +390,17 @@ Follow [Elastic's S3 repository guidance](https://www.elastic.co/docs/deploy-man
 and grant the snapshot identity only the permissions Elasticsearch needs on that bucket. Do not grant the pipeline
 identity access to it. Provisioning and retention incur provider costs; the example does not
 create or enable them. Verify snapshot and restore behavior with the chosen retention policy.
+
+## A feed delivery
+
+For a new delivery `batch-20261028`, place gzipped NDJSON files under
+`raw/batch-20261028/persons/` and `raw/batch-20261028/organizations/`. Place an optional
+`expected.json` beside those directories for synthetic verification. After all files are
+written, create the empty `raw/batch-20261028/_COMPLETE` object. Then run with
+`PI_DELIVERY=batch-20261028 PI_REQUIRE_COMPLETE_MARKER=true`; use the same `PI_DELIVERY`
+for `verify --source expected`. Never modify a completed delivery; use a new prefix.
+
+For a synthetic delivery, `people-index datagen --delivery batch-20261028` writes the feeds
+and `expected.json` there; create `_COMPLETE` separately after it succeeds. An explicit
+`datagen --out` names the exact destination instead. With `PI_INPUT_URL`, these paths are
+relative to that input prefix rather than `raw/`.

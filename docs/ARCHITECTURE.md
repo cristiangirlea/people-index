@@ -10,6 +10,30 @@ This document is the contract between the crates, the deployment and the docs. W
 this file disagree, one of them is wrong: fix it in the same change. The reasons behind the
 main choices are in [adr/](adr/).
 
+## Feed delivery contract
+
+Inputs live under `raw/` in the run store, or directly under `PI_INPUT_URL` when set.
+With `PI_DELIVERY=batch-20261028`, they live under `raw/batch-20261028/` (or
+`<PI_INPUT_URL>/batch-20261028/`): `persons/*.ndjson.gz`,
+`organizations/*.ndjson.gz`, and optionally `expected.json` for synthetic verification.
+Delivery names are slash-separated safe path segments (`[A-Za-z0-9._=-]`, excluding `.`
+and `..`, and the reserved segments `persons` and `organizations` (case-insensitive), at most 128 bytes each). Unset preserves the original layout. Each gzip contains
+NDJSON envelopes as described below. Feed listings are recursive: nested files beneath a feed directory belong to that feed; deliveries cannot be nested under a feed directory.
+
+A supplier writes `_COMPLETE` in the delivery root only after the last feed file is present.
+With `PI_REQUIRE_COMPLETE_MARKER=true`, plan permanently fails naming the missing marker;
+otherwise it is optional. The marker is a readiness signal, not a lock: suppliers must not
+add, remove, or overwrite files after marking a delivery complete, or while a run is planning
+or reading it. Use a new delivery for replacements. The plan pins listed input versions and
+extract fails if an input changes; it cannot detect files added after listing. A resumed run
+uses its existing plan and selected delivery.
+
+Unknown top-level record keys are retained in `_source` but `dynamic: false` does not index
+them. Each extract commit counts `fields_not_indexed` per kept record key, after duplicate-key
+reduction and before ID deduplication; the stage summaries sum these counts. Mapped disabled
+objects and builder-owned fields are not unknown. The first five distinct unknown names per
+task are logged without values. Nested unknown keys are not counted.
+
 ## The data
 
 Both feeds are gzipped NDJSON (`*.ndjson.gz`), one envelope per line:
@@ -254,6 +278,10 @@ All paths are under one prefix in the object store (`PI_STORE_URL`: `s3://bucket
 raw/organizations/*.ndjson.gz          inputs (or PI_INPUT_URL, a separate prefix)
 raw/persons/*.ndjson.gz
 raw/expected.json                      written by datagen, read by verify
+raw/<delivery>/organizations/*.ndjson.gz
+raw/<delivery>/persons/*.ndjson.gz
+raw/<delivery>/_COMPLETE              optional readiness marker
+raw/<delivery>/expected.json          synthetic verification
 runs/<run_id>/plan.json
 runs/<run_id>/state.json               RunState: running | published | failed, current stage
 runs/<run_id>/failed.json              the failure marker (create-if-absent)
@@ -275,7 +303,7 @@ the snapshots component stores them under `snapshots/`.
   Run, stage, task and attempt ids are `[A-Za-z0-9._=-]`, at most 128 bytes. Generated run ids
   are `20261015T120000Z-a1b2c3` (UTC start time first, so the greatest id is the newest run);
   `publish` reads that start second to tell older runs' indexes from newer ones.
-- `plan.json`: `{run_id, partitions, alias, index, organizations: [{key, size, version}],
+- `plan.json`: `{run_id, delivery, partitions, alias, index, organizations: [{key, size, version}],
   persons: [{key, size, version}], total_bytes, created_at}`, written create-if-absent; a retry
   reads it back. `version` is `{e_tag, version}` as the input listing reported it (the etag
   always; a version id only where the store reports one). Extract reads each file with
@@ -293,7 +321,7 @@ the snapshots component stores them under `snapshots/`.
 - `publish.json`: `{alias, index, previous, previous_docs}`, the indexes the alias pointed at (the run's own
   excluded) when the first publish attempt was about to move it; every attempt deletes
   these after the swap.
-- `summary.json`: `{run_id, alias, index, partitions, started_at, finished_at, wall_ms,
+- `summary.json`: `{run_id, delivery, alias, index, partitions, started_at, finished_at, wall_ms,
   documents, persons_per_second, input_bytes, stages: [{stage, tasks, wall_ms, task_ms,
   bytes_in, bytes_out, counters}], publish: {docs, previous_docs, resolved_roles, unresolved_roles, indexed_organizations,
   min_share, max_unresolved, allow_empty_organizations, previous, deleted, not_deleted},
@@ -413,6 +441,8 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 |---|---|---|
 | `PI_STORE_URL` | object store prefix | `file://./store` |
 | `PI_INPUT_URL` | input prefix, if not `<store>/raw` | unset |
+| `PI_DELIVERY` | input sub-prefix for a delivery | unset |
+| `PI_REQUIRE_COMPLETE_MARKER` | require `_COMPLETE` in the input root | false |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | S3-compatible store; an endpoint switches to path-style requests and an `http://` one allows plain HTTP | unset; region `us-east-1` |
 | `PI_ES_URL` | Elasticsearch | `http://localhost:9200` |
 | `PI_ES_USERNAME`, `PI_ES_PASSWORD` or `PI_ES_API_KEY` | auth | unset |

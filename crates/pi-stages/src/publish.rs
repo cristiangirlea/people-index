@@ -249,6 +249,7 @@ impl Stage for PublishStage {
         let wall_ms = millis(finished_at - plan.created_at);
         let summary = Summary {
             run_id: plan.run_id.clone(),
+            delivery: plan.delivery.clone(),
             alias: plan.alias.clone(),
             index: plan.index.clone(),
             partitions: plan.partitions,
@@ -324,6 +325,7 @@ mod tests {
             persons: vec![],
             total_bytes: 0,
             created_at: OffsetDateTime::now_utc(),
+            delivery: None,
         };
         ctx.store.put_json(&ctx.layout.plan(), &plan).await.unwrap();
         let mut report = TaskReport::default();

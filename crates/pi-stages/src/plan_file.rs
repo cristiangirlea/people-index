@@ -31,6 +31,9 @@ pub struct InputFile {
 pub struct Plan {
     /// The run.
     pub run_id: String,
+    /// The selected input delivery, absent in older plans.
+    #[serde(default)]
+    pub delivery: Option<String>,
     /// The partition count `P`, a power of two.
     pub partitions: u32,
     /// The alias `publish` moves.
@@ -138,6 +141,7 @@ mod tests {
     fn plan_json_round_trips() {
         let plan = Plan {
             run_id: "r1".into(),
+            delivery: None,
             partitions: 4,
             alias: "persons".into(),
             index: "persons-r1".into(),

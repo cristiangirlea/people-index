@@ -194,6 +194,7 @@ mod tests {
             persons: vec![],
             total_bytes: 0,
             created_at: OffsetDateTime::UNIX_EPOCH,
+            delivery: None,
         };
         ctx.store.put_json(&ctx.layout.plan(), &plan).await.unwrap();
         let key = format!(

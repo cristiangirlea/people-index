@@ -63,6 +63,9 @@ pub struct StoreArgs {
     /// Input prefix holding organizations/ and persons/, when not <store>/raw.
     #[arg(long, env = "PI_INPUT_URL")]
     pub input_url: Option<String>,
+    /// Delivery sub-prefix beneath the input root.
+    #[arg(long, env = "PI_DELIVERY")]
+    pub delivery: Option<String>,
     /// S3-compatible endpoint (MinIO). Credentials come from AWS_* variables.
     #[arg(long, env = "PI_S3_ENDPOINT")]
     pub s3_endpoint: Option<String>,
@@ -100,6 +103,9 @@ pub struct PipelineArgs {
     /// The published alias; the run's index is <alias>-<run_id>.
     #[arg(long, env = "PI_ALIAS", default_value = "persons")]
     pub alias: String,
+    /// Require a supplier completion marker before planning.
+    #[arg(long, env = "PI_REQUIRE_COMPLETE_MARKER", default_value_t = false)]
+    pub require_complete_marker: bool,
     /// Input bytes per partition.
     #[arg(long, env = "PI_PARTITION_TARGET_BYTES", value_parser = parse_byte_size, default_value = "256MiB")]
     pub partition_target_bytes: u64,

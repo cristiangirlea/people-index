@@ -427,6 +427,78 @@ still exists in its registry, since a registry can delete one when a tag is re-p
 `make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
 the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
 
+## Scheduled runs
+
+A scheduled run reads whatever `PI_DELIVERY` the ConfigMap sets. With it unset, each run
+re-indexes `raw/`.
+
+Add `../../components/schedule` to an overlay's `components` and apply that overlay.
+The proposed defaults run at 02:00 UTC daily; patch the CronJob's `schedule`, `timeZone`,
+image and resources for the cluster. Its Indexed Job has one coordinator and three workers;
+change `completions` and `parallelism` together to change the worker count. Suspend it with
+`kubectl --context k3d-people-index -n people-index patch cronjob pi-schedule -p '{"spec":{"suspend":true}}'`.
+
+`Forbid` prevents overlapping Jobs from this CronJob. A store lease also excludes manual runs
+for the same alias: a different run fails with `a run is already in progress`. If a manual
+coordinator is refused before it creates run state, stop its separately started worker Job. The same run id
+may resume, taking over its lease; do not deliberately start two coordinators for that id.
+A crashed coordinator's lease expires after `PI_LEASE_TTL` plus clock skew. If it is still
+live, stop the holder and wait for expiry; only remove `_run-leases/<alias>.json` from the
+store after ensuring no coordinator is running. The run lock needs conditional updates (S3 or memory); local filesystem runs proceed without it. Hand-picked run ids without
+the UTC stamp are not ordered by publish.
+
+Start a scheduled-style run by hand using a current UTC minute in its Job name:
+
+```sh
+kubectl --context k3d-people-index -n people-index create job --from=cronjob/pi-schedule pi-schedule-$(( $(date -u +%s) / 60 ))
+```
+
+Use your own context in production.
+
+The run stamp is the scheduled minute, so a late Job within `startingDeadlineSeconds` can
+lose to a manual run started in the meantime. Scheduled worker failures exit 2 and count
+against the Job backoff limit; coordinator failures exit 1 and fail the Job.
+
+The schedule component defaults to 1 GiB and a 7200 second deadline. For the production
+example, patch the CronJob to match its task sizing and 43200 second deadline. For example,
+add this strategic merge patch to the overlay after enabling the component:
+
+```yaml
+patches:
+  - target:
+      kind: CronJob
+      name: pi-schedule
+    patch: |-
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: pi-schedule
+      spec:
+        jobTemplate:
+          spec:
+            activeDeadlineSeconds: 43200
+            template:
+              spec:
+                containers:
+                  - name: people-index
+                    image: ghcr.io/cristiangirlea/people-index:0.1.0@sha256:<digest>
+                    imagePullPolicy: IfNotPresent
+                    resources:
+                      requests:
+                        cpu: "2"
+                        memory: 4Gi
+                      limits:
+                        cpu: "2"
+                        memory: 4Gi
+                        ephemeral-storage: 8Gi
+                volumes:
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: 8Gi
+```
+
+Also configure zone spread and node anti-affinity for the cluster; the shared indexed pod
+shape deliberately has no hard worker-only spread rule.
 ## A feed delivery
 
 For a new delivery `batch-20261028`, place gzipped NDJSON files under

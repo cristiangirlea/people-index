@@ -222,6 +222,9 @@ pub struct RunArgs {
     /// The run id; an existing one is resumed (default: generated).
     #[arg(long, env = "PI_RUN_ID")]
     pub run_id: Option<String>,
+    /// Derive the run id from a CronJob Job name.
+    #[arg(long, env = "PI_RUN_ID_FROM_JOB_NAME", conflicts_with = "run_id")]
+    pub run_id_from_job_name: Option<String>,
     /// Who runs the tasks.
     #[arg(long, env = "PI_EXECUTOR", value_enum, default_value_t = ExecutorKind::Local)]
     pub executor: ExecutorKind,
@@ -246,6 +249,9 @@ pub struct WorkerArgs {
     /// The run to work on (default: the newest run, waited for if there is none yet).
     #[arg(long, env = "PI_RUN_ID")]
     pub run_id: Option<String>,
+    /// Derive the run id from a CronJob Job name.
+    #[arg(long, env = "PI_RUN_ID_FROM_JOB_NAME", conflicts_with = "run_id")]
+    pub run_id_from_job_name: Option<String>,
     /// Exit after this long without work (default: never).
     #[arg(long, env = "PI_WORKER_IDLE_TIMEOUT", value_parser = parse_duration)]
     pub idle_timeout: Option<Duration>,

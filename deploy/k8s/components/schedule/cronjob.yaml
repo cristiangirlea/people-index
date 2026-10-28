@@ -1,0 +1,135 @@
+# Proposed defaults: one shared pod shape for coordinator and workers. The worker-sized
+# resources accommodate both; no hard spread constraint can strand the sole coordinator.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pi-schedule
+  namespace: people-index
+spec:
+  schedule: "0 2 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: people-index
+        app.kubernetes.io/component: coordinator
+        app.kubernetes.io/part-of: people-index
+    spec:
+      completionMode: Indexed
+      completions: 4
+      parallelism: 4
+      backoffLimit: 10
+      activeDeadlineSeconds: 7200
+      ttlSecondsAfterFinished: 86400
+      podFailurePolicy:
+        rules:
+          - action: Ignore
+            onPodConditions:
+              - type: DisruptionTarget
+          - action: FailJob
+            onExitCodes:
+              containerName: people-index
+              operator: In
+              values: [1]
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: people-index
+            app.kubernetes.io/component: scheduled
+            app.kubernetes.io/part-of: people-index
+            people-index.io/es-client: "true"
+            people-index.io/s3-client: "true"
+        spec:
+          restartPolicy: Never
+          serviceAccountName: people-index-pipeline
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          terminationGracePeriodSeconds: 60
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: people-index
+              image: people-index:local
+              imagePullPolicy: Never
+              args: ["scheduled"]
+              envFrom:
+                - configMapRef:
+                    name: people-index-config
+              env:
+                - name: PI_RUN_ID_FROM_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+                - name: PI_WORKER_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: PI_CONCURRENCY
+                  value: "2"
+                - name: PI_ES_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: pipeline-es-credentials
+                      key: username
+                - name: PI_ES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: pipeline-es-credentials
+                      key: password
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: s3-credentials
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: s3-credentials
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: TMPDIR
+                  value: /tmp
+              ports:
+                - name: metrics
+                  containerPort: 9464
+              # The coordinator runs every stage of one task or fewer itself, an extract stage with
+              # one input file included, one task at a time: the limit must hold one task as the
+              # ConfigMap sizes it (PI_TASK_MEMORY_BYTES, PI_BUFFER_BYTES, PI_SEGMENT_TARGET_BYTES;
+              # docs/OPERATIONS.md, Sizing).
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "1Gi"
+                  ephemeral-storage: 256Mi
+                limits:
+                  memory: "1Gi"
+                  ephemeral-storage: "2Gi"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: es-ca
+                  mountPath: /etc/people-index/es-ca
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: es-ca
+              secret:
+                secretName: es-es-http-certs-public
+                items:
+                  - key: ca.crt
+                    path: ca.crt
+            - name: tmp
+              emptyDir:
+                sizeLimit: "2Gi"

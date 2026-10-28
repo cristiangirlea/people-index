@@ -22,3 +22,12 @@ people-index-writer:
         - "persons-*"
       privileges:
         - all
+
+# Search clients use only the published alias; change this name with PI_ALIAS.
+people-index-reader:
+  indices:
+    - names:
+        - "persons"
+      privileges:
+        - read
+        - view_index_metadata

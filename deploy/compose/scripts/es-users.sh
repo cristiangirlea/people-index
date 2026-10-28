@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Waits for the formed cluster, then creates the pipeline's role and user (idempotent: PUT).
+# Waits for the formed cluster, then creates the pipeline and reader roles and users (idempotent: PUT).
 #
 # The pipeline never uses the elastic superuser. Role people-index-writer is the same one ECK
 # creates on Kubernetes (deploy/k8s/base/elasticsearch/roles.yml lists every call it covers):
@@ -8,7 +8,7 @@
 # templates: the pipeline creates its index with the mapping in the request.
 set -euo pipefail
 
-: "${ES_URL:?}" "${ES_NODES:?}" "${ELASTIC_PASSWORD:?}" "${PIPELINE_ES_PASSWORD:?}"
+: "${ES_URL:?}" "${ES_NODES:?}" "${ELASTIC_PASSWORD:?}" "${PIPELINE_ES_PASSWORD:?}" "${READER_ES_PASSWORD:?}"
 alias_name="${PI_ALIAS:-persons}"
 ca=/ca/ca.crt
 deadline=$((SECONDS + ${ES_WAIT_SECONDS:-300}))
@@ -45,6 +45,22 @@ as_elastic -X PUT "${ES_URL}/_security/role/people-index-writer" -d @- >/dev/nul
 }
 EOF
 
+echo "es-users: role people-index-reader on ${alias_name}"
+as_elastic -X PUT "${ES_URL}/_security/role/people-index-reader" -d @- >/dev/null <<EOF
+{
+  "indices": [{ "names": ["${alias_json}"], "privileges": ["read", "view_index_metadata"] }]
+}
+EOF
+
+echo "es-users: user reader"
+as_elastic -X PUT "${ES_URL}/_security/user/reader" -d @- >/dev/null <<EOF
+{
+  "password": "$(json_escape "$READER_ES_PASSWORD")",
+  "roles": ["people-index-reader"],
+  "full_name": "people-index reader"
+}
+EOF
+
 echo "es-users: user pipeline"
 as_elastic -X PUT "${ES_URL}/_security/user/pipeline" -d @- >/dev/null <<EOF
 {
@@ -54,7 +70,9 @@ as_elastic -X PUT "${ES_URL}/_security/user/pipeline" -d @- >/dev/null <<EOF
 }
 EOF
 
-# Prove the credentials the pipeline will use actually authenticate.
+# Prove both credentials authenticate.
 curl -sS --fail-with-body --cacert "$ca" -u "pipeline:${PIPELINE_ES_PASSWORD}" \
+  "${ES_URL}/_security/_authenticate" >/dev/null
+curl -sS --fail-with-body --cacert "$ca" -u "reader:${READER_ES_PASSWORD}" \
   "${ES_URL}/_security/_authenticate" >/dev/null
 echo "es-users: ready"

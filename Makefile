@@ -192,6 +192,7 @@ compose-e2e: ## A run that fails in publish, compose-run, then a second run that
 	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)-2
 	$(MAKE) compose-verify
 	VERIFY_SOURCE=summary $(MAKE) compose-verify
+	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-reader.sh $(RUN_ID)-2
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh es $(RUN_ID) $(RUN_ID)-2 $(E2E_FAILED_ID)
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash s3-init /scripts/check-republish.sh summary $(RUN_ID) $(RUN_ID)-2 $(E2E_FAILED_ID)
 

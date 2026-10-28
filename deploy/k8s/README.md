@@ -23,6 +23,7 @@ the stages, the storage layout and the `PI_*` settings used here.
 Names other parts rely on: namespace `people-index`; Elasticsearch HTTP service `es-es-http:9200`
 (TLS, CA in Secret `es-es-http-certs-public` key `ca.crt`); file-realm user `pipeline` with role
 `people-index-writer`, credentials in Secret `pipeline-es-credentials` (`username`, `password`);
+role `people-index-reader` for alias-only read access;
 object store service `s3:8333`, bucket `people-index`, credentials in Secret `s3-credentials`
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`).
 

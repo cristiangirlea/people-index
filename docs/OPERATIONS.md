@@ -52,14 +52,19 @@ make compose-clean         # stop and delete every volume
    `VERIFY_SOURCE=summary make compose-verify` checks it against a run's `summary.json`
    instead (see "Verifying a published index" below; `VERIFY_RUN_ID` picks the run).
 
-`make compose-e2e` (CI's end-to-end) is `make compose-run`, then a second run (`RUN_ID` with
-`-2` appended) over the same feeds, `make compose-verify` again in both modes (the summary one
-finds the second run from the alias), and
-`deploy/compose/scripts/check-republish.sh`: the alias points only at the second run's index,
-the first run's index is gone, no other `persons-*` index is left, and the second run's
-`summary.json` lists the first index under `previous` and `deleted` with `not_deleted` empty.
-That second publish is the only place the pipeline user moves the alias off an index and
-deletes it against a real cluster, the calls role `people-index-writer` must allow.
+`make compose-e2e` (CI's end-to-end) starts with `make compose-datagen` and a run that must
+fail in `publish` (id a minute older than `RUN_ID`; `PI_INDEX_REPLICAS=3` on 3 data nodes never
+reaches green within `PI_HEALTH_TIMEOUT=10s`, `PI_TASK_ATTEMPTS=1`), which leaves its loaded
+index behind. Then `RUN_ID` runs and is verified, a second run (`RUN_ID` with `-2` appended)
+over the same feeds is verified again in both modes (the summary one finds the second run
+from the alias), and `deploy/compose/scripts/check-republish.sh` checks:
+the failed run's index existed off the alias before the good runs, the alias points only at
+the second run's index, the first run's and the failed run's indexes are gone, no other
+`persons-*` index is left, the second run's `summary.json` lists the first index under
+`previous` and `deleted`, the first run's lists the failed run's index under `deleted` (not
+`previous`), and both have `not_deleted` empty. Those publishes are the only place the pipeline
+user lists the `persons-*` indexes, moves the alias off an index and deletes indexes against a
+real cluster, the calls role `people-index-writer` must allow.
 
 `make compose-up` alone starts Elasticsearch, the store and the one-shot setup services, and
 waits until `certs`, `es-users` and `s3-init` have succeeded:
@@ -199,6 +204,10 @@ stage (one per input file for the extract stages, `P` for `join`, `assemble` and
 Every task commits with a create-if-absent write, and a coordinator started with an existing
 `PI_RUN_ID` skips committed stages and tasks. Resuming therefore redoes only what had not
 committed; a failed run never moves the alias, so the previous index keeps serving meanwhile.
+Resume before a newer run publishes: a successful publish deletes the indexes of older runs
+that never published, and an older run's `publish` refuses to take the alias from a newer run's
+index (a permanent failure naming both), so a run resumed after that can never publish; start a
+new run instead.
 
 - compose: the coordinator has no restart policy, so its exit code is the verdict.
   `make compose-pipeline` prints the run id on failure; fix the cause and run
@@ -347,5 +356,5 @@ scrub-check, republish-check and pin-resolve tests, hooks and scripts stored as 
 `pins` weekly and on manual dispatch (`scripts/check-pins-resolve.sh`: every pinned image digest
 still exists in its registry, since a registry can delete one when a tag is re-pushed), and
 `e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
-`make compose-e2e` (two runs, so the second publish replaces the first), logs uploaded on
-failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+`make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
+the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.

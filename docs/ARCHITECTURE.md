@@ -218,6 +218,21 @@ once the previous one has committed every task:
   Any failure before the alias request leaves the alias untouched; a count mismatch is a
   permanent failure of the run. A failed delete of an old index is reported in `summary.json`,
   not a failure, since the alias has moved by then.
+  Publish then deletes the indexes of older runs that never published (a run that failed after
+  `prepare-index` leaves its whole index behind): it lists `<alias>-*` with
+  `GET /<alias>-*/_alias` and deletes each index that no alias points at and whose run started
+  in an earlier second than this one. Run ids begin with their UTC start second, `YYYYMMDD`,
+  `T` or `-`, `HHMMSS` (generated `20261015T120000Z-a1b2c3`, the Makefile's compose
+  `20261015-120000`), and only that stamp is compared: the two forms do not sort together as
+  strings. A newer run's index is never touched (it may be loading), nor one from the same
+  second, nor one whose id has no stamp (a hand-picked `--run-id`; such a run looks for no older
+  runs either). These deletes, and a failed listing (as `<alias>-*`), are reported under
+  `deleted` and `not_deleted` like the previous indexes, and are not failures either. The same
+  order holds the other way: a publish whose alias points at a newer run's index fails for good
+  before recording or moving anything, so a run resumed after a newer one published (its index
+  deleted, and re-created by `load`'s bulk writes) never takes the alias back. Runs of one alias
+  must not publish at the same moment: between the listing and the delete, a concurrent publish
+  could move the alias onto the index being deleted.
   Publish then writes `summary.json` and deletes orphaned files (data and quarantine files no
   commit lists).
 
@@ -247,7 +262,8 @@ snapshots/                             reserved for Elasticsearch snapshots (k8s
   `q`. The partition number is not zero-padded.
 - Task ids: `run` (single-task stages), `file-NNNNN` (extract), `part-NNNNN` (partitioned).
   Run, stage, task and attempt ids are `[A-Za-z0-9._=-]`, at most 128 bytes. Generated run ids
-  are `20261015T120000Z-a1b2c3` (UTC start time first, so the greatest id is the newest run).
+  are `20261015T120000Z-a1b2c3` (UTC start time first, so the greatest id is the newest run);
+  `publish` reads that start second to tell older runs' indexes from newer ones.
 - `plan.json`: `{run_id, partitions, alias, index, organizations: [{key, size, version}],
   persons: [{key, size, version}], total_bytes, created_at}`, written create-if-absent; a retry
   reads it back. `version` is `{e_tag, version}` as the input listing reported it (the etag

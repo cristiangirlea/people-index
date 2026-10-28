@@ -186,6 +186,39 @@ impl IndexAdmin {
         Ok(names)
     }
 
+    /// The indices named `<prefix>*` that no alias points at, sorted (open and closed alike).
+    /// One `GET /<prefix>*/_alias`, which lists every matching index with its aliases and needs
+    /// only `view_index_metadata` on the pattern.
+    pub async fn unaliased_indices(&self, prefix: &str) -> Result<Vec<String>> {
+        validate_index_name(prefix)?;
+        let path = format!("/{prefix}*/_alias");
+        let (status, response) = self
+            .client
+            .json_allowing(Method::GET, &path, None, &[404])
+            .await?;
+        if status == 404 {
+            return Ok(Vec::new());
+        }
+        let indices = response.as_object().ok_or_else(|| EsError::Decode {
+            path: path.clone(),
+            message: "alias response is not an object".into(),
+        })?;
+        let mut names = Vec::new();
+        for (name, entry) in indices {
+            let aliases = entry["aliases"]
+                .as_object()
+                .ok_or_else(|| EsError::Decode {
+                    path: path.clone(),
+                    message: format!("no aliases object for {name}"),
+                })?;
+            if aliases.is_empty() {
+                names.push(name.clone());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
     /// Points `alias` at `index` and away from each of `previous` in one `_aliases` request:
     /// readers see the old index or the new one, never neither and never both.
     ///

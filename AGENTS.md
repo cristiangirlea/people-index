@@ -39,8 +39,8 @@ cargo deny check               # audit job (also weekly)
 
 CI also checks the MSRV (`cargo check` at `rust-version`), lints the workflow, shell scripts and
 Dockerfile (actionlint, shellcheck, hadolint), builds the image, and on pushes to `main` runs
-the compose end-to-end (`make compose-e2e`: two runs, so the second publish replaces the
-first). `make check` runs the list above (cargo-deny when installed); `/check`
+the compose end-to-end (`make compose-e2e`: a run that fails in publish, then two runs, so
+the second publish replaces the first and the failed run's index is deleted). `make check` runs the list above (cargo-deny when installed); `/check`
 (`.claude/skills/check`) runs all but cargo-deny.
 
 ## Rules

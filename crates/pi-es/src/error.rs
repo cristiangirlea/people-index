@@ -94,6 +94,15 @@ pub enum EsError {
     #[error("a concrete index is named {0}; remove or rename it before publishing")]
     ConcreteIndexAtAlias(String),
 
+    /// The alias serves a newer run's index: publishing this older run would move the alias
+    /// back and delete the newer index.
+    #[error("{alias} serves {serving}, a newer run than {index}; start a new run instead")]
+    NewerRunServing {
+        alias: String,
+        index: String,
+        serving: String,
+    },
+
     /// The expectations file could not be read or parsed.
     #[error("expected counts: {0}")]
     Expected(String),

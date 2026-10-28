@@ -13,7 +13,7 @@ the stages, the storage layout and the `PI_*` settings used here.
 | `eck/` | `fetch.sh`: downloads the ECK 3.5.0 operator and CRDs from Elastic's release URLs and keeps them only when they match `SHA256SUMS`; `pin-operator.sh`: pins the operator image to the digest in `operator-image` |
 | `base/` | namespace, Elasticsearch (`es`: 3 masters, 3 data nodes), SeaweedFS (`s3:8333`) and its bucket Job, the pipeline ServiceAccount, the `people-index-config` ConfigMap, NetworkPolicies |
 | `components/snapshots/` | S3 snapshot repository `people-index` (prefix `snapshots/`) and the SLM policy `nightly` |
-| `components/monitoring/` | elasticsearch-exporter, ServiceMonitors, a PodMonitor for the pipeline's `:9464`, alert rules; needs the prometheus-operator CRDs |
+| `components/monitoring/` | elasticsearch-exporter, ServiceMonitors, a PodMonitor for the pipeline's `:9464`, alert rules; needs the prometheus-operator CRDs and kube-state-metrics with Job labels allowlisted (see below) |
 | `overlays/local/` | k3d sizing (about 7.5 GiB for Elasticsearch), snapshots, `imagePullPolicy: Never` for `people-index:local` |
 | `overlays/production-example/` | 6 data nodes, external S3 instead of SeaweedFS, monitoring and snapshots, sizing notes |
 | `jobs/` | `run.yaml` (coordinator + workers), `datagen.yaml` and `verify.yaml`, rendered by `render.sh` from an overlay's `jobs.vars` |
@@ -80,6 +80,9 @@ and the other workers take their tasks over. The index being loaded has no repli
 `publish`, so its shards on the lost node are unavailable until `docker start` brings the node
 (and its volume) back; the loader retries meanwhile, and `publish` refuses to move the alias if
 documents are missing.
+
+The monitoring component requires Prometheus to scrape kube-state-metrics configured with
+`--metric-labels-allowlist=jobs=[app.kubernetes.io/name,app.kubernetes.io/component]`.
 
 ## Security
 

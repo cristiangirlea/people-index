@@ -261,6 +261,65 @@ being resumed.
   only, since Elasticsearch fails a document with a duplicate key anywhere
   ([ARCHITECTURE.md](ARCHITECTURE.md#the-data)).
 
+### Pipeline alerts
+
+The monitoring component requires kube-state-metrics to expose Job labels, for example with
+`--metric-labels-allowlist=jobs=[app.kubernetes.io/name,app.kubernetes.io/component]`, and
+Prometheus to scrape it. Job metrics persist only until the finished Job is deleted; ensure the
+Job TTL and alert routing leave enough time to respond. The exporter uses `--es.indices_settings`
+for index creation timestamps. Exporter or kube-state-metrics scrape failures can make these
+alerts blind; monitor both targets and collector errors independently.
+
+These thresholds are proposed defaults: active for 3 hours, index age 26 hours, and the
+`persons` alias. Set the stalled threshold below the Job deadline if an early warning is
+needed: the local overlay deadline is 2 hours, while the production example permits a longer
+run. A Job hitting `activeDeadlineSeconds` is reported by PeopleIndexJobFailed. Set the index
+age threshold to the publication cadence plus the longest creation-to-publish time plus margin.
+The 26-hour default assumes a daily cadence and runs under about 2 hours. In an overlay, use a Kustomize `patches` entry
+that targets `PrometheusRule` named `people-index-elasticsearch` and replaces the relevant
+rule's `expr` and `annotations.summary`; change the alias in both alias rules. For example, the overlay can add the following JSON patch (adjust the alias, seconds, and
+summary together; the rule positions refer to the pipeline group in the component):
+
+```yaml
+patches:
+  - target:
+      group: monitoring.coreos.com
+      version: v1
+      kind: PrometheusRule
+      name: people-index-elasticsearch
+    patch: |-
+      - op: replace
+        path: /spec/groups/1/rules/2/expr
+        value: 'time() - max(elasticsearch_indices_settings_creation_timestamp_seconds * on(index) group_left() elasticsearch_indices_aliases{alias="my-alias"}) > 93600'
+      - op: replace
+        path: /spec/groups/1/rules/2/annotations/summary
+        value: The index behind my-alias is older than 26 hours.
+      - op: replace
+        path: /spec/groups/1/rules/3/expr
+        value: 'absent(elasticsearch_indices_settings_creation_timestamp_seconds * on(index) group_left() elasticsearch_indices_aliases{alias="my-alias"})'
+      - op: replace
+        path: /spec/groups/1/rules/3/annotations/summary
+        value: my-alias has no index, or alias or creation timestamp metrics are unavailable.
+```
+
+Index creation
+age approximates publication age, not the actual alias move time. Multiple backing indices use
+the newest creation timestamp. The missing alert also fires during initial deployment or when
+exporter alias or creation timestamp metrics are unavailable; verify the exporter before concluding the alias is missing.
+
+- **PeopleIndexJobFailed:** a coordinator or worker Job failed. Run `kubectl --context
+  k3d-people-index -n people-index describe job/<job>` and inspect its pod logs and run summary.
+- **PeopleIndexJobStalled:** a Job has remained active past the expected duration. Run `kubectl
+  --context k3d-people-index -n people-index describe job/<job>` and inspect coordinator and
+  worker logs, leases and task progress.
+- **PeopleIndexAliasOld:** no recent index is behind the alias. Check the scheduler and recent
+  Jobs with `kubectl --context k3d-people-index -n people-index get jobs`, then inspect run logs,
+  the publish summary and Elasticsearch alias and index creation dates.
+- **PeopleIndexJobLabelsMissing:** pipeline Jobs (named `pi-*`) exist in a namespace but kube-state-metrics exports none of them with the `app.kubernetes.io/name` label, so the two Job alerts above cannot match. Add the label allowlist to kube-state-metrics (see the requirement above). Jobs outside the pipeline are ignored.
+  Check the kube-state-metrics Job label allowlist and scrape configuration.
+- **PeopleIndexAliasMissing:** no matching alias and creation timestamp metrics are present. Check the exporter target and logs,
+  then query Elasticsearch `GET /_alias/persons` and inspect the latest publish run.
+
 What to watch during a load: a rising rate of bulk retries means the cluster is pushing back
 (HTTP 429); task retries and lease takeovers mean workers are dying or stalling.
 

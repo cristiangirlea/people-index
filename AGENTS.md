@@ -25,7 +25,7 @@ before changing anything; when code and it disagree, fix one of them in the same
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-scripts/check-deploy.sh        # kustomize build | kubeconform, compose config
+scripts/check-deploy.sh        # kustomize build | kubeconform, compose config, promtool tests (Docker)
 scripts/scrub-check.sh
 scripts/test-scrub-check.sh   # the scrub check and hooks, in a throwaway repo and worktree
 scripts/test-check-republish.sh  # the compose republish check, against stub curl and aws

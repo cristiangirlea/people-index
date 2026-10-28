@@ -16,7 +16,10 @@ pub fn mapping() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use pi_model::{BUILDER_OWNED, JsonKind, ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS};
+    use pi_model::{
+        BUILDER_OWNED, JsonKind, ORGANIZATION_DISABLED, ORGANIZATION_FIELDS, PERSON_DISABLED,
+        PERSON_FIELDS, ROLE_FIELDS,
+    };
 
     use super::*;
 
@@ -162,6 +165,18 @@ mod tests {
             // record's, checked at extract-orgs.
             let owned = BUILDER_OWNED.contains(&path);
             let disabled = node["enabled"] == Value::Bool(false);
+            let disabled_table = PERSON_DISABLED.contains(&path)
+                || path
+                    .strip_prefix("organizations.")
+                    .is_some_and(|name| ORGANIZATION_DISABLED.contains(&name));
+            assert_eq!(disabled, disabled_table, "{path}: disabled table mismatch");
+            assert_eq!(
+                usize::from(owned)
+                    + usize::from(disabled_table)
+                    + usize::from(table.contains_key(path)),
+                1,
+                "{path}: must occur in exactly one table"
+            );
             let Some(kind) = table.get(path) else {
                 assert!(
                     disabled || owned,
@@ -183,6 +198,13 @@ mod tests {
         });
         let missing: Vec<&String> = table.keys().filter(|k| !seen.contains(k)).collect();
         assert!(missing.is_empty(), "checked but not mapped: {missing:?}");
+        for path in PERSON_DISABLED {
+            assert_eq!(field(&mapping(), path)["enabled"], false, "{path}");
+        }
+        for name in ORGANIZATION_DISABLED {
+            let path = format!("organizations.{name}");
+            assert_eq!(field(&mapping(), &path)["enabled"], false, "{path}");
+        }
         for owned in BUILDER_OWNED {
             assert!(!field(&mapping(), owned).is_null(), "{owned} is not mapped");
         }

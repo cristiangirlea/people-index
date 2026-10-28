@@ -200,6 +200,7 @@ impl Stage for PublishStage {
         let wall_ms = millis(finished_at - plan.created_at);
         let summary = Summary {
             run_id: plan.run_id.clone(),
+            delivery: plan.delivery.clone(),
             alias: plan.alias.clone(),
             index: plan.index.clone(),
             partitions: plan.partitions,

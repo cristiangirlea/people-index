@@ -193,7 +193,9 @@ async fn load_with_a_buffer_smaller_than_one_document_sends_every_document() {
 )]
 async fn prepare_and_publish_against_a_mock_cluster() {
     let data = generate(small_config()).await;
-    run_stages(&data.store, "run-p", config(2), &OFFLINE)
+    let mut delivery_config = config(2);
+    delivery_config.delivery = Some("batch".into());
+    run_stages(&data.store, "run-p", delivery_config, &OFFLINE)
         .await
         .unwrap();
     let ctx = RunContext::new("run-p", data.store.clone()).unwrap();
@@ -311,6 +313,33 @@ async fn prepare_and_publish_against_a_mock_cluster() {
         .unwrap()
         .unwrap()
         .0;
+    assert_eq!(summary.delivery.as_deref(), Some("batch"));
+    for stage in [StageName::ExtractOrgs, StageName::ExtractPersons] {
+        let commits = pi_coord::CommitLog::new(data.store.clone(), ctx.layout.clone())
+            .list(stage)
+            .await
+            .unwrap();
+        let expected: u64 = commits
+            .iter()
+            .map(|c| {
+                c.report
+                    .counters
+                    .get("fields_not_indexed")
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        let actual = summary
+            .stages
+            .iter()
+            .find(|s| s.stage == stage)
+            .unwrap()
+            .counters
+            .get("fields_not_indexed")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(actual, expected);
+    }
     assert_eq!(summary.documents, documents);
     assert_eq!(summary.publish.docs, documents);
     assert_eq!(summary.publish.previous, ["persons-old"]);

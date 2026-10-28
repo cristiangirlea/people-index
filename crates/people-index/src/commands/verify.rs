@@ -47,13 +47,10 @@ pub async fn load_expected(args: &VerifyArgs) -> anyhow::Result<Expected> {
         }
         None => {
             let stores = Stores::open(&args.store)?;
-            let (store, key) = match &stores.inputs {
-                Some(inputs) => (inputs.clone(), pi_datagen::EXPECTED_FILE.to_owned()),
-                None => (
-                    stores.runs.clone(),
-                    format!("raw/{}", pi_datagen::EXPECTED_FILE),
-                ),
-            };
+            let key = stores
+                .layout("verify")?
+                .input_key(pi_datagen::EXPECTED_FILE);
+            let store = stores.inputs.clone().unwrap_or_else(|| stores.runs.clone());
             store
                 .get(&key)
                 .await

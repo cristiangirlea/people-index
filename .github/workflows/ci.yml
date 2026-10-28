@@ -131,6 +131,8 @@ jobs:
         run: docker run --rm -i hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d hadolint --failure-threshold warning - < Dockerfile
       - name: scrub-check finds its list from any worktree
         run: bash scripts/test-scrub-check.sh
+      - name: the release notes script passes and fails as it should
+        run: bash scripts/test-release-notes.sh
       # jq --version first: on the runner the summary cases must run, not skip.
       - name: the compose republish check passes and fails as it should
         run: jq --version && bash scripts/test-check-republish.sh

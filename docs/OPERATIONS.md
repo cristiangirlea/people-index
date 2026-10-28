@@ -358,3 +358,32 @@ still exists in its registry, since a registry can delete one when a tag is re-p
 `e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
 `make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
 the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+
+## Releasing
+
+1. Bump `[workspace.package]` version in `Cargo.toml` and update `Cargo.lock`.
+2. Move the `CHANGELOG.md` Unreleased entries into a non-empty `## [X.Y.Z]` section,
+   leaving a new Unreleased section for future changes. Merge these changes through review and CI.
+3. Create and push the `vX.Y.Z` tag at that commit. The release workflow checks that the tag
+   matches the workspace version and the changelog section exists. A manual workflow dispatch
+   builds and scans both platforms without pushing an image or creating a release.
+
+The tag run scans fixable HIGH and CRITICAL vulnerabilities on linux/amd64 and linux/arm64,
+then publishes `ghcr.io/cristiangirlea/people-index:X.Y.Z` with SBOM and maximum provenance
+attestations, signs the image digest using GitHub OIDC, and creates a GitHub release with the
+version's changelog notes. The workflow log prints the digest. The scan builds and the published
+build are separate builds from the same commit; the published digest is scanned again for both
+platforms before signing or creating the release. The version tag is added only after that
+digest passes both scans and is signed. The release notes include the digest-pinned image reference.
+
+After the first release, GHCR creates the package private. In GitHub, open the package settings
+and change its visibility to public; verify the package page shows Public and an unauthenticated
+pull of the pinned reference succeeds.
+
+Verify the digest with cosign (replace the digest and tag with the release values):
+
+```bash
+cosign verify ghcr.io/cristiangirlea/people-index@sha256:DIGEST \
+  --certificate-identity 'https://github.com/cristiangirlea/people-index/.github/workflows/release.yml@refs/tags/vX.Y.Z' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+```

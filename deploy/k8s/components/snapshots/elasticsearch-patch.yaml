@@ -16,10 +16,7 @@
   value: master
 - op: add
   path: /spec/nodeSets/0/config/s3.client.default.endpoint
-  value: s3:8333
-- op: add
-  path: /spec/nodeSets/0/config/s3.client.default.protocol
-  value: http
+  value: http://s3:8333
 - op: add
   path: /spec/nodeSets/0/config/s3.client.default.path_style_access
   value: true
@@ -31,10 +28,7 @@
   value: data
 - op: add
   path: /spec/nodeSets/1/config/s3.client.default.endpoint
-  value: s3:8333
-- op: add
-  path: /spec/nodeSets/1/config/s3.client.default.protocol
-  value: http
+  value: http://s3:8333
 - op: add
   path: /spec/nodeSets/1/config/s3.client.default.path_style_access
   value: true

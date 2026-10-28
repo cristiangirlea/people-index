@@ -12,11 +12,13 @@ Run each from the repository root and report pass or fail, with the first error 
 5. `scripts/scrub-check.sh`
 6. `scripts/test-scrub-check.sh`
 7. `scripts/test-check-republish.sh`
-8. `scripts/test-check-pins-resolve.sh`
-9. `scripts/test-check-modes.sh`
-10. `scripts/check-modes.sh`
-11. `scripts/test-check-s3.sh`
-12. `scripts/check-s3.sh` (needs Docker: the store and lease tests against SeaweedFS)
+8. `scripts/test-restore-drill.sh`
+9. `scripts/test-check-s3-endpoints.sh` (needs PyYAML)
+10. `scripts/test-check-pins-resolve.sh`
+11. `scripts/test-check-modes.sh`
+12. `scripts/check-modes.sh`
+13. `scripts/test-check-s3.sh`
+14. `scripts/check-s3.sh` (needs Docker: the store and lease tests against SeaweedFS)
 
 Do not fix anything unless asked; say what failed and where.
 

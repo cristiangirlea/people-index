@@ -1,6 +1,6 @@
 # Snapshots of the published index to the object store.
 #
-# - Elasticsearch gets the S3 client settings (endpoint, path-style addressing) on every node
+# - Elasticsearch gets the S3 client settings (endpoint, path-style addressing, region) on every node
 #   and the store's keys in its keystore through ECK secureSettings, read from the separate
 #   `snapshot-s3-credentials` Secret.
 # - A bootstrap Job (bootstrap.sh) registers the repository `people-index` (bucket
@@ -11,8 +11,9 @@
 # Verified with Elasticsearch 9.5.5 against SeaweedFS 4.48 in containers: the repository
 # registers (with node verification), the policy installs, and a snapshot completes.
 #
-# For an external store, patch `s3.client.default.endpoint` and `protocol` on both node sets
-# (see overlays/production-example).
+# The endpoint carries its scheme (http://s3:8333): Elasticsearch 9 deprecates the separate
+# `protocol` setting. For an external store, patch s3.client.default.endpoint (with its scheme)
+# on both node sets (see overlays/production-example).
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 

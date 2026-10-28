@@ -146,8 +146,8 @@ impl Publisher {
             .into_iter()
             .filter(|name| name != &spec.index)
             .collect();
-        // An older run resumed after a newer one published (its index deleted by that publish
-        // and re-created by `load`) must not take the alias back.
+        // An older run resumed after a newer one published must not take the alias back,
+        // even if its index survived that publish.
         if let Some(newer) = on_alias
             .iter()
             .find(|name| is_older_run(&spec.alias, &spec.index, name))

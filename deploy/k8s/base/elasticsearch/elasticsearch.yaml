@@ -36,6 +36,8 @@ spec:
     - name: master
       count: 3
       config:
+        # For a different PI_ALIAS, edit this pattern to match it.
+        action.auto_create_index: "-persons-*,+*"
         node.roles: ["master"]
         node.attr.zone: ${ZONE}
         cluster.routing.allocation.awareness.attributes: k8s_node_name,zone
@@ -100,6 +102,8 @@ spec:
     - name: data
       count: 3
       config:
+        # For a different PI_ALIAS, edit this pattern to match it.
+        action.auto_create_index: "-persons-*,+*"
         node.roles: ["data", "data_content", "data_hot", "ingest"]
         node.attr.zone: ${ZONE}
         cluster.routing.allocation.awareness.attributes: k8s_node_name,zone

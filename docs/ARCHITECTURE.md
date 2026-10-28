@@ -98,7 +98,9 @@ this document, `roles` and `organization_id` stand for `person.references` and
   a table with a kind its type takes, and every table entry mapped; every `long`, `integer` and
   `date` field must have `ignore_malformed: true`, whatever its kind (an id above `i64::MAX`, a
   value past `i32` or text no date format reads would otherwise fail the document and the
-  load); the `enabled: false` fields must be exactly the `disabled` lists; the builder's three
+  load); every `keyword` with an index or doc values, including multi-fields, needs an integer `ignore_above`
+  at most 8191 (keywords with `index: false` and `doc_values: false`, and fields inside disabled objects, are exempt); the `enabled: false`
+  fields must be exactly the `disabled` lists; the builder's three
   fields must be mapped as `object`, `long` with `ignore_malformed: true`, and `boolean`. Types
   without a rule (`nested`, `float`, ...) are refused. Multi-fields (`fields`) must take what
   their field lets through (`text`, `keyword`, or a number, date or boolean type with
@@ -142,6 +144,12 @@ byte. Such a record is kept, not malformed, and counted
 in the extract counter `records_with_repeated_keys` (per extracted line, like
 `values_ignored_by_index`).
 
+Keyword values skipped by `ignore_above` are counted in `values_ignored_by_index` per
+input value, once even when multiple keyword fields ignore it. Each array element counts
+separately. Extraction resolves the smallest applicable limit from the mapping, including
+multi-fields and keyword `copy_to` targets, and measures UTF-16 code units. The count is
+per extracted line before deduplication and assembly, so it is not a count of `_ignored` entries.
+
 **Mapped fields must have the JSON kind their mapping expects**, or the record is malformed
 (kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
 or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must
@@ -157,7 +165,8 @@ of scalars passes. Elasticsearch skips a value it cannot read as the field's typ
 malformed values are not indexed and the field is listed in the document's `_ignored`; the
 record stays searchable by its other fields, and the value stays in `_source`. Extraction keeps
 such a record and counts in the extract counter `values_ignored_by_index` the values
-Elasticsearch skips (not malformed, not against `max_malformed`), following the rules
+Elasticsearch skips (not malformed, not against `max_malformed`),
+following the rules
 Elasticsearch 9.5.5 was observed to apply (`pi-model`'s `es_number`, pinned in its tests):
 - either number type: a boolean is skipped, and so is a string of spaces only; `""` is not;
 - `long` (`connections`, `followers`, `employee_count`): a string must be an exact decimal

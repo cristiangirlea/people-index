@@ -306,6 +306,75 @@ mod tests {
     }
 
     #[test]
+    fn keyword_limits_resolve_multifields_and_copy_targets() {
+        let cfg = StagesConfig::default();
+        let mut mapping = (*cfg.mapping).clone();
+        mapping["properties"]["full_name"] =
+            serde_json::json!({"type":"keyword", "ignore_above": 200});
+        let schema = cfg.schema.with_keyword_limits(&mapping);
+        let limit = |name: &str| {
+            schema
+                .person_fields()
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .keyword_limit
+        };
+        assert_eq!(limit("first_name"), Some(200));
+        assert_eq!(limit("skills"), Some(512));
+        let field_limit = |fields: &[pi_model::FieldShape], name: &str| {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .keyword_limit
+        };
+        assert_eq!(field_limit(schema.reference_fields(), "title"), Some(1024));
+        assert_eq!(
+            field_limit(schema.reference_fields(), "location"),
+            Some(8191)
+        );
+        assert_eq!(
+            field_limit(schema.organization_fields(), "name"),
+            Some(1024)
+        );
+        assert_eq!(
+            field_limit(schema.organization_fields(), "keywords"),
+            Some(512)
+        );
+        let line = serde_json::json!({"id": 1, "record": {"name": "x".repeat(1025)}}).to_string();
+        let (_, stats) =
+            pi_model::parse_org_line_with(&schema, line.as_bytes(), pi_model::Seq::default(), true)
+                .unwrap();
+        assert_eq!(stats.ignored_by_index, 1);
+        mapping["properties"]["first_name"]["copy_to"] =
+            serde_json::json!(["full_name", "country"]);
+        mapping["properties"]["country"]["ignore_above"] = serde_json::json!(100);
+        let array_schema = cfg.schema.with_keyword_limits(&mapping);
+        assert_eq!(
+            field_limit(array_schema.person_fields(), "first_name"),
+            Some(100)
+        );
+        mapping["properties"]["id"]["fields"] =
+            serde_json::json!({"keyword": {"type": "keyword", "ignore_above": 3}});
+        let number_schema = cfg.schema.with_keyword_limits(&mapping);
+        assert_eq!(field_limit(number_schema.person_fields(), "id"), Some(3));
+        let line = br#"{"id": 1, "record": {"id": 1234}}"#;
+        let (_, stats) =
+            pi_model::parse_person_line_with(&number_schema, line, pi_model::Seq::default(), true)
+                .unwrap();
+        assert_eq!(stats.ignored_by_index, 1);
+        let renamed = pi_model::FeedSchema::from_json(
+            r#"{"person":{"references":"jobs","fields":[{"name":"jobs","kind":"object_array"}]}}"#,
+        )
+        .unwrap();
+        mapping["properties"]["jobs"] = mapping["properties"]["roles"].clone();
+        let renamed = renamed.with_keyword_limits(&mapping);
+        assert_eq!(field_limit(renamed.reference_fields(), "title"), Some(1024));
+        assert_eq!(schema.to_json(), cfg.schema.to_json());
+    }
+
+    #[test]
     fn bad_settings_are_refused() {
         let cfg = StagesConfig {
             alias: "Bad Alias".into(),

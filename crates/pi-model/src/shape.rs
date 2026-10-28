@@ -125,6 +125,8 @@ pub struct FieldShape {
     pub name: Name,
     /// The JSON kind it expects.
     pub kind: JsonKind,
+    /// Smallest applicable keyword limit, resolved from the mapping.
+    pub keyword_limit: Option<usize>,
 }
 
 impl FieldShape {
@@ -134,6 +136,7 @@ impl FieldShape {
         Self {
             name: name.into(),
             kind,
+            keyword_limit: None,
         }
     }
 }
@@ -142,6 +145,7 @@ const fn field(name: &'static str, kind: JsonKind) -> FieldShape {
     FieldShape {
         name: Cow::Borrowed(name),
         kind,
+        keyword_limit: None,
     }
 }
 
@@ -237,7 +241,7 @@ pub(crate) fn check_fields(
             let mut ignored = |at: &[usize], found| {
                 stats.ignore(|| format!("{prefix}{}{}", shape.name, indices(at)), found);
             };
-            check_value(value, shape.kind, &mut ignored)
+            check_value(value, shape.kind, shape.keyword_limit, &mut ignored)
                 .map_err(|(at, found)| mismatch(&prefix, shape, &at, found))?;
         }
     }
@@ -253,24 +257,48 @@ type OnIgnored<'a> = dyn FnMut(&[usize], &'static str) + 'a;
 fn check_value(
     value: &RawValue,
     kind: JsonKind,
+    limit: Option<usize>,
     ignored: &mut OnIgnored<'_>,
 ) -> Result<(), Mismatch> {
     if is_null(value) {
         return Ok(());
     }
     let text = value.get();
+    let over_limit = |scalar: &str| {
+        let Some(limit) = limit else { return false };
+        if scalar.len() <= limit {
+            return false;
+        }
+        if scalar.starts_with('"') {
+            string_value(scalar)
+                .is_some_and(|s| s.len() > limit && s.encode_utf16().count() > limit)
+        } else {
+            scalar.encode_utf16().count() > limit
+        }
+    };
     match kind {
-        JsonKind::Number | JsonKind::Boolean if parses(text, kind) => Ok(()),
+        JsonKind::Number | JsonKind::Boolean if parses(text, kind) => {
+            if over_limit(text) {
+                ignored(&[], "a value above ignore_above");
+            }
+            Ok(())
+        }
         JsonKind::Number | JsonKind::Boolean => Err((String::new(), found(text, kind))),
         JsonKind::LenientLong | JsonKind::LenientInteger | JsonKind::LenientBoolean => {
             walk_scalars(text, &mut Vec::new(), &mut |scalar, at| {
                 if let Some(found) = skipped(scalar, kind) {
                     ignored(at, found);
+                } else if over_limit(scalar) {
+                    ignored(at, "a value above ignore_above");
                 }
             })
         }
         JsonKind::String | JsonKind::StringArray => {
-            walk_scalars(text, &mut Vec::new(), &mut |_, _| {})
+            walk_scalars(text, &mut Vec::new(), &mut |scalar, at| {
+                if over_limit(scalar) {
+                    ignored(at, "a value above ignore_above");
+                }
+            })
         }
         JsonKind::ObjectArray => check_elements(text, '{'),
     }
@@ -415,6 +443,72 @@ mod tests {
         let mut stats = LineStats::default();
         check_fields(&RawObject::parse(record).unwrap(), fields, None, &mut stats)?;
         Ok(stats)
+    }
+
+    #[test]
+    fn keyword_limits_count_utf16_units_and_each_value_once() {
+        let fields = [
+            FieldShape {
+                name: "country".into(),
+                kind: JsonKind::String,
+                keyword_limit: Some(8191),
+            },
+            FieldShape {
+                name: "skills".into(),
+                kind: JsonKind::StringArray,
+                keyword_limit: Some(512),
+            },
+            FieldShape {
+                name: "first_name".into(),
+                kind: JsonKind::String,
+                keyword_limit: Some(512),
+            },
+        ];
+        for (count, expected) in [(4095, 0), (4096, 1)] {
+            let record = serde_json::json!({"country": "\u{1F600}".repeat(count)}).to_string();
+            assert_eq!(check(&record, &fields).unwrap().ignored_by_index, expected);
+        }
+        let record = serde_json::json!({"skills": ["x".repeat(513), "y".repeat(512), "z".repeat(513)], "first_name": "a".repeat(513)}).to_string();
+        assert_eq!(check(&record, &fields).unwrap().ignored_by_index, 3);
+    }
+
+    #[test]
+    fn keyword_limits_cover_numbers_escapes_and_lenient_values() {
+        let fields = [
+            FieldShape {
+                name: "skills".into(),
+                kind: JsonKind::StringArray,
+                keyword_limit: Some(512),
+            },
+            FieldShape {
+                name: "id".into(),
+                kind: JsonKind::Number,
+                keyword_limit: Some(3),
+            },
+            FieldShape {
+                name: "followers".into(),
+                kind: JsonKind::LenientLong,
+                keyword_limit: Some(3),
+            },
+        ];
+        for (n, expected) in [(512, 0), (513, 1)] {
+            let record = format!(r#"{{"skills":{}}}"#, "1".repeat(n));
+            assert_eq!(check(&record, &fields).unwrap().ignored_by_index, expected);
+        }
+        for (n, expected) in [(200, 0), (513, 1)] {
+            let record = format!(r#"{{"skills":"{}"}}"#, r"\u0041".repeat(n));
+            assert_eq!(check(&record, &fields).unwrap().ignored_by_index, expected);
+        }
+        assert_eq!(
+            check(r#"{"id":1234}"#, &fields).unwrap().ignored_by_index,
+            1
+        );
+        assert_eq!(
+            check(r#"{"followers":"invalid"}"#, &fields)
+                .unwrap()
+                .ignored_by_index,
+            1
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_coord::{AttemptId, RunContext, Stage, StageName, TaskReport, TaskSpec};
-use pi_model::{LineStats, MalformedRecord, OrgRow, Partitioner, Seq, parse_org_line};
+use pi_model::{LineStats, MalformedRecord, OrgRow, Partitioner, Seq, parse_org_line_with_names};
 use pi_store::Dataset;
 
 use crate::channel::Outbox;
@@ -63,8 +63,9 @@ impl LineSink for OrgSink {
         &mut self,
         line: &[u8],
         seq: Seq,
+        collect_names: bool,
     ) -> anyhow::Result<Result<LineStats, MalformedRecord>> {
-        let (row, stats) = match parse_org_line(line, seq) {
+        let (row, stats) = match parse_org_line_with_names(line, seq, collect_names) {
             Ok(parsed) => parsed,
             Err(m) => return Ok(Err(m)),
         };

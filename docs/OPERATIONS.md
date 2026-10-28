@@ -233,6 +233,8 @@ being resumed.
 
 ## Metrics, logs and the run summary
 
+`fields_not_indexed` counts unknown top-level keys in kept records, summed in stage summaries.
+
 - Every pipeline process serves Prometheus metrics on `PI_METRICS_ADDR` (`:9464`, path
   `/metrics`): tasks committed, failed and retried, task and stage durations, lease takeovers
   and losses, malformed lines, and bulk requests, retries, retried items, indexed documents and
@@ -365,3 +367,17 @@ still exists in its registry, since a registry can delete one when a tag is re-p
 `e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
 `make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
 the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+
+## A feed delivery
+
+For a new delivery `batch-20261028`, place gzipped NDJSON files under
+`raw/batch-20261028/persons/` and `raw/batch-20261028/organizations/`. Place an optional
+`expected.json` beside those directories for synthetic verification. After all files are
+written, create the empty `raw/batch-20261028/_COMPLETE` object. Then run with
+`PI_DELIVERY=batch-20261028 PI_REQUIRE_COMPLETE_MARKER=true`; use the same `PI_DELIVERY`
+for `verify --source expected`. Never modify a completed delivery; use a new prefix.
+
+For a synthetic delivery, `people-index datagen --delivery batch-20261028` writes the feeds
+and `expected.json` there; create `_COMPLETE` separately after it succeeds. An explicit
+`datagen --out` names the exact destination instead. With `PI_INPUT_URL`, these paths are
+relative to that input prefix rather than `raw/`.

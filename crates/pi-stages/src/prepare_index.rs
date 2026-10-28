@@ -162,6 +162,7 @@ mod tests {
                 persons: vec![],
                 total_bytes: 0,
                 created_at: OffsetDateTime::UNIX_EPOCH,
+                delivery: None,
             };
             store
                 .put_json_create_if_absent(&ctx.layout.plan(), &plan)

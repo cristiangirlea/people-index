@@ -331,3 +331,27 @@ async fn an_input_replaced_after_the_plan_fails_for_good() {
         .unwrap();
     assert_eq!(common::read_docs(&store, "run-v2").await.len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_top_level_fields_are_counted_in_extract_commits() {
+    let (_dir, store) = store_with(gzip("{\"id\":5,\"record\":{\"extra\":1,\"extra\":2,\"memberships\":[],\"roles\":[{\"unknown_nested\":1}]}}\n")).await;
+    store
+        .put(
+            "raw/organizations/part-00000.ndjson.gz",
+            gzip("{\"id\":1,\"record\":{\"extra_org\":{},\"addresses\":[],\"name\":\"A\"}}\n"),
+        )
+        .await
+        .unwrap();
+    run_stages(&store, "run-unknown", config(1), &OFFLINE)
+        .await
+        .unwrap();
+    let ctx = RunContext::new("run-unknown", store.clone()).unwrap();
+    for stage in [StageName::ExtractOrgs, StageName::ExtractPersons] {
+        let commits = CommitLog::new(store.clone(), ctx.layout.clone())
+            .list(stage)
+            .await
+            .unwrap();
+        let summary = StageSummary::from_commits(stage, &commits);
+        assert_eq!(summary.counters["fields_not_indexed"], 1);
+    }
+}

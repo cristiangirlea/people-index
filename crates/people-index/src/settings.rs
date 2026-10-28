@@ -21,6 +21,8 @@ pub struct Stores {
     pub runs: Store,
     /// The input store when separate (`PI_INPUT_URL`).
     pub inputs: Option<Store>,
+    /// Selected input delivery.
+    pub delivery: Option<String>,
 }
 
 impl Stores {
@@ -36,24 +38,50 @@ impl Stores {
                 Store::open(url, &options).with_context(|| format!("opening the inputs {url}"))
             })
             .transpose()?;
-        Ok(Self { runs, inputs })
+        input_root(args)?;
+        Ok(Self {
+            runs,
+            inputs,
+            delivery: args.delivery.clone(),
+        })
     }
 
     /// The layout of a run: inputs under `raw/` of the run store, or at the top of the input
     /// store when one is set.
     pub fn layout(&self, run_id: &str) -> anyhow::Result<RunLayout> {
         let layout = RunLayout::new(run_id)?;
-        Ok(if self.inputs.is_some() {
-            layout.with_input_root("")
-        } else {
-            layout
-        })
+        let root = input_root_parts(self.inputs.is_some(), self.delivery.as_deref())?;
+        Ok(layout.with_input_root(&root))
     }
 
     /// The context of a run, tied to `cancel`.
     pub fn context(&self, run_id: &str, cancel: CancellationToken) -> anyhow::Result<RunContext> {
         Ok(RunContext::with_layout(self.runs.clone(), self.layout(run_id)?).with_cancel(cancel))
     }
+}
+
+/// Validates the delivery and returns its input prefix without opening a store.
+pub fn input_root(args: &StoreArgs) -> anyhow::Result<String> {
+    input_root_parts(args.input_url.is_some(), args.delivery.as_deref())
+}
+
+fn input_root_parts(separate: bool, delivery: Option<&str>) -> anyhow::Result<String> {
+    if let Some(delivery) = delivery {
+        for segment in delivery.split('/') {
+            pi_store::validate_id("delivery segment", segment)?;
+            anyhow::ensure!(
+                !segment.eq_ignore_ascii_case("persons")
+                    && !segment.eq_ignore_ascii_case("organizations"),
+                "reserved delivery segment {segment:?}"
+            );
+        }
+    }
+    Ok(match (separate, delivery) {
+        (true, None) => String::new(),
+        (true, Some(d)) => d.to_owned(),
+        (false, None) => "raw".to_owned(),
+        (false, Some(d)) => format!("raw/{d}"),
+    })
 }
 
 /// S3 options from the arguments; credentials and region come from the `AWS_*` variables.
@@ -103,6 +131,8 @@ pub fn stages_config(
         .map_err(|e| anyhow::anyhow!("PI_PUBLISH_HEALTH: {e}"))?;
     let config = StagesConfig {
         alias: pipeline.alias.clone(),
+        delivery: stores.delivery.clone(),
+        require_complete_marker: pipeline.require_complete_marker,
         partition_target_bytes: pipeline.partition_target_bytes,
         min_partitions: pipeline.min_partitions,
         max_malformed: pipeline.max_malformed,
@@ -240,6 +270,49 @@ mod tests {
         let args = run_args(&["--store-url", "memory://", "--input-url", "memory://"]);
         let stores = Stores::open(&args.store).unwrap();
         assert_eq!(stores.layout("r1").unwrap().raw_persons(), "persons");
+    }
+
+    #[test]
+    fn delivery_validation_and_layout() {
+        for bad in [
+            "..",
+            ".",
+            "",
+            "/a",
+            "a/",
+            "a//b",
+            "a\\b",
+            "persons",
+            "organizations",
+            "a/persons/b",
+            "a/organizations",
+            "Persons",
+            "a/ORGANIZATIONS/b",
+        ] {
+            assert!(input_root_parts(false, Some(bad)).is_err(), "{bad:?}");
+        }
+        for (separate, expected) in [(false, "raw/a/b/persons"), (true, "a/b/persons")] {
+            let args = if separate {
+                run_args(&[
+                    "--store-url",
+                    "memory://",
+                    "--input-url",
+                    "memory://",
+                    "--delivery",
+                    "a/b",
+                ])
+            } else {
+                run_args(&["--store-url", "memory://", "--delivery", "a/b"])
+            };
+            assert_eq!(
+                Stores::open(&args.store)
+                    .unwrap()
+                    .layout("r1")
+                    .unwrap()
+                    .raw_persons(),
+                expected
+            );
+        }
     }
 
     #[test]

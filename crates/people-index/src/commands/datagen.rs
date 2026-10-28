@@ -34,16 +34,21 @@ pub fn gen_config(args: &DatagenArgs) -> anyhow::Result<GenConfig> {
     Ok(cfg)
 }
 
-/// Where the output goes: `--out`, else the input prefix, else `<store>/raw`.
+/// Where the output goes: `--out`, else the input prefix including the selected delivery.
 pub fn destination(args: &DatagenArgs) -> anyhow::Result<(Store, String)> {
     let options = store_options(&args.store);
-    if let Some(url) = args.out.as_deref().or(args.store.input_url.as_deref()) {
+    if let Some(url) = args.out.as_deref() {
         let store = Store::open(url, &options).with_context(|| format!("opening {url}"))?;
         return Ok((store, String::new()));
     }
-    let store = Store::open(&args.store.store_url, &options)
-        .with_context(|| format!("opening {}", args.store.store_url))?;
-    Ok((store, "raw".to_owned()))
+    let prefix = crate::settings::input_root(&args.store)?;
+    let url = args
+        .store
+        .input_url
+        .as_deref()
+        .unwrap_or(&args.store.store_url);
+    let store = Store::open(url, &options).with_context(|| format!("opening {url}"))?;
+    Ok((store, prefix))
 }
 
 /// Generates the feeds and returns the expected counts.
@@ -72,4 +77,79 @@ pub async fn run(args: DatagenArgs) -> anyhow::Result<Expected> {
         "generated"
     );
     Ok(expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn delivery_destination_uses_only_the_selected_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("unopened-run-store");
+        let run = missing.to_str().unwrap();
+        for separate in [true, false] {
+            let mut argv = vec![
+                "people-index",
+                "datagen",
+                "--store-url",
+                run,
+                "--delivery",
+                "a/b",
+            ];
+            if separate {
+                argv.extend(["--input-url", "memory://"]);
+            }
+            let Command::Datagen(parsed) = Cli::try_parse_from(argv).unwrap().command else {
+                panic!("datagen")
+            };
+            let (_, prefix) = destination(&parsed).unwrap();
+            assert_eq!(prefix, if separate { "a/b" } else { "raw/a/b" });
+            if separate {
+                assert!(!missing.exists());
+            }
+        }
+    }
+    #[test]
+    fn destinations_without_delivery_and_with_explicit_out() {
+        for (args, expected) in [
+            (
+                vec!["people-index", "datagen", "--store-url", "memory://"],
+                "raw",
+            ),
+            (
+                vec![
+                    "people-index",
+                    "datagen",
+                    "--store-url",
+                    "memory://",
+                    "--input-url",
+                    "memory://",
+                ],
+                "",
+            ),
+            (
+                vec![
+                    "people-index",
+                    "datagen",
+                    "--store-url",
+                    "memory://",
+                    "--delivery",
+                    "batch",
+                    "--out",
+                    "memory://",
+                ],
+                "",
+            ),
+        ] {
+            let Command::Datagen(parsed) = Cli::try_parse_from(args).unwrap().command else {
+                panic!("datagen")
+            };
+            let (store, prefix) = destination(&parsed).unwrap();
+            assert_eq!(prefix, expected);
+            assert_eq!(store.url(), "memory://");
+        }
+    }
 }

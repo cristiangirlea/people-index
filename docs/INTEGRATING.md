@@ -309,8 +309,9 @@ the run and is deleted once a newer run has published.
   `PI_RETAIN_RUNS` (3) is removed; plans, summaries, quarantine and the inputs stay. Do not put a
   lifecycle rule on `runs/` ([Sizing, Run store](OPERATIONS.md#sizing)).
 - **Backups and restore**: the snapshots component snapshots `persons*` nightly into its own
-  bucket ([Snapshot storage](OPERATIONS.md#snapshot-storage)); a restore is Elasticsearch's
-  snapshot restore and has no runbook here yet (#64). Because deliveries are immutable and kept, the
+  bucket ([Snapshot storage](OPERATIONS.md#snapshot-storage)). Restoring an index and moving the
+  alias back to it follows [Rollback and restore](OPERATIONS.md#rollback-and-restore); the compose
+  end-to-end run exercises those steps with a drill. Because deliveries are immutable and kept, the
   index can also be rebuilt by a new run, which is also how to go back to an earlier delivery:
   a new run with `PI_DELIVERY` set to it (lower `PI_PUBLISH_MIN_SHARE` if that delivery is much
   smaller).

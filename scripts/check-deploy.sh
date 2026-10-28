@@ -276,6 +276,27 @@ for dir in base "${overlays[@]}"; do
   step "kustomize $dir"
   kustomize_build "$work/k8s/$dir" >"$work/rendered.yaml" || fail "kustomize failed for deploy/k8s/$dir"
   validate <"$work/rendered.yaml" || fail "deploy/k8s/$dir does not validate"
+  # Kustomize emits nodeSets as a block sequence. Require the guard in each set of
+  # every Elasticsearch resource, including overlays that replace or add a node set.
+  awk '
+    function finish_set() { if (in_set && !guard) bad = 1; in_set = 0 }
+    function finish_resource() {
+      finish_set()
+      if (es && sets == 0) bad = 1
+    }
+    /^---/ { finish_resource(); es = 0; nodes = 0; sets = 0 }
+    /^kind: Elasticsearch$/ { es = 1; resources++ }
+    es && /^  nodeSets:$/ { nodes = 1; next }
+    es && nodes && /^  [^ -]/ { finish_set(); nodes = 0 }
+    es && nodes && /^  - / { finish_set(); in_set = 1; guard = 0; sets++ }
+    es && nodes && in_set && /^      action\.auto_create_index: / {
+      value = $0; sub(/^      action\.auto_create_index: /, "", value)
+      gsub(/["\047]/, "", value)
+      if (value == "-persons-*,+*") guard = 1
+    }
+    END { finish_resource(); if (!resources || bad) exit 1 }
+  ' "$work/rendered.yaml" ||
+    fail "deploy/k8s/$dir: every Elasticsearch node set must set action.auto_create_index to -persons-*,+*"
   while read -r ref; do
     check_ref "deploy/k8s/$dir" "$ref"
     # Dependabot bumps compose and the manifests in separate pull requests; keep them equal.
@@ -369,6 +390,24 @@ if [[ -f "$compose" ]]; then
   command -v docker >/dev/null 2>&1 || fail "$compose exists but docker is not installed"
   step "docker compose config"
   docker compose -f "$compose" config -q || fail "$compose does not validate"
+  docker compose -f "$compose" config --format json >"$work/compose.json" ||
+    fail "$compose could not render JSON"
+  if command -v python3 >/dev/null 2>&1; then python=python3; else python=python; fi
+  "$python" - "$work/compose.json" <<'PY' ||
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    services = json.load(source)["services"]
+alias = services["coordinator"]["environment"]["PI_ALIAS"]
+expected = f"-{alias}-*,+*"
+for name in ("es01", "es02", "es03"):
+    actual = services.get(name, {}).get("environment", {}).get("action.auto_create_index")
+    if actual != expected:
+        print(f"check-deploy: compose {name} action.auto_create_index must be {expected!r}, got {actual!r}", file=sys.stderr)
+        sys.exit(1)
+PY
+    fail "compose Elasticsearch auto-creation guard is missing or incorrect"
 fi
 
 step "ok"

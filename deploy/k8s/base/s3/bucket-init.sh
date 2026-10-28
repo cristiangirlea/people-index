@@ -1,5 +1,5 @@
 #!/bin/sh
-# Creates the pipeline's bucket in the in-cluster S3 store, then proves the credentials can
+# Creates a bucket in the in-cluster S3 store, then proves the credentials can
 # reach it. Safe to run any number of times: 200 (created) and 409 (already there) both pass,
 # and the HEAD afterwards is what decides success.
 #

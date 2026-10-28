@@ -1,0 +1,13 @@
+# Replace with a bucket you own before deployment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: snapshot-bootstrap
+spec:
+  template:
+    spec:
+      containers:
+        - name: bootstrap
+          env:
+            - name: SNAPSHOT_BUCKET
+              value: replace-with-your-snapshot-bucket

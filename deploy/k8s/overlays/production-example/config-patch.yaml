@@ -2,7 +2,7 @@
 # so the same patch works for any S3-compatible provider. The bucket must exist already and
 # support conditional writes (If-None-Match / If-Match on PUT; AWS S3 does). A lifecycle rule
 # expiring `runs/` after a few days keeps old run intermediates from piling up; leave `raw/`
-# and `snapshots/` out of it.
+# out of it. Snapshots use a separate bucket.
 apiVersion: v1
 kind: ConfigMap
 metadata:

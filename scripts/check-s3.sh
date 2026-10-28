@@ -18,6 +18,8 @@ cd "$root"
 export S3_PORT="${S3_TEST_PORT:-18333}"
 export S3_ACCESS_KEY_ID=people-index-test
 export S3_SECRET_ACCESS_KEY=people-index-test-secret
+export SNAPSHOT_S3_ACCESS_KEY_ID=snapshots-test
+export SNAPSHOT_S3_SECRET_ACCESS_KEY=snapshots-test-secret
 project="${S3_TEST_PROJECT:-people-index-s3-test-$$}"
 compose=(docker compose -p "$project" -f deploy/compose/compose.yaml)
 

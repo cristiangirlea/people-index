@@ -17,6 +17,10 @@
 #   vm.max_map_count >= 1048576, set in the node image or by node tuning, not by a privileged
 #   init container.
 #
+# Snapshot bucket: patch SNAPSHOT_BUCKET on Job snapshot-bootstrap for your external bucket.
+# Provision it separately with versioning and object lock in governance mode (docs/OPERATIONS.md, Snapshot storage), and
+# grant only its snapshot identity access; this example does not provision storage.
+#
 # Credentials: the env files in secrets/ (git-ignored) feed the generators below. In a real
 # cluster prefer an operator-managed source (External Secrets, Sealed Secrets) that creates the
 # same Secret names, and IAM roles for service accounts instead of S3 keys where the cloud
@@ -82,6 +86,9 @@ secretGenerator:
   - name: s3-credentials
     envs:
       - secrets/s3.env
+  - name: snapshot-s3-credentials
+    envs:
+      - secrets/snapshot-s3.env
 
 patches:
   # No in-cluster object store: remove it, its bucket Job and the policies that admit traffic
@@ -171,3 +178,7 @@ patches:
       kind: Elasticsearch
       name: es
     path: elasticsearch-patch.yaml
+  - target:
+      kind: Job
+      name: snapshot-bootstrap
+    path: snapshot-bucket-patch.yaml

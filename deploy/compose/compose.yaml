@@ -6,8 +6,8 @@
 #   es-users     one-shot: waits for the formed cluster, creates the writer and reader roles and
 #                users pipeline and reader (the pipeline never uses the elastic superuser)
 #   s3           SeaweedFS S3 gateway on s3:8333 (conditional writes verified by s3-init)
-#   s3-init      one-shot: creates bucket people-index and proves the store returns 412 for a
-#                create-if-absent on an existing key and for a stale If-Match
+#   s3-init      one-shot: creates the pipeline and snapshot buckets, verifies isolation and
+#                proves conditional writes return 412 for existing keys and stale etags
 #   datagen      profile datagen: writes both feeds to s3://people-index/raw/
 #   coordinator  people-index run (PI_EXECUTOR=distributed)
 #   worker       people-index worker, `--scale worker=N`
@@ -70,6 +70,9 @@ x-es-node: &es-node
     timeout: 5s
     retries: 120
     start_period: 20s
+
+x-pipeline-bucket: &pipeline-bucket people-index
+x-snapshot-bucket: &snapshot-bucket people-index-snapshots
 
 x-pipeline-env: &pipeline-env
   PI_STORE_URL: s3://people-index/
@@ -208,17 +211,22 @@ services:
   s3:
     image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
     hostname: s3
-    # One process runs master, volume, filer and the S3 gateway; the image's entrypoint adds
-    # -dir=/data and drops to the seaweed user. AWS_* in the environment become the admin
-    # identity, so the gateway and the pipeline share one secret.
-    command: ["server", "-s3", "-s3.port=8333", "-ip.bind=0.0.0.0", "-metricsPort=9327"]
+    # Build an ephemeral gateway config with separate bucket-scoped identities.
+    user: "1000:1000"
+    tmpfs: ["/config:uid=1000,gid=1000,mode=0700"]
+    entrypoint: ["/bin/sh", "-c", "sh /scripts/identity-config.sh && exec /entrypoint.sh server -s3 -s3.config=/config/s3.json -s3.port=8333 -ip.bind=0.0.0.0 -metricsPort=9327"]
     environment:
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-people-index-dev}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
+      PIPELINE_BUCKET: *pipeline-bucket
+      SNAPSHOT_BUCKET: *snapshot-bucket
+      PIPELINE_KEY: ${S3_ACCESS_KEY_ID:-people-index-dev}
+      PIPELINE_SECRET: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
+      SNAPSHOT_KEY: ${SNAPSHOT_S3_ACCESS_KEY_ID:-snapshots-dev}
+      SNAPSHOT_SECRET: ${SNAPSHOT_S3_SECRET_ACCESS_KEY:-snapshots-dev-secret}
     ports:
       - "127.0.0.1:${S3_PORT:-8333}:8333"
     volumes:
       - s3-data:/data
+      - ./../k8s/base/s3/identity-config.sh:/scripts/identity-config.sh:ro
     restart: unless-stopped
     logging: *logging
     healthcheck:
@@ -235,7 +243,10 @@ services:
       s3: { condition: service_healthy }
     environment:
       S3_ENDPOINT: http://s3:8333
-      S3_BUCKET: people-index
+      S3_BUCKET: *pipeline-bucket
+      SNAPSHOT_BUCKET: *snapshot-bucket
+      SNAPSHOT_KEY: ${SNAPSHOT_S3_ACCESS_KEY_ID:-snapshots-dev}
+      SNAPSHOT_SECRET: ${SNAPSHOT_S3_SECRET_ACCESS_KEY:-snapshots-dev-secret}
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-people-index-dev}
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
       AWS_REGION: us-east-1

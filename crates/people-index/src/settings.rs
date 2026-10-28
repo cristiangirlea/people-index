@@ -129,6 +129,9 @@ pub fn stages_config(
             codec,
             wait_for,
             health_timeout: pipeline.health_timeout,
+            publish_min_share: pipeline.publish_min_share,
+            publish_max_unresolved: pipeline.publish_max_unresolved,
+            publish_allow_empty_organizations: pipeline.publish_allow_empty_organizations,
         },
     };
     config.validate()?;
@@ -214,9 +217,15 @@ mod tests {
             "1MiB",
             "--task-memory-bytes",
             "64MiB",
+            "--publish-min-share",
+            "0.7",
+            "--publish-max-unresolved",
+            "0.4",
         ]);
         let stores = Stores::open(&args.store).unwrap();
         let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
+        assert!((cfg.es.publish_min_share - 0.7).abs() < f64::EPSILON);
+        assert!((cfg.es.publish_max_unresolved - 0.4).abs() < f64::EPSILON);
         assert_eq!(cfg.alias, "people");
         assert_eq!(cfg.es.codec, pi_es::Codec::Default);
         assert_eq!(cfg.es.bulk.senders, 4);

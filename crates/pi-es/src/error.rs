@@ -82,6 +82,10 @@ pub enum EsError {
         actual: u64,
     },
 
+    /// A configured publish bound failed.
+    #[error("publish refused: {0}")]
+    PublishRefused(String),
+
     /// The cluster did not reach the wanted health in time.
     #[error("{target}: health {last} after waiting, wanted {wanted}")]
     HealthTimeout {

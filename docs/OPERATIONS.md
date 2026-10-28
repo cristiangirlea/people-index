@@ -315,7 +315,7 @@ being resumed.
 - `values_ignored_by_index` (extract stages, in `summary.json` and
   `pi_task_counter_total{counter="values_ignored_by_index"}`) counts the values of kept records
   that Elasticsearch skips under `ignore_malformed` (`"n/a"` in `followers`, `"yes"` in
-  `open_to_work`), following the rules Elasticsearch 9.5.5 was observed to apply (they and the
+  `open_to_work`), or above a keyword's `ignore_above` (a 600-character `skills` element), following the rules Elasticsearch 9.5.5 was observed to apply (they and the
   one known divergence are in [ARCHITECTURE.md](ARCHITECTURE.md#the-data)): the malformed
   values are not indexed and the field is listed in the document's `_ignored`; the record stays
   searchable by its other fields. An `exists` query on `_ignored` finds those documents; it
@@ -647,6 +647,14 @@ fit the field's type in the mapping:
 | `string`, `string_array` | any scalar or array of scalars | `text`, `keyword`, or `date` with `ignore_malformed: true` |
 | `object_array` | an array of objects: only the references field | `object` |
 
+Keyword fields with an index or doc values, including multi-fields, need an integer
+`ignore_above` at most 8191; keywords with `index: false` and `doc_values: false`, and fields inside disabled objects,
+are exempt. Elasticsearch measures UTF-16 code units (an emoji counts two); each unit takes
+at most three UTF-8 bytes, so 8191 units fit below Lucene's 32,766-byte limit. Values above
+the limit remain in `_source` and appear in `_ignored`. Extraction counts each input value
+once in `values_ignored_by_index`, even if several keyword fields ignore it; array elements
+count separately, before deduplication and assembly.
+
 Every `long`, `integer` and `date` field needs `ignore_malformed: true`, whatever its kind: an
 id above `i64::MAX` passes `number`, a value past `i32` fits no `integer`, and a `string` takes
 text no date format reads; without it Elasticsearch fails the document and the load with it.
@@ -757,6 +765,8 @@ when they disagree; the error lists every problem with its mapping path and both
   table with a kind its type takes (the table above), and every table entry is mapped; every
   `long`, `integer` and `date` field has `ignore_malformed: true`; a type without a rule here
   (`nested`, `float`, `wildcard`, ...) is refused;
+- every keyword with an index or doc values, including multi-fields, has integer `ignore_above` at most 8191;
+  keywords with `index: false` and `doc_values: false`, and fields inside disabled objects, are exempt;
 - every multi-field (under `"fields"`) takes what its field lets through: `text` and `keyword`
   always, `long`, `integer`, `date` and `boolean` with `ignore_malformed: true`, anything else
   only if it fits the field's kind;

@@ -105,8 +105,58 @@ impl FeedSchema {
         file.resolve()
     }
 
+    /// Resolve keyword limits once for extraction, leaving the schema's serialized form unchanged.
+    #[must_use]
+    pub fn with_keyword_limits(&self, mapping: &Value) -> Self {
+        fn field_at<'a>(mapping: &'a Value, path: &str) -> &'a Value {
+            path.split('.')
+                .fold(mapping, |node, part| &node["properties"][part])
+        }
+        fn limit(node: &Value) -> Option<usize> {
+            let own = (node["type"] == "keyword")
+                .then(|| {
+                    node["ignore_above"]
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                })
+                .flatten();
+            node["fields"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.values())
+                .filter_map(limit)
+                .chain(own)
+                .min()
+        }
+        fn apply(fields: &mut Cow<'static, [FieldShape]>, mapping: &Value, prefix: &str) {
+            for shape in fields.to_mut() {
+                let path = format!("{prefix}{}", shape.name);
+                let node = field_at(mapping, &path);
+                let targets: Vec<&str> = match &node["copy_to"] {
+                    Value::String(s) => vec![s],
+                    Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+                    _ => Vec::new(),
+                };
+                shape.keyword_limit = targets
+                    .into_iter()
+                    .filter_map(|p| limit(field_at(mapping, p)))
+                    .chain(limit(node))
+                    .min();
+            }
+        }
+        let mut result = self.clone();
+        apply(&mut result.person_fields, mapping, "");
+        apply(
+            &mut result.reference_fields,
+            mapping,
+            &format!("{}.", self.references),
+        );
+        apply(&mut result.organization_fields, mapping, "organizations.");
+        result
+    }
+
     /// The schema as a complete schema file (every key present), the canonical form the plan
-    /// pins by its digest. [`FeedSchema::from_json`] reads it back to an equal schema.
+    /// pins by its digest. Resolved keyword limits are omitted and must be resolved again from the mapping.
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({

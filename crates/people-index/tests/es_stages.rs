@@ -206,24 +206,41 @@ async fn load_with_a_buffer_smaller_than_one_document_sends_every_document() {
     assert_eq!(acknowledged, docs);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
     reason = "one mock per cluster call, in request order"
 )]
-async fn prepare_and_publish_against_a_mock_cluster() {
+async fn prepare_and_publish_against_a_mock_cluster(corrupt: bool) {
     let data = generate(small_config()).await;
     let mut delivery_config = config(2);
     delivery_config.delivery = Some("batch".into());
-    run_stages(&data.store, "run-p", delivery_config, &OFFLINE)
+    run_stages(&data.store, "20261028-120000", delivery_config, &OFFLINE)
         .await
         .unwrap();
-    let ctx = RunContext::new("run-p", data.store.clone()).unwrap();
+    let ctx = RunContext::new("20261028-120000", data.store.clone()).unwrap();
     let plan = Plan::load(&ctx).await.unwrap();
     let index = plan.index.clone();
-    assert_eq!(index, "persons-run-p");
+    assert_eq!(index, "persons-20261028-120000");
     let documents = data.expected.persons;
 
+    let old = pi_store::RunLayout::new("20261020-120000").unwrap();
+    let old_data = format!("{}/segment", old.data_dir("join").unwrap());
+    data.store.put(&old_data, "data").await.unwrap();
+    data.store
+        .put(&old.publish_record(), "record")
+        .await
+        .unwrap();
+    let mut state = pi_coord::RunState::new(old.run_id());
+    state.status = pi_coord::RunStatus::Published;
+    state.save(&data.store, &old).await.unwrap();
+    if corrupt {
+        let bad = pi_store::RunLayout::new("20261019-120000").unwrap();
+        data.store
+            .put(&bad.publish_record(), "record")
+            .await
+            .unwrap();
+        data.store.put(&bad.state(), "invalid").await.unwrap();
+    }
     let server = MockServer::start().await;
     mount_previous_count(&server).await;
     Mock::given(method("HEAD"))
@@ -310,10 +327,12 @@ async fn prepare_and_publish_against_a_mock_cluster() {
         .mount(&server)
         .await;
 
+    let mut cfg = es_config(&server, config(2));
+    cfg.es.retain_runs = 1;
     let reports = run_stages(
         &data.store,
-        "run-p",
-        es_config(&server, config(2)),
+        "20261028-120000",
+        cfg,
         &[StageName::PrepareIndex, StageName::Load, StageName::Publish],
     )
     .await
@@ -340,6 +359,8 @@ async fn prepare_and_publish_against_a_mock_cluster() {
         .unwrap()
         .0;
     assert_eq!(summary.delivery.as_deref(), Some("batch"));
+    assert_eq!(summary.retention_failures, u64::from(corrupt));
+    assert!(data.store.get_opt(&old_data).await.unwrap().is_none());
     for stage in [StageName::ExtractOrgs, StageName::ExtractPersons] {
         let commits = pi_coord::CommitLog::new(data.store.clone(), ctx.layout.clone())
             .list(stage)
@@ -380,6 +401,16 @@ async fn prepare_and_publish_against_a_mock_cluster() {
         assert_eq!(extract.counters.get("values_ignored_by_index"), Some(&0));
     }
     assert_eq!(reports[2].counter("documents"), documents);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publish_cleans_old_data() {
+    prepare_and_publish_against_a_mock_cluster(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publish_continues_after_corrupt_old_state() {
+    prepare_and_publish_against_a_mock_cluster(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

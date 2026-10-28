@@ -2,13 +2,16 @@
 //! serves in `publish.json`, moves the alias, deletes those indexes, writes `summary.json` and
 //! removes the files of attempts that never committed.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use pi_coord::{AttemptId, CommitLog, RunContext, Stage, StageName, TaskReport, TaskSpec};
+use pi_coord::{
+    AttemptId, CommitLog, Lease, RunContext, RunState, RunStatus, Stage, StageName, TaskReport,
+    TaskSpec,
+};
 use pi_es::{EsClient, EsError, IndexAdmin, PublishSpec, Publisher, ServingSettings};
+use pi_store::RunLayout;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::time::Instant;
@@ -171,6 +174,121 @@ pub async fn delete_orphans(ctx: &RunContext) -> anyhow::Result<(u64, u64)> {
     Ok((deleted, results.len() as u64 - deleted))
 }
 
+/// Returns the layout if the run has a publish record and published state.
+async fn published_layout(ctx: &RunContext, id: &str) -> anyhow::Result<Option<RunLayout>> {
+    let layout = RunLayout::new(id)?;
+    if ctx.store.get_opt(&layout.publish_record()).await?.is_none() {
+        return Ok(None);
+    }
+    Ok(RunState::load(&ctx.store, &layout)
+        .await?
+        .filter(|s| s.status == RunStatus::Published)
+        .map(|_| layout))
+}
+
+async fn clean_run(
+    ctx: &RunContext,
+    layout: &RunLayout,
+    skew: std::time::Duration,
+) -> anyhow::Result<u64> {
+    let mut keys = Vec::new();
+    for stage in DATA_STAGES {
+        keys.extend(
+            ctx.store
+                .list_keys(&layout.data_dir(stage.as_str())?)
+                .await?,
+        );
+    }
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    for stage in StageName::ALL {
+        for key in ctx
+            .store
+            .list_keys(&layout.leases_dir(stage.as_str())?)
+            .await?
+        {
+            match ctx.store.get_json::<Lease>(&key).await? {
+                Some((lease, _)) if lease.is_expired(OffsetDateTime::now_utc(), skew) => {}
+                _ => return Ok(0),
+            }
+        }
+    }
+    let failures = futures::stream::iter(keys)
+        .map(|key| {
+            let store = ctx.store.clone();
+            async move {
+                if let Err(e) = store.delete(&key).await {
+                    tracing::warn!(%key, error = %e, "segment delete failed");
+                    1u64
+                } else {
+                    0
+                }
+            }
+        })
+        .buffer_unordered(DELETE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    Ok(failures.into_iter().sum())
+}
+
+/// Remove only stage data from older, completed stamped runs. Conservatively leave runs with
+/// missing state or a live lease alone. The current run is always counted and never touched.
+async fn retain_segments(
+    ctx: &RunContext,
+    retain: usize,
+    skew: std::time::Duration,
+) -> anyhow::Result<u64> {
+    if retain == 0 {
+        return Ok(0);
+    }
+    let stamp = |id: &str| pi_es::run_stamp("run", &format!("run-{id}"));
+    let Some(current_stamp) = stamp(ctx.layout.run_id()) else {
+        tracing::info!(run = %ctx.layout.run_id(), "segment retention skipped: run id has no stamp");
+        return Ok(0);
+    };
+    let mut failures = 0;
+    let mut runs = Vec::new();
+    for dir in ctx.store.list_prefixes(RunLayout::runs_root()).await? {
+        let Some(id) = RunLayout::run_id_from_dir(&dir) else {
+            continue;
+        };
+        if id == ctx.layout.run_id() {
+            continue;
+        }
+        let Some(date) = stamp(id) else {
+            continue;
+        };
+        match published_layout(ctx, id).await {
+            Ok(Some(layout)) => runs.push((date, layout)),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(run = %id, error = %e, "segment retention could not inspect run");
+                failures += 1;
+            }
+        }
+    }
+    runs.push((current_stamp.clone(), ctx.layout.clone()));
+    runs.sort_by(|a, b| b.0.cmp(&a.0));
+    let boundary = runs.get(retain.saturating_sub(1)).map(|r| r.0.clone());
+    for (date, layout) in runs {
+        if layout.run_id() == ctx.layout.run_id()
+            || date >= current_stamp
+            || boundary.as_ref().is_none_or(|b| date >= *b)
+        {
+            continue;
+        }
+        match clean_run(ctx, &layout, skew).await {
+            Ok(n) => failures += n,
+            Err(e) => {
+                tracing::warn!(run = %layout.run_id(), error = %e, "segment retention could not clean run");
+                failures += 1;
+            }
+        }
+    }
+    Ok(failures)
+}
+
 #[async_trait]
 impl Stage for PublishStage {
     fn name(&self) -> StageName {
@@ -184,6 +302,10 @@ impl Stage for PublishStage {
     /// Idempotent: publishing an index the alias already points at changes nothing, an attempt
     /// that resumes after the alias moved still deletes the indexes `publish.json` recorded,
     /// and the summary is rewritten with the same content (and a later `finished_at`).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "publish builds the complete run summary"
+    )]
     async fn run(
         &self,
         ctx: &RunContext,
@@ -240,6 +362,14 @@ impl Stage for PublishStage {
 
         let (orphans_deleted, orphans_left) = delete_orphans(ctx).await?;
 
+        let retention_failures =
+            match retain_segments(ctx, es.retain_runs, es.lease_clock_skew).await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "segment retention cleanup failed");
+                    1
+                }
+            };
         let finished_at = OffsetDateTime::now_utc();
         let mut own = StageSummary::from_commits(StageName::Publish, &[]);
         own.tasks = 1;
@@ -275,6 +405,7 @@ impl Stage for PublishStage {
             },
             orphans_deleted,
             orphans_left,
+            retention_failures,
         };
         let key = ctx.layout.summary();
         ctx.store.put_json(&key, &summary).await?;
@@ -288,6 +419,7 @@ impl Stage for PublishStage {
         report.add("deleted_indexes", published.deleted.len() as u64);
         report.add("orphans_deleted", orphans_deleted);
         report.add("orphans_left", orphans_left);
+        report.add("retention_failures", retention_failures);
         Ok(report)
     }
 }
@@ -297,6 +429,313 @@ mod tests {
     use pi_store::Store;
 
     use super::*;
+
+    async fn retention_scenario(store: Store) {
+        let current = "20261028T120000Z-current";
+        let ctx = RunContext::new(current, store.clone()).unwrap();
+        let ids = [
+            "20261024-120000",
+            "20261025-120000",
+            "20261026-120000",
+            "20261027-120000",
+            current,
+            "20261023-120000",
+            "manual",
+        ];
+        for id in ids {
+            let layout = RunLayout::new(id).unwrap();
+            for stage in DATA_STAGES {
+                let key = format!("{}/segment.seg", layout.data_dir(stage.as_str()).unwrap());
+                store.put(&key, "data").await.unwrap();
+            }
+            for key in [
+                layout.plan(),
+                layout.summary(),
+                layout.publish_record(),
+                layout.quarantine("task", "attempt").unwrap(),
+            ] {
+                store.put(&key, "history").await.unwrap();
+            }
+            let mut state = RunState::new(id);
+            state.status = if id == "20261023-120000" {
+                RunStatus::Running
+            } else {
+                RunStatus::Published
+            };
+            state.save(&store, &layout).await.unwrap();
+        }
+        retain_segments(&ctx, 0, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        let old = RunLayout::new(ids[0]).unwrap();
+        assert_eq!(
+            store
+                .list_keys(&old.data_dir("join").unwrap())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        retain_segments(&ctx, 3, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            let layout = RunLayout::new(*id).unwrap();
+            for stage in DATA_STAGES {
+                assert_eq!(
+                    store
+                        .list_keys(&layout.data_dir(stage.as_str()).unwrap())
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    i < 2,
+                    "{id}"
+                );
+            }
+            for key in [
+                layout.plan(),
+                layout.summary(),
+                layout.publish_record(),
+                layout.quarantine("task", "attempt").unwrap(),
+                layout.state(),
+            ] {
+                assert!(store.get_opt(&key).await.unwrap().is_some(), "{key}");
+            }
+        }
+        retain_segments(&ctx, 3, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .list_keys(&old.data_dir("join").unwrap())
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_leaves_unpublished_and_live_leases() {
+        let store = Store::memory();
+        let ctx = RunContext::new("20261028-120000", store.clone()).unwrap();
+        for id in ["20261020-120000", "20261021-120000"] {
+            let layout = RunLayout::new(id).unwrap();
+            store
+                .put(
+                    &format!("{}/segment", layout.data_dir("join").unwrap()),
+                    "data",
+                )
+                .await
+                .unwrap();
+            let mut state = RunState::new(id);
+            state.status = RunStatus::Published;
+            state.save(&store, &layout).await.unwrap();
+            if id.contains("21") {
+                store.put(&layout.publish_record(), "record").await.unwrap();
+                let now = OffsetDateTime::now_utc();
+                let lease = Lease {
+                    worker: "w".into(),
+                    holder: "h".into(),
+                    acquired_at: now,
+                    expires_at: now + time::Duration::minutes(10),
+                    renewals: 0,
+                    released: false,
+                };
+                store
+                    .put_json(&layout.lease("join", "task").unwrap(), &lease)
+                    .await
+                    .unwrap();
+            }
+        }
+        retain_segments(&ctx, 1, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        for id in ["20261020-120000", "20261021-120000"] {
+            let layout = RunLayout::new(id).unwrap();
+            assert_eq!(
+                store
+                    .list_keys(&layout.data_dir("join").unwrap())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_respects_quarantine_commits() {
+        let ctx = RunContext::new("test", Store::memory()).unwrap();
+        let kept = ctx.layout.quarantine("task", "kept").unwrap();
+        let orphan = ctx.layout.quarantine("task", "orphan").unwrap();
+        ctx.store.put(&kept, "kept").await.unwrap();
+        ctx.store.put(&orphan, "orphan").await.unwrap();
+        let record = pi_coord::CommitRecord {
+            stage: StageName::Assemble,
+            task_id: "task".into(),
+            attempt: AttemptId::new(),
+            worker: "test".into(),
+            committed_at: OffsetDateTime::now_utc(),
+            report: TaskReport {
+                outputs: vec![kept.clone()],
+                ..TaskReport::default()
+            },
+        };
+        CommitLog::new(ctx.store.clone(), ctx.layout.clone())
+            .commit(&record)
+            .await
+            .unwrap();
+        assert_eq!(delete_orphans(&ctx).await.unwrap(), (1, 0));
+        assert!(ctx.store.get_opt(&kept).await.unwrap().is_some());
+        assert!(ctx.store.get_opt(&orphan).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario checks boundaries, leases and retained history"
+    )]
+    async fn retention_boundaries_leases_and_history() {
+        let store = Store::memory();
+        let ctx = RunContext::new("20261028-120000", store.clone()).unwrap();
+        let ids = [
+            "20261029-120000",
+            "20261026-120000",
+            "20261026T120000Z-x",
+            "20261025-120000",
+            "20261024-120000",
+            "20261023-120000",
+        ];
+        for id in ids {
+            let layout = RunLayout::new(id).unwrap();
+            store
+                .put(
+                    &format!("{}/segment", layout.data_dir("join").unwrap()),
+                    "data",
+                )
+                .await
+                .unwrap();
+            store.put(&layout.publish_record(), "record").await.unwrap();
+            let mut state = RunState::new(id);
+            state.status = if id.contains("23-") {
+                RunStatus::Failed
+            } else {
+                RunStatus::Published
+            };
+            state.save(&store, &layout).await.unwrap();
+            for key in [
+                layout.plan(),
+                layout.summary(),
+                layout.quarantine("task", "attempt").unwrap(),
+                layout.commit("join", "task").unwrap(),
+                layout.stage_spec("join").unwrap(),
+            ] {
+                store.put(&key, "history").await.unwrap();
+            }
+            if id.contains("24-") || id.contains("25-") {
+                let now = OffsetDateTime::now_utc();
+                let lease = Lease {
+                    worker: "w".into(),
+                    holder: "h".into(),
+                    acquired_at: now,
+                    expires_at: if id.contains("24-") {
+                        now - time::Duration::minutes(1)
+                    } else {
+                        now + time::Duration::minutes(1)
+                    },
+                    renewals: 0,
+                    released: id.contains("25-"),
+                };
+                store
+                    .put_json(&layout.lease("join", "task").unwrap(), &lease)
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            retain_segments(&ctx, 3, std::time::Duration::from_secs(5))
+                .await
+                .unwrap(),
+            0
+        );
+        for (i, id) in ids.iter().enumerate() {
+            let layout = RunLayout::new(*id).unwrap();
+            assert_eq!(
+                store
+                    .list_keys(&layout.data_dir("join").unwrap())
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                i == 3 || i == 4,
+                "{id}"
+            );
+            for key in [
+                layout.plan(),
+                layout.summary(),
+                layout.publish_record(),
+                layout.state(),
+                layout.quarantine("task", "attempt").unwrap(),
+                layout.commit("join", "task").unwrap(),
+                layout.stage_spec("join").unwrap(),
+            ] {
+                assert!(store.get_opt(&key).await.unwrap().is_some(), "{key}");
+            }
+            if i == 3 || i == 4 {
+                assert!(
+                    store
+                        .get_opt(&layout.lease("join", "task").unwrap())
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+            }
+        }
+        let manual = RunContext::new("manual", store.clone()).unwrap();
+        let before = store.list_keys(RunLayout::runs_root()).await.unwrap();
+        assert_eq!(
+            retain_segments(&manual, 1, std::time::Duration::ZERO)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            before,
+            store.list_keys(RunLayout::runs_root()).await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_keeps_data_with_unreadable_lease() {
+        let store = Store::memory();
+        let ctx = RunContext::new("20261028T120000Z-current", store.clone()).unwrap();
+        let old = RunLayout::new("20261024T120000Z-old").unwrap();
+        let data = format!("{}/segment", old.data_dir("join").unwrap());
+        store.put(&data, "data").await.unwrap();
+        store.put(&old.publish_record(), "record").await.unwrap();
+        let mut state = RunState::new(old.run_id());
+        state.status = RunStatus::Published;
+        state.save(&store, &old).await.unwrap();
+        store
+            .put(&old.lease("join", "task").unwrap(), "invalid json")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            retain_segments(&ctx, 1, std::time::Duration::ZERO)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store.get_opt(&data).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn retention_on_memory_and_local_stores() {
+        retention_scenario(Store::memory()).await;
+        let dir = tempfile::tempdir().unwrap();
+        retention_scenario(Store::local(dir.path()).unwrap()).await;
+    }
 
     #[test]
     fn feed_bounds_apply_even_on_first_publish() {

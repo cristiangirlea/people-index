@@ -266,8 +266,15 @@ once the previous one has committed every task:
   before recording or moving anything, so a run resumed after a newer one published (whose index may have been deleted) never takes the alias back. Runs of one alias
   must not publish at the same moment: between the listing and the delete, a concurrent publish
   could move the alias onto the index being deleted.
-  Publish then writes `summary.json` and deletes orphaned files (data and quarantine files no
-  commit lists).
+  Publish removes orphaned data and quarantine files no commit lists and writes `summary.json`.
+
+  After a successful alias swap, publish removes stage data for completed stamped runs older than
+  the newest `PI_RETAIN_RUNS` published runs (default 3, including the current run; 0 disables
+  cleanup). Equal boundary stamps, unstamped runs, the current run, and runs with live leases or
+  without published state are left alone. Only stage data directories are removed; plans, state,
+  commits, leases, stage specs, publish records, summaries and quarantine remain. A current run
+  without a stamp skips cleanup. Failed run inspections and failed deletes are logged and counted
+  as `retention_failures` in the summary; a later publish retries.
 
 ## Storage layout
 
@@ -326,7 +333,7 @@ the snapshots component stores them under `snapshots/`.
   documents, persons_per_second, input_bytes, stages: [{stage, tasks, wall_ms, task_ms,
   bytes_in, bytes_out, counters}], publish: {docs, previous_docs, resolved_roles, unresolved_roles, indexed_organizations,
   min_share, max_unresolved, allow_empty_organizations, previous, deleted, not_deleted},
-  orphans_deleted, orphans_left}`.
+  orphans_deleted, orphans_left, retention_failures}`.
 
 ### Segment files
 
@@ -468,6 +475,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_LOAD_BUFFER_BYTES` | decoded documents a load task holds waiting for the bulk indexer | 2 × `PI_BULK_MAX_BYTES` |
 | `PI_INDEX_SHARDS`, `PI_INDEX_REPLICAS`, `PI_INDEX_CODEC` | the index | 2 per data node, 1, `best_compression` |
 | `PI_PUBLISH_MIN_SHARE`, `PI_PUBLISH_MAX_UNRESOLVED`, `PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS` | minimum new/previous document share (0 disables), maximum unresolved role organization share (1 disables), allow zero indexed organizations | 0.9, 0.25, false |
+| `PI_RETAIN_RUNS` | published runs whose segment data is retained; 0 disables cleanup | 3 |
 | `PI_PUBLISH_HEALTH`, `PI_HEALTH_TIMEOUT` | health publish waits for | `green`, `30m` |
 | `PI_METRICS_ADDR` | Prometheus endpoint, `off` to disable | `0.0.0.0:9464` |
 | `PI_LOG_FORMAT` | `json` or `pretty` (filter with `RUST_LOG`) | `json` |

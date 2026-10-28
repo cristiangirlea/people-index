@@ -119,6 +119,7 @@ pub fn es_config(args: &EsArgs) -> anyhow::Result<EsConfig> {
 pub fn stages_config(
     pipeline: &PipelineArgs,
     es: &EsArgs,
+    exec: &crate::cli::ExecArgs,
     stores: &Stores,
 ) -> anyhow::Result<StagesConfig> {
     let codec = pipeline
@@ -159,6 +160,8 @@ pub fn stages_config(
             codec,
             wait_for,
             health_timeout: pipeline.health_timeout,
+            retain_runs: pipeline.retain_runs,
+            lease_clock_skew: pi_coord::LeaseConfig::new(exec.lease_ttl).clock_skew,
             publish_min_share: pipeline.publish_min_share,
             publish_max_unresolved: pipeline.publish_max_unresolved,
             publish_allow_empty_organizations: pipeline.publish_allow_empty_organizations,
@@ -247,15 +250,18 @@ mod tests {
             "1MiB",
             "--task-memory-bytes",
             "64MiB",
+            "--retain-runs",
+            "7",
             "--publish-min-share",
             "0.7",
             "--publish-max-unresolved",
             "0.4",
         ]);
         let stores = Stores::open(&args.store).unwrap();
-        let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
+        let cfg = stages_config(&args.pipeline, &args.es, &args.exec, &stores).unwrap();
         assert!((cfg.es.publish_min_share - 0.7).abs() < f64::EPSILON);
         assert!((cfg.es.publish_max_unresolved - 0.4).abs() < f64::EPSILON);
+        assert_eq!(cfg.es.retain_runs, 7);
         assert_eq!(cfg.alias, "people");
         assert_eq!(cfg.es.codec, pi_es::Codec::Default);
         assert_eq!(cfg.es.bulk.senders, 4);
@@ -263,6 +269,28 @@ mod tests {
         assert_eq!(cfg.task_memory_bytes, 64 << 20);
         assert!(cfg.input_store.is_none());
         assert_eq!(stores.layout("r1").unwrap().raw_persons(), "raw/persons");
+    }
+
+    #[test]
+    fn retain_runs_environment_reaches_stage_config() {
+        if std::env::var_os("PI_TEST_RETAIN_CHILD").is_some() {
+            let args = run_args(&["--store-url", "memory://"]);
+            let stores = Stores::open(&args.store).unwrap();
+            let cfg = stages_config(&args.pipeline, &args.es, &args.exec, &stores).unwrap();
+            assert_eq!(cfg.es.retain_runs, 7);
+        } else {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings::tests::retain_runs_environment_reaches_stage_config",
+                ])
+                .env("PI_TEST_RETAIN_CHILD", "1")
+                .env("PI_RETAIN_RUNS", "7")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
     }
 
     #[test]
@@ -334,18 +362,18 @@ mod tests {
     fn bad_codec_is_refused() {
         let args = run_args(&["--store-url", "memory://", "--index-codec", "zip"]);
         let stores = Stores::open(&args.store).unwrap();
-        assert!(stages_config(&args.pipeline, &args.es, &stores).is_err());
+        assert!(stages_config(&args.pipeline, &args.es, &args.exec, &stores).is_err());
     }
 
     #[test]
     fn the_load_buffer_defaults_to_twice_the_bulk_size() {
         let args = run_args(&["--store-url", "memory://", "--bulk-max-bytes", "1MiB"]);
         let stores = Stores::open(&args.store).unwrap();
-        let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
+        let cfg = stages_config(&args.pipeline, &args.es, &args.exec, &stores).unwrap();
         assert_eq!(cfg.load_buffer_bytes, None);
         assert_eq!(cfg.effective_load_buffer_bytes(), 2 << 20);
         let args = run_args(&["--store-url", "memory://", "--load-buffer-bytes", "0"]);
         let stores = Stores::open(&args.store).unwrap();
-        assert!(stages_config(&args.pipeline, &args.es, &stores).is_err());
+        assert!(stages_config(&args.pipeline, &args.es, &args.exec, &stores).is_err());
     }
 }

@@ -1,8 +1,8 @@
 # The external bucket. On AWS the regional endpoint could be left to the SDK; it is spelled out
 # so the same patch works for any S3-compatible provider. The bucket must exist already and
-# support conditional writes (If-None-Match / If-Match on PUT; AWS S3 does). A lifecycle rule
-# expiring `runs/` after a few days keeps old run intermediates from piling up; leave `raw/`
-# out of it. Snapshots use a separate bucket.
+# support conditional writes (If-None-Match / If-Match on PUT; AWS S3 does). Publish
+# cleans old segment data; do not expire runs/ because it contains run history (plans,
+# summaries, quarantine). Snapshots use a separate bucket.
 apiVersion: v1
 kind: ConfigMap
 metadata:

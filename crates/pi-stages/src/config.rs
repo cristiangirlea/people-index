@@ -49,6 +49,10 @@ pub struct EsStageConfig {
     pub wait_for: HealthStatus,
     /// How long `publish` waits for that health.
     pub health_timeout: Duration,
+    /// Number of published runs whose segments are retained; zero disables cleanup.
+    pub retain_runs: usize,
+    /// Clock skew allowance for retention lease checks.
+    pub lease_clock_skew: Duration,
     pub publish_min_share: f64,
     pub publish_max_unresolved: f64,
     pub publish_allow_empty_organizations: bool,
@@ -64,6 +68,8 @@ impl Default for EsStageConfig {
             codec: Codec::BestCompression,
             wait_for: HealthStatus::Green,
             health_timeout: Duration::from_secs(30 * 60),
+            retain_runs: 3,
+            lease_clock_skew: pi_coord::LeaseConfig::new(Duration::from_secs(60)).clock_skew,
             publish_min_share: 0.9,
             publish_max_unresolved: 0.25,
             publish_allow_empty_organizations: false,

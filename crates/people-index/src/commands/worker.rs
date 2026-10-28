@@ -25,6 +25,7 @@ pub async fn run(args: WorkerArgs, cancel: CancellationToken) -> anyhow::Result<
     let registry = Arc::new(pi_stages::build_registry(stages_config(
         &args.pipeline,
         &args.es,
+        &args.exec,
         &stores,
     )?)?);
     let coord = coordination(&args.exec);

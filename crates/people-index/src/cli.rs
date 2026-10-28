@@ -155,6 +155,9 @@ pub struct PipelineArgs {
     /// Cluster health publish waits for: green or yellow.
     #[arg(long, env = "PI_PUBLISH_HEALTH", default_value = "green")]
     pub publish_health: String,
+    /// Published runs whose segments are retained (0 disables cleanup).
+    #[arg(long, env = "PI_RETAIN_RUNS", default_value_t = 3)]
+    pub retain_runs: usize,
     /// Minimum share of the previous document count (0 disables).
     #[arg(long, env = "PI_PUBLISH_MIN_SHARE", default_value_t = 0.9)]
     pub publish_min_share: f64,

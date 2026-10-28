@@ -33,6 +33,7 @@ spec:
             - --es.timeout=30s
             - --es.all
             - --es.indices
+            - --es.indices_settings
             - --es.shards
             - --es.aliases
             - --collector.snapshots

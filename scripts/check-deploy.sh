@@ -17,7 +17,8 @@
 #     check;
 #   - deploy/k3d/cluster.yaml passes k3d's own config schema;
 #   - the shell scripts parse (and pass shellcheck when it is installed);
-#   - deploy/compose/compose.yaml, when present, passes `docker compose config -q`.
+#   - deploy/compose/compose.yaml, when present, passes `docker compose config -q`;
+#   - Prometheus alert rules pass promtool tests in a pinned container (requires Docker).
 #
 # Overlays are rendered from a temporary copy in which missing credential env files are filled
 # from their *.env.example, so the check never needs (or writes) real secrets.
@@ -370,6 +371,18 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
   step "shell scripts parse (shellcheck not installed; skipped)"
 fi
+
+# Test the actual PrometheusRule groups with the same pinned Prometheus image as compose.
+step "Prometheus rule unit tests"
+mkdir -p "$work/promtool"
+printf 'groups:\n' >"$work/promtool/rules.yaml"
+sed '1,/^  groups:/d; s/^    /  /' "$root/deploy/k8s/components/monitoring/prometheusrule.yaml" >>"$work/promtool/rules.yaml"
+cp "$root/deploy/k8s/components/monitoring/tests/rules.test.yaml" "$work/promtool/"
+prometheus_image="$(yaml_images <"$root/deploy/compose/compose.yaml" | grep '^prom/prometheus:')"
+promtool_dir="$work/promtool"
+if command -v cygpath >/dev/null 2>&1; then promtool_dir="$(cygpath -m "$promtool_dir")"; fi
+MSYS_NO_PATHCONV=1 docker run --rm --entrypoint promtool -v "$promtool_dir:/tests" "$prometheus_image" test rules /tests/rules.test.yaml ||
+  fail "Prometheus rule unit tests failed"
 
 # 7. Compose, when it exists.
 compose="$root/deploy/compose/compose.yaml"

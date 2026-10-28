@@ -240,7 +240,7 @@ What has not been done or measured yet, plainly:
 - **The shuffle copies organization bodies**: `join` emits one joined row per
   (person, organization) reference, each with the organization's record, so the `joined`
   data set grows with popular organizations (see [ADR 0002](docs/adr/0002-partitioned-hash-join.md)).
-- **No dashboards** for the pipeline metrics yet; alert rules cover Elasticsearch.
+- **No dashboards** for the pipeline metrics yet; alert rules cover Elasticsearch and the pipeline.
 - **Losing the object store** loses the run's intermediate state; the run starts over.
 
 ## License

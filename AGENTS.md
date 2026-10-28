@@ -65,8 +65,11 @@ the second publish replaces the first and the failed run's index is deleted). `m
 - One purpose per branch; larger work is a feature branch with branches merged into it.
   Something found on the way is fixed there only if the branch caused it or it blocks it;
   otherwise it becomes an issue and a branch of its own.
-- Blocking review findings are fixed with the smallest change; non-blocking ones become issues.
-  Merge the default branch in only for a conflict or once before merging.
+- Before pushing, fix every defect, security issue, broken house rule and missing test in code
+  the branch touches, whether blocking or not. Drop nits (wording, naming, style and "could
+  also" suggestions), or mention them in at most one line in the pull request. Only real work
+  outside the branch or something needing the owner's decision becomes an issue. Merge the
+  default branch in only for a conflict or once before merging.
 - Reviews are text, commits are changes: findings and the reason for a fix go into the review on
   the pull request. Before a commit exists, everything found goes into that one commit; after
   it, a new finding is one review entry and one more commit for all of it.

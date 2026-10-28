@@ -60,7 +60,9 @@ make compose-clean         # stop and delete every volume
 `make compose-e2e` (CI's end-to-end) starts with `make compose-datagen` and a run that must
 fail in `publish` (id a minute older than `RUN_ID`; `PI_INDEX_REPLICAS=3` on 3 data nodes never
 reaches green within `PI_HEALTH_TIMEOUT=10s`, `PI_TASK_ATTEMPTS=1`), which leaves its loaded
-index behind. Then `RUN_ID` runs and is verified, a second run (`RUN_ID` with `-2` appended)
+index behind. Then `RUN_ID` runs and is verified, the restore drill snapshots, loses and
+restores its index and the restored index is verified again
+([Rollback and restore](#rollback-and-restore)), a second run (`RUN_ID` with `-2` appended)
 over the same feeds is verified again in both modes (the summary one finds the second run
 from the alias), and `deploy/compose/scripts/check-republish.sh` checks:
 the failed run's index existed off the alias before the good runs, the alias points only at
@@ -80,7 +82,9 @@ waits until `certs`, `es-users` and `s3-init` have succeeded:
   volume.
 - `es-users` waits for a formed three-node cluster, then creates the writer and reader roles and users.
 - `s3-init` creates the pipeline and snapshot buckets and runs the conditional-write probe.
-  Compose provisions the snapshot identity but does not configure Elasticsearch snapshots.
+  Compose provisions the snapshot identity and gives Elasticsearch the S3 client settings for
+  it, but puts no keys in the keystore and registers no repository; `make compose-restore-drill`
+  does both for its run (see [Rollback and restore](#rollback-and-restore)).
 
 Configuration: copy `deploy/compose/.env.example` to `deploy/compose/.env` (git-ignored) and
 change what you need: passwords, published ports, heap and memory limits, worker shape, the
@@ -480,25 +484,36 @@ shards unassigned; free space, or for a throwaway dev stack set
 
 Things outside the model: losing the object store loses the run's intermediate state (inputs
 and stage outputs), so the run starts over; losing a majority of Elasticsearch masters stops the
-cluster until they return.
+cluster until they return. Rolling back a published index and recovering a lost cluster or
+bucket are in [Rollback and restore](#rollback-and-restore).
 
 ## CI
 
 `.github/workflows/ci.yml` runs on GitHub-hosted runners: `rust` (fmt, clippy with
 `-D warnings`, tests, all `--locked`), `msrv` (check at `rust-version`), `deploy`
 (`scripts/check-deploy.sh` and the scrub check), `lint` (actionlint, shellcheck, hadolint, the
-scrub-check, republish-check and pin-resolve tests, hooks and scripts stored as 100755), `image`
+scrub-check, republish-check, restore-drill, S3-endpoint and pin-resolve tests, hooks and scripts stored as 100755), `image`
 (docker build, no push), `audit` (cargo-deny: advisories, bans, licenses, sources; also weekly),
 `pins` weekly and on manual dispatch (`scripts/check-pins-resolve.sh`: every pinned image digest
 still exists in its registry, since a registry can delete one when a tag is re-pushed), and
 `e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
-`make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
-the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+`make compose-e2e` (a run that fails in publish, then two runs with the restore drill between
+them, so the second publish replaces a restored index and the failed run's index is deleted),
+logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
 
 ## Snapshot storage
 
-The Kubernetes snapshots component registers `people-index-snapshots` with the separate
-`snapshot-s3-credentials` Secret. Change `SNAPSHOT_BUCKET` in the bootstrap Job per overlay,
+The Kubernetes snapshots component registers the repository `people-index` on the bucket
+`people-index-snapshots` (prefix `snapshots/`) with the separate `snapshot-s3-credentials`
+Secret, and installs the SLM policy `nightly` (01:30 UTC, `persons*`, kept 14 days, at least 3
+and at most 30 snapshots). The S3 client endpoint carries its scheme (`http://s3:8333`; the
+production example `https://s3.eu-west-1.amazonaws.com`) instead of the `protocol` setting,
+which Elasticsearch 9 deprecates; `scripts/check-deploy.sh` refuses a rendered endpoint without
+a scheme or a `protocol` key (`scripts/check-s3-endpoints.py`, tested by
+`scripts/test-check-s3-endpoints.sh`). Applying that change to a running cluster changes every
+node set's config, so ECK restarts every Elasticsearch node, one at a time.
+
+Change `SNAPSHOT_BUCKET` in the bootstrap Job per overlay,
 and configure the corresponding identity and endpoint. For local SeaweedFS, also update the
 matching bucket environment variables in the SeaweedFS identity init and bucket-init Job (or compose);
 local keys must contain only letters, digits, underscores or hyphens. Local SeaweedFS scopes each identity
@@ -516,6 +531,260 @@ Follow [Elastic's S3 repository guidance](https://www.elastic.co/docs/deploy-man
 and grant the snapshot identity only the permissions Elasticsearch needs on that bucket. Do not grant the pipeline
 identity access to it. Provisioning and retention incur provider costs; the example does not
 create or enable them. Verify snapshot and restore behavior with the chosen retention policy.
+
+## Rollback and restore
+
+`publish` deletes the index the alias served before, so rolling back means restoring
+`persons-<run_id>` from a snapshot and moving the alias onto it. The nightly snapshot at 01:30
+UTC holds the index that was serving then; a run published later in the day is in no snapshot
+until the next night. Restoring needs nothing from the pipeline's store.
+`make compose-restore-drill` runs these steps against the compose stack (below).
+
+### Access
+
+```bash
+# Compose: the CA from make compose-ca, the elastic password from deploy/compose/.env if it
+# sets one, else compose.yaml's development default.
+make compose-ca
+set -a; if [ -f deploy/compose/.env ]; then . deploy/compose/.env; fi; set +a
+ES_ADMIN_PASSWORD="${ELASTIC_PASSWORD:-elastic-dev-password}"
+export ES_URL="https://localhost:${ES_PORT:-9200}" ES_CA=target/es-ca.crt
+# Kubernetes: ECK's self-signed certificate names the service (es-es-http), not localhost.
+kubectl --context <context> -n people-index port-forward svc/es-es-http 9200 &
+es_forward=$!   # stop it when done: kill "$es_forward"
+kubectl --context <context> -n people-index get secret es-es-http-certs-public \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > es-ca.crt
+export ES_URL=https://es-es-http:9200 ES_CA=es-ca.crt ES_RESOLVE=es-es-http:9200:127.0.0.1
+ES_ADMIN_PASSWORD="$(kubectl --context <context> -n people-index get secret es-es-elastic-user \
+  -o jsonpath='{.data.elastic}' | base64 -d)"
+
+# Every call below, as the elastic superuser; the password goes to curl on stdin.
+es() {
+  printf 'user = "elastic:%s"\n' "$ES_ADMIN_PASSWORD" |
+    curl -K - -sS --fail-with-body --cacert "$ES_CA" ${ES_RESOLVE:+--resolve "$ES_RESOLVE"} \
+      -H 'Content-Type: application/json' "$@"
+  echo
+}
+```
+
+On Kubernetes the snapshots component has registered the repository. On compose,
+Elasticsearch has the client settings for the snapshot bucket but no keys and no repository:
+put the snapshot identity's keys into every node's keystore (piped, never on a command line),
+reload them, and register the repository as the component does:
+
+```bash
+dc() { docker compose -f deploy/compose/compose.yaml "$@"; }
+for node in es01 es02 es03; do
+  dc exec -T s3 printenv SNAPSHOT_KEY |
+    dc exec -T "$node" bin/elasticsearch-keystore add --stdin --force s3.client.default.access_key
+  dc exec -T s3 printenv SNAPSHOT_SECRET |
+    dc exec -T "$node" bin/elasticsearch-keystore add --stdin --force s3.client.default.secret_key
+done
+es -X POST "$ES_URL/_nodes/reload_secure_settings"
+es -X PUT "$ES_URL/_snapshot/people-index" \
+  -d '{"type":"s3","settings":{"bucket":"people-index-snapshots","base_path":"snapshots","client":"default"}}'
+```
+
+The keystore lives in each container, so a recreated container needs the keys again.
+
+### Before you start
+
+1. Stop new runs. Suspend the schedule
+   (`kubectl --context <context> -n people-index patch cronjob pi-schedule -p '{"spec":{"suspend":true}}'`)
+   and keep it suspended until the cause of the rollback is fixed: the next run reads the same
+   feed (`raw/` or the configured `PI_DELIVERY`) and would publish it again.
+2. Let a running run finish, or stop it. A run that publishes during the restore moves the
+   alias, and its cleanup deletes any `persons-*` index that no alias points at and whose run
+   is older: the restored index, until step 4 below puts the alias on it. To stop a run on
+   Kubernetes, delete its Jobs (`kubectl --context <context> -n people-index delete job
+   pi-run-<run_id> pi-worker-<run_id>`, or the scheduled run's `pi-schedule-<n>`): a killed
+   coordinator pod is restarted by its Job and resumes. On compose,
+   `docker compose -f deploy/compose/compose.yaml stop coordinator worker`.
+   Then check that nothing holds the alias run lease: `_run-leases/persons.json` in the pipeline
+   bucket is absent, has `"released": true`, or an `expires_at` (plus a few seconds of clock
+   skew) in the past. The restore itself takes no lease.
+
+   ```bash
+   # compose
+   docker compose -f deploy/compose/compose.yaml run --rm --no-deps --entrypoint aws s3-init \
+     --endpoint-url http://s3:8333 s3 cp s3://people-index/_run-leases/persons.json -
+   # Kubernetes (the in-cluster store; elsewhere, the pipeline bucket with the pipeline identity)
+   kubectl --context <context> -n people-index port-forward svc/s3 8333 &
+   s3_forward=$!
+   AWS_ACCESS_KEY_ID="$(kubectl --context <context> -n people-index get secret s3-credentials \
+     -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d)" \
+   AWS_SECRET_ACCESS_KEY="$(kubectl --context <context> -n people-index get secret s3-credentials \
+     -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 -d)" AWS_REGION=us-east-1 \
+     aws --endpoint-url http://localhost:8333 s3 cp s3://people-index/_run-leases/persons.json -
+   kill "$s3_forward"
+   ```
+
+   A run on the local filesystem store takes no lease, so also list the runs' Jobs:
+   `kubectl --context <context> -n people-index get jobs -l app.kubernetes.io/name=people-index`
+   (compose: `docker compose -f deploy/compose/compose.yaml ps coordinator worker`).
+
+### Restore and re-point the alias
+
+1. Find the snapshot and the index in it, and what the alias serves now:
+
+   ```bash
+   es "$ES_URL/_cat/snapshots/people-index?v&s=end_epoch"
+   es "$ES_URL/_snapshot/people-index/<snapshot>?filter_path=snapshots.indices"
+   es "$ES_URL/_alias/persons"
+   ```
+
+   The nightly policy snapshots every `persons*` index, so a snapshot can also hold indexes
+   that never published (a run that failed after loading, or one still loading at 01:30).
+   Restore the index whose run has a `runs/<run_id>/summary.json` in the pipeline bucket: only
+   a published run writes one (`make compose-runs RUN_ID=<run_id>` on compose).
+
+2. Restore the index under its own name. Publish deleted it, so the name is free:
+
+   ```bash
+   es -X POST "$ES_URL/_snapshot/people-index/<snapshot>/_restore?wait_for_completion=true" \
+     -d '{"indices":"persons-<run_id>","include_global_state":false,"include_aliases":false}'
+   ```
+
+   `include_aliases: false` matters: the snapshot recorded the alias on that index, and
+   restoring it would put `persons` on two indexes at once. If the name still exists (an index
+   kept for inspection, a damaged copy), restore beside it under a new name by adding
+   `"rename_pattern":"(.+)","rename_replacement":"$1-restored"`, which gives
+   `persons-<run_id>-restored`. Publish orders runs by the time stamp at the start of the name,
+   so the renamed copy still counts as that run. Never restore or rename an index to `persons`
+   itself: publish refuses an alias name taken by an index. On a cluster with fewer data nodes
+   than replicas + 1, add `"index_settings":{"index.number_of_replicas":0}` and raise it later.
+
+3. Wait for green and check the count against the run's summary (`documents` in
+   `runs/<run_id>/summary.json`; `make compose-runs RUN_ID=<run_id>` on compose):
+
+   ```bash
+   es "$ES_URL/_cluster/health/persons-<run_id>?wait_for_status=green&timeout=10m"
+   es "$ES_URL/persons-<run_id>/_count"
+   ```
+
+4. Move the alias in one request: off whatever `persons-*` index it points at, onto the restored
+   one. Searches see either the old index or the new one, never both or neither.
+
+   ```bash
+   es -X POST "$ES_URL/_aliases" -d '{"actions":[
+     {"remove":{"index":"persons-*","alias":"persons","must_exist":false}},
+     {"add":{"index":"persons-<run_id>","alias":"persons"}}]}'
+   es "$ES_URL/_alias/persons"
+   ```
+
+5. Verify: `VERIFY_SOURCE=summary make compose-verify` on compose, or the verify Job with
+   `VERIFY_SOURCE=summary` on Kubernetes, finds the run from the alias and checks the restored
+   index against that run's `summary.json`. A renamed copy matches no run's index name; check it
+   by its count.
+
+The index you rolled back from is now off the alias. The next publish deletes it as an older
+run's index; take a snapshot of it first if you need it, or delete it now
+(`es -X DELETE "$ES_URL/persons-<bad_run_id>"`).
+
+### What this means for the pipeline
+
+- The next run is newer than the restored one and publishes normally: it compares its count with
+  the restored index (`PI_PUBLISH_MIN_SHARE`), moves the alias, deletes the restored index and
+  lists it under `previous` and `deleted` in its `summary.json`. `make compose-e2e` publishes over
+  a restored index this way.
+- Of run ordering, publish refuses only when the alias serves a newer run than its own. After a rollback the alias
+  serves an older run, so resuming any failed run newer than the restored one would publish it
+  over the rollback: don't, unless that is the intent.
+- The store needs nothing. `runs/` keeps every run's history as it was, the rolled-back run
+  included (its `state.json` still says `published`); don't edit it, note the rollback in the
+  incident record. Segment retention (`PI_RETAIN_RUNS`, default 3) counts runs by their
+  `published` state, the rolled-back run included, and removes only the stage data of older
+  ones after a publish; the restored run's segments may already be gone, and a restore needs
+  none of them: it reads only the snapshot.
+
+### Keeping the last indexes for instant rollback
+
+Proposed default, for the owner to confirm: no. Every kept index is a full copy (primaries and
+replicas) on the data nodes, so keeping one previous index doubles the disk the alias needs,
+for a rollback that snapshots already provide in minutes. When the previous index does still
+exist (a publish that could not delete it lists it under `not_deleted` in its `summary.json`),
+rolling back is step 4 alone, with that index's name. Keeping N indexes on purpose would need a
+publish option that skips deleting them; none exists.
+
+### Disaster recovery
+
+- **Elasticsearch cluster lost.** Stop runs first ([Before you start](#before-you-start),
+  steps 1 and 2): a publish in the gap deletes the restored index while no alias points at it,
+  and applying an overlay that includes the schedule component recreates `pi-schedule`
+  unsuspended, so the apply below suspends it. Create the new cluster from the overlay without
+  the snapshot bootstrap Job: the rest of the snapshots component (the S3 client settings, the
+  keys in the keystore through `secureSettings`, the NetworkPolicy to the store) is what a
+  restore needs, but the Job would register the repository writable and install the `nightly` policy. Two
+  clusters writing one repository corrupt it, so while the old cluster might still be writing,
+  the new one only reads it:
+
+  ```bash
+  kubectl kustomize deploy/k8s/overlays/<overlay> |
+    python3 -c 'import sys, yaml; docs = [d for d in yaml.safe_load_all(sys.stdin) if d and not (d["kind"] == "Job" and d["metadata"]["name"] == "snapshot-bootstrap")]; [d["spec"].update(suspend=True) for d in docs if d["kind"] == "CronJob"]; yaml.safe_dump_all(docs, sys.stdout)' |
+    kubectl --context <context> apply -f -
+  es -X PUT "$ES_URL/_snapshot/people-index" \
+    -d '{"type":"s3","settings":{"bucket":"people-index-snapshots","base_path":"snapshots","client":"default","readonly":true}}'
+  ```
+
+  Restore the newest snapshot's published index and point the alias at it (steps 1 to 4 above;
+  the step 4 request also clears an alias a run may have created on the new cluster).
+  Snapshots carry no global state: users and roles come from the deployment (ECK's file realm,
+  compose's `es-users`). Once the old cluster is gone for good, apply the whole overlay as
+  usual, the Job included: its PUT of the full definition makes the repository writable again
+  and installs `nightly`. That apply resumes the schedule too; patch it suspended again
+  (Before you start, step 1) until runs may publish. A run published after the newest
+  snapshot is lost from Elasticsearch: start a new run on the same feed.
+- **Pipeline bucket lost.** The alias keeps serving; only the store's contents are gone: the
+  feeds in `raw/`, every run's history in `runs/` and the run lease. Recreate the bucket
+  (`s3-bucket-init`, or `s3-init` on compose), deliver the feeds again from their source and start
+  a new run; it publishes over the serving index as usual. The history of earlier runs cannot be
+  recovered, so `verify --source summary` works only for runs from then on.
+- **Snapshot bucket lost.** Nothing serving is affected, but there is nothing to roll back to
+  until a new snapshot exists. Recreate the bucket (with versioning, see Snapshot storage),
+  register the repository again (`es -X DELETE "$ES_URL/_snapshot/people-index"`, then
+  `kubectl --context <context> -n people-index delete job snapshot-bootstrap --ignore-not-found`
+  and apply the overlay again) and take a snapshot at once:
+  `es -X POST "$ES_URL/_slm/policy/nightly/_execute"`.
+
+### The drill
+
+`make compose-restore-drill` (`deploy/compose/scripts/restore-drill.sh`, run by
+`make compose-e2e` after the first run publishes) works on the index the alias serves:
+
+1. On the host, it pipes the snapshot identity's keys from the `s3` service's environment into
+   every node's keystore (`elasticsearch-keystore add --stdin`), so they never appear on a
+   command line, and calls `_nodes/reload_secure_settings` (failing on a node's
+   `reload_exception`): the S3 keys are reloadable secure settings, so no node restarts. A node
+   that already has both keys keeps them; one with only one of them is refused. The client
+   settings (`s3.client.default.endpoint`, path-style access, region) are static, in
+   compose.yaml.
+2. It registers the repository `people-index` as the Kubernetes component does; the
+   registration verifies every node (a node without the keys fails it, naming the node).
+3. It snapshots the index, deletes it (the alias goes with it: the reader gets 404), restores it
+   under its own name with `include_aliases: false`, waits for green, compares the count and
+   moves the alias with the request in step 4, and checks the reader user's search through the
+   alias.
+4. It restores it again beside itself as `<index>-restored`, moves the alias there and back,
+   checks that the reader cannot search the index by name, and deletes the copy.
+5. It deletes its snapshot, and the repository registration only when it created it, removes
+   the keys it added and reloads. Keys or a repository that were there before are left as they
+   were. A failure keeps the snapshot so the index can still be restored by hand, and still
+   removes the keys: put them back as in Access above before restoring from it.
+
+`make compose-e2e` then verifies the restored index against `expected.json` (the content digest
+included) and publishes a second run over it. `scripts/test-restore-drill.sh` (CI's lint job,
+`make check`) runs the drill against a stub docker and a fake Elasticsearch: its refusals and
+failures leave no keys behind, a failed restore keeps the snapshot, and keys or a repository
+that were there before stay.
+
+Exercised on 2026-10-28 against the compose stack (Elasticsearch 9.5.5, three nodes, SeaweedFS
+4.48; Docker Desktop on Windows, `make compose-e2e` with CI's sizes), three times. The last run:
+index `persons-20261028-221205`, 20000 documents; snapshot 0.9 s; restore under its own name to
+green 3.0 s, the renamed copy 2.2 s; the counts, the reader's search through the alias and the
+content digest (`verify`) matched, and the second run then published over the restored index
+and deleted it. The whole `make compose-e2e` took 4 min 4 s (the earlier runs: snapshot 1.1 s,
+restores 2.6 to 3.0 s and 2.4 to 2.5 s, about 4 min 50 s). Not yet exercised on k3d or against
+an external S3 store.
 
 ## Scheduled runs
 

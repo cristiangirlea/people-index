@@ -46,6 +46,14 @@ x-es-env: &es-env
   xpack.security.transport.ssl.enabled: "true"
   xpack.security.transport.ssl.certificate_authorities: certs/ca/ca.crt
   xpack.security.transport.ssl.verification_mode: certificate
+  # The snapshot bucket's S3 client on every node, as deploy/k8s/components/snapshots sets it
+  # (with the scheme in the endpoint: ES 9 deprecates the `protocol` setting). These are static
+  # node settings; the keys are secure settings that only the keystore holds. Compose puts
+  # none there: the restore drill (scripts/restore-drill.sh) adds them for its run and removes
+  # them again (docs/OPERATIONS.md, Rollback and restore).
+  s3.client.default.endpoint: http://s3:8333
+  s3.client.default.path_style_access: "true"
+  s3.client.default.region: us-east-1
 
 x-es-node: &es-node
   image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984

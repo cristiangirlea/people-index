@@ -13,6 +13,8 @@
 #   - those ECK files (operator.yaml pinned), base and every overlay (rendered with kustomize)
 #     pass kubeconform -strict against the Kubernetes schemas and, for custom resources (ECK,
 #     prometheus-operator), the datreeio CRDs-catalog schemas at a pinned commit;
+#   - every rendered Elasticsearch S3 client endpoint carries its scheme (http:// or https://)
+#     and no s3.client.*.protocol is set, which Elasticsearch 9 deprecates (requires PyYAML);
 #   - the schedule component renders with every overlay, passes the same check, and matches
 #     the local coordinator pod security, environment names and storage (requires PyYAML);
 #   - the run, datagen and verify Job templates render for every overlay and pass the same
@@ -302,6 +304,9 @@ for dir in base "${overlays[@]}"; do
     END { finish_resource(); if (!resources || bad) exit 1 }
   ' "$work/rendered.yaml" ||
     fail "deploy/k8s/$dir: every Elasticsearch node set must set action.auto_create_index to -persons-*,+*"
+  # Elasticsearch 9 deprecates s3.client.*.protocol: every S3 client endpoint carries its scheme.
+  "$python" "$root/scripts/check-s3-endpoints.py" "$work/rendered.yaml" ||
+    fail "deploy/k8s/$dir: S3 client settings must put the scheme in the endpoint, without protocol"
   while read -r ref; do
     check_ref "deploy/k8s/$dir" "$ref"
     # Dependabot bumps compose and the manifests in separate pull requests; keep them equal.

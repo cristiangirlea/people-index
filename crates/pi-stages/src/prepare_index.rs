@@ -43,7 +43,7 @@ impl Stage for PrepareIndexStage {
         _task: &TaskSpec,
         _attempt: &AttemptId,
     ) -> anyhow::Result<TaskReport> {
-        let plan = Plan::load(ctx).await?;
+        let plan = Plan::load_for(ctx, &self.config).await?;
         let admin = IndexAdmin::new(self.client.clone());
         let data_nodes = admin
             .data_node_count()
@@ -54,7 +54,8 @@ impl Stage for PrepareIndexStage {
             .es
             .shards
             .unwrap_or_else(|| IndexSpec::default_shards(data_nodes));
-        let spec = IndexSpec::new(shards, self.config.es.codec);
+        let spec = IndexSpec::new(shards, self.config.es.codec)
+            .with_mapping((*self.config.mapping).clone());
         let outcome = admin
             .create_index(&plan.index, &spec, &ctx.run_id)
             .await
@@ -161,6 +162,7 @@ mod tests {
                 organizations: vec![],
                 persons: vec![],
                 total_bytes: 0,
+                schema: None,
                 created_at: OffsetDateTime::UNIX_EPOCH,
                 delivery: None,
             };

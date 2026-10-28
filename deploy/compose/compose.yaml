@@ -111,6 +111,11 @@ x-pipeline-env: &pipeline-env
   PI_SEGMENT_TARGET_BYTES: ${PI_SEGMENT_TARGET_BYTES:-32MiB}
   PI_METRICS_ADDR: 0.0.0.0:9464
   PI_LOG_FORMAT: ${PI_LOG_FORMAT:-json}
+  # Feed schema and index mapping files (docs/OPERATIONS.md, Feed schema). Empty means the
+  # built-in ones. Paths inside the containers: mount the files first (an example is in that
+  # section), the same for the coordinator and every worker.
+  PI_SCHEMA_FILE: ${PI_SCHEMA_FILE:-}
+  PI_MAPPING_FILE: ${PI_MAPPING_FILE:-}
   RUST_LOG: ${RUST_LOG:-info}
 
 x-pipeline: &pipeline

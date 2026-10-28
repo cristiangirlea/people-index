@@ -9,7 +9,8 @@
 //! - [`Publisher`]: the `publish` step; the alias moves only after every check passed.
 //! - [`Verifier`]: the acceptance counts of `expected.json`, or the checks against what a run
 //!   published, and an order-independent digest.
-//! - [`mapping()`]: the explicit mapping (`mapping.json`, reasons in `mapping.md`).
+//! - [`mapping()`]: the explicit mapping (`mapping.json`, reasons in `mapping.md`), or one read
+//!   from a file ([`parse_mapping`]), held against the feed schema by [`check_mapping`].
 
 mod admin;
 mod bulk;
@@ -32,11 +33,11 @@ pub use admin::{CreateOutcome, IndexAdmin};
 pub use bulk::{BulkConfig, BulkCounters, BulkIndexer, BulkStats};
 pub use client::{Body, EsClient, RawResponse};
 pub use config::{Auth, EsConfig, Secret};
-pub use digest::{DigestReport, DocumentDigest, write_canonical};
+pub use digest::{DigestReport, DocumentDigest, canonical_sha256, write_canonical};
 pub use error::{EsError, ItemFailure, Result, is_retryable_status};
 pub use expected::{Expected, MalformedCounts};
 pub use health::HealthStatus;
-pub use mapping::{MAPPING_JSON, mapping};
+pub use mapping::{MAPPING_JSON, check_mapping, mapping, parse_mapping};
 pub use names::validate_index_name;
 pub use publisher::{PublishReport, PublishSpec, Publisher};
 pub use reqwest::Method;

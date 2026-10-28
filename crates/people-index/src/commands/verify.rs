@@ -159,6 +159,7 @@ pub async fn run(args: VerifyArgs) -> anyhow::Result<VerifyOutcome> {
             let run_id = summary_run(&args, &admin, &stores.runs).await?;
             let summary = load_summary(&args, &stores.runs, &run_id).await?;
             let published = Published {
+                builtin_names: summary.builtin_schema(),
                 index: summary.index,
                 docs: summary.publish.docs,
             };

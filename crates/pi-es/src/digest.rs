@@ -97,20 +97,32 @@ impl DocumentDigest {
         for limb in self.sum {
             hasher.update(limb.to_le_bytes());
         }
-        let hash = hasher.finalize();
-        let mut sha256 = String::with_capacity(64);
-        for byte in hash.as_slice() {
-            sha256.push(char::from(HEX[usize::from(byte >> 4)]));
-            sha256.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        }
         DigestReport {
             docs: self.docs,
-            sha256,
+            sha256: hex(hasher.finalize().as_slice()),
         }
     }
 }
 
+/// Lowercase hex SHA-256 of the canonical JSON of `value` ([`write_canonical`]): the same for
+/// any key order or whitespace. A plan pins the feed schema and the index mapping by it.
+#[must_use]
+pub fn canonical_sha256(value: &Value) -> String {
+    let mut canonical = Vec::with_capacity(4096);
+    write_canonical(&mut canonical, value);
+    hex(Sha256::digest(&canonical).as_slice())
+}
+
 const HEX: &[u8; 16] = b"0123456789abcdef";
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(2 * bytes.len());
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
 
 /// Compact JSON with object keys sorted by their bytes, so two sources that differ only in key
 /// order or whitespace give the same bytes. Strings and numbers use `serde_json`'s formatting,
@@ -173,6 +185,20 @@ mod tests {
             String::from_utf8(out).expect("utf8"),
             r#"{"a":null,"b":[1,{"x":"\n","y":2}]}"#
         );
+    }
+
+    #[test]
+    fn the_canonical_sha256_ignores_key_order_and_whitespace() {
+        let a: Value = serde_json::from_str(r#"{ "b": [1, {"y":2}], "a": null }"#).expect("json");
+        let b: Value = serde_json::from_str(r#"{"a":null,"b":[1,{"y":2}]}"#).expect("json");
+        assert_eq!(canonical_sha256(&a), canonical_sha256(&b));
+        assert_eq!(canonical_sha256(&a).len(), 64);
+        // sha256 of `{}`.
+        assert_eq!(
+            canonical_sha256(&json!({})),
+            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        );
+        assert_ne!(canonical_sha256(&a), canonical_sha256(&json!({"a": null})));
     }
 
     #[test]

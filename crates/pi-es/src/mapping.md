@@ -3,7 +3,9 @@
 `mapping.json` is the explicit mapping of the output document (docs/ARCHITECTURE.md, "The output
 document"). JSON has no comments, so the reasons live here. `crate::mapping` embeds the file at
 compile time and its tests check the choices below, so this note and the file cannot drift apart
-silently.
+silently. A feed with other field names brings its own copy (`PI_MAPPING_FILE`,
+docs/OPERATIONS.md "Feed schema"); `check_mapping` holds either against the feed schema at
+startup.
 
 ## `dynamic: false`
 
@@ -96,8 +98,9 @@ those forms were observed, the rest of the grammar is derived from Java's) or on
 `i32` before truncation; in a `boolean` anything but `true`, `false`, `"true"`, `"false"` and `""`. One known divergence: a
 non-ASCII decimal digit in a `long` string (`"٥"`) is counted, though Elasticsearch indexes it.
 The counter counts per extracted line, before person deduplication, and an organization's
-value once however many person documents embed it. A lenient field must be mapped as its own
-type with `ignore_malformed: true`; the agreement test fails otherwise. `roles.start_date` and `end_date` accept full dates,
+value once however many person documents embed it. Every number and date field must be mapped
+with `ignore_malformed: true` (and a lenient one as its own type), a multi-field under `fields`
+included: `check_mapping` refuses the mapping at startup otherwise. `roles.start_date` and `end_date` accept full dates,
 `yyyy-MM` and `yyyy` (a JSON number such as `2020` is read as text, so as a year), so range
 queries work on partial dates.
 

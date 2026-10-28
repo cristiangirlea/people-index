@@ -313,7 +313,7 @@ impl Stage for PublishStage {
         _attempt: &AttemptId,
     ) -> anyhow::Result<TaskReport> {
         let started = Instant::now();
-        let plan = Plan::load(ctx).await?;
+        let plan = Plan::load_for(ctx, &self.config).await?;
         let mut stages = self.stage_summaries(ctx).await?;
         let documents = stages
             .iter()
@@ -383,6 +383,7 @@ impl Stage for PublishStage {
             alias: plan.alias.clone(),
             index: plan.index.clone(),
             partitions: plan.partitions,
+            schema: Some(plan.schema_pin()),
             started_at: plan.created_at,
             finished_at,
             wall_ms,
@@ -763,6 +764,7 @@ mod tests {
             organizations: vec![],
             persons: vec![],
             total_bytes: 0,
+            schema: None,
             created_at: OffsetDateTime::now_utc(),
             delivery: None,
         };

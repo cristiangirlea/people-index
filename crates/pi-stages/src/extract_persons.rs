@@ -7,7 +7,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi_coord::{AttemptId, RunContext, Stage, StageName, TaskReport, TaskSpec};
 use pi_model::{
-    EdgeRow, LineStats, MalformedRecord, Partitioner, PersonRow, Seq, parse_person_line_with_names,
+    EdgeRow, FeedSchema, LineStats, MalformedRecord, Partitioner, PersonRow, Seq,
+    parse_person_line_with,
 };
 use pi_store::Dataset;
 
@@ -40,6 +41,7 @@ impl ExtractPersonsStage {
 }
 
 struct PersonSink {
+    schema: Arc<FeedSchema>,
     partitioner: Partitioner,
     persons: PartitionedWriter<PersonRow>,
     edges: PartitionedWriter<EdgeRow>,
@@ -60,6 +62,7 @@ impl PersonSink {
         let person_budget = ctx.buffer_bytes / PERSON_SHARE_DEN * PERSON_SHARE_NUM;
         let p = ctx.partitioner.count();
         Box::new(Self {
+            schema: Arc::clone(&ctx.schema),
             partitioner: ctx.partitioner,
             persons: PartitionedWriter::new(
                 p,
@@ -87,7 +90,7 @@ impl LineSink for PersonSink {
         seq: Seq,
         collect_names: bool,
     ) -> anyhow::Result<Result<LineStats, MalformedRecord>> {
-        let (row, stats) = match parse_person_line_with_names(line, seq, collect_names) {
+        let (row, stats) = match parse_person_line_with(&self.schema, line, seq, collect_names) {
             Ok(parsed) => parsed,
             Err(m) => return Ok(Err(m)),
         };

@@ -225,7 +225,7 @@ impl Stage for AssembleStage {
         task: &TaskSpec,
         attempt: &AttemptId,
     ) -> anyhow::Result<TaskReport> {
-        let plan = Plan::load(ctx).await?;
+        let plan = Plan::load_for(ctx, &self.config).await?;
         let q = task_partition(task, &plan)?;
         let join_commits = self.cache.finished(ctx, StageName::Join).await?;
         let person_commits = self.cache.finished(ctx, StageName::ExtractPersons).await?;
@@ -254,7 +254,8 @@ impl Stage for AssembleStage {
             joined_segments: joined_keys.len(),
             person_segments: person_keys.len(),
             passes,
-            builder: DocumentBuilder::new(self.config.effective_max_document_bytes()),
+            builder: DocumentBuilder::new(self.config.effective_max_document_bytes())
+                .with_schema(Arc::clone(&self.config.schema)),
             person_files: plan.persons.iter().map(|f| f.key.clone()).collect(),
             namer: SegmentNamer::new(
                 ctx.layout.clone(),

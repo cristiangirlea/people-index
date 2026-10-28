@@ -2,13 +2,20 @@
 //!
 //! Settings every participant must agree on (the partition count, the index name, the alias)
 //! are fixed once by `plan` and read back from `plan.json`; everything here may differ between
-//! processes; publish bounds control whether a completed run may replace the alias.
+//! processes, except the feed schema and the index mapping, which `plan.json` pins by digest
+//! and every task checks ([`crate::Plan::load_for`]); publish bounds control whether a
+//! completed run may replace the alias.
 
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use pi_es::{BulkConfig, Codec, EsConfig, HealthStatus};
+use pi_model::FeedSchema;
 use pi_segment::SegmentConfig;
 use pi_store::Store;
+use serde_json::Value;
+
+use crate::plan_file::SchemaPin;
 
 /// Default `partition_target_bytes`: input bytes per partition (`PI_PARTITION_TARGET_BYTES`).
 pub const DEFAULT_PARTITION_TARGET_BYTES: u64 = 256 << 20;
@@ -31,6 +38,11 @@ pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 2;
 pub const DEFAULT_LOAD_BUFFER_BULKS: usize = 2;
 /// Room left in a bulk request for the action line next to the largest document.
 const BULK_ACTION_ROOM: usize = 4 << 10;
+
+/// The built-in schema and mapping, shared by every default configuration.
+static BUILTIN_SCHEMA: LazyLock<Arc<FeedSchema>> =
+    LazyLock::new(|| Arc::new(FeedSchema::default()));
+static BUILTIN_MAPPING: LazyLock<Arc<Value>> = LazyLock::new(|| Arc::new(pi_es::mapping()));
 
 /// Everything the Elasticsearch stages (`prepare-index`, `load`, `publish`) need.
 #[derive(Debug, Clone)]
@@ -116,6 +128,12 @@ pub struct StagesConfig {
     /// Where the inputs live when not under `raw/` in the run's store (`PI_INPUT_URL`). The
     /// run layout uses `with_input_root("")`, or the delivery name when one is selected.
     pub input_store: Option<Store>,
+    /// The names the extract stages and the document builder read (`PI_SCHEMA_FILE`; the
+    /// built-in schema by default).
+    pub schema: Arc<FeedSchema>,
+    /// The `mappings` body `prepare-index` creates the index with (`PI_MAPPING_FILE`; the
+    /// built-in mapping by default). [`StagesConfig::validate`] checks it against `schema`.
+    pub mapping: Arc<Value>,
     /// The Elasticsearch stages.
     pub es: EsStageConfig,
 }
@@ -137,6 +155,8 @@ impl Default for StagesConfig {
             max_document_bytes: pi_model::DEFAULT_MAX_DOCUMENT_BYTES,
             load_buffer_bytes: None,
             input_store: None,
+            schema: Arc::clone(&BUILTIN_SCHEMA),
+            mapping: Arc::clone(&BUILTIN_MAPPING),
             es: EsStageConfig::default(),
         }
     }
@@ -184,7 +204,14 @@ impl StagesConfig {
             (0.0..=1.0).contains(&self.es.publish_max_unresolved),
             "publish_max_unresolved must be between 0 and 1"
         );
+        pi_es::check_mapping(&self.mapping, &self.schema)?;
         Ok(())
+    }
+
+    /// The digests of the feed schema and the mapping, which `plan.json` pins.
+    #[must_use]
+    pub fn schema_pin(&self) -> SchemaPin {
+        SchemaPin::of(&self.schema, &self.mapping)
     }
 
     /// The document size limit `assemble` applies: the configured one, but never more than
@@ -263,6 +290,19 @@ mod tests {
                 assert_eq!(cfg.validate().is_ok(), valid);
             }
         }
+    }
+
+    #[test]
+    fn a_mapping_that_does_not_fit_the_schema_is_refused() {
+        let mut cfg = StagesConfig::default();
+        assert!(cfg.schema.is_builtin());
+        assert_eq!(cfg.schema_pin(), SchemaPin::builtin());
+        let mut mapping = pi_es::mapping();
+        mapping["properties"]["nickname"] = serde_json::json!({"type": "keyword"});
+        cfg.mapping = Arc::new(mapping);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("nickname (keyword) is mapped"), "{err}");
+        assert_ne!(cfg.schema_pin(), SchemaPin::builtin());
     }
 
     #[test]

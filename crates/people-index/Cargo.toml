@@ -27,6 +27,7 @@ metrics-exporter-prometheus = { workspace = true }
 pi-coord = { workspace = true }
 pi-datagen = { workspace = true }
 pi-es = { workspace = true }
+pi-model = { workspace = true }
 pi-segment = { workspace = true }
 pi-stages = { workspace = true }
 pi-store = { workspace = true }
@@ -40,7 +41,6 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 bytes = { workspace = true }
 flate2 = { workspace = true }
-pi-model = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

@@ -27,8 +27,7 @@ const CONTENT_ROLES: [&str; 2] = ["data", "data_content"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateOutcome {
     Created,
-    /// The index exists already: a retried or concurrent `prepare-index` of the same run. The
-    /// run id makes the name unique to the run, so this is the same index, not a stranger's.
+    /// The index already exists and belongs to the same run.
     AlreadyExists,
 }
 
@@ -81,15 +80,35 @@ impl IndexAdmin {
     }
 
     /// Creates `name` with the mapping and the load-time settings of `spec`.
-    pub async fn create_index(&self, name: &str, spec: &IndexSpec) -> Result<CreateOutcome> {
+    pub async fn create_index(
+        &self,
+        name: &str,
+        spec: &IndexSpec,
+        run_id: &str,
+    ) -> Result<CreateOutcome> {
         validate_index_name(name)?;
         let path = format!("/{name}");
+        let mut body = spec.create_body();
+        let mappings = body["mappings"]
+            .as_object_mut()
+            .ok_or_else(|| EsError::Config("index mapping must be an object".into()))?;
+        mappings.insert("_meta".into(), json!({"people_index": {"run_id": run_id}}));
         let (status, response) = self
             .client
-            .json_allowing(Method::PUT, &path, Some(&spec.create_body()), &[400])
+            .json_allowing(Method::PUT, &path, Some(&body), &[400])
             .await?;
         if status == 400 {
             if response["error"]["type"] == "resource_already_exists_exception" {
+                let mapping_path = format!("/{name}/_mapping");
+                let mapping = self.client.json(Method::GET, &mapping_path, None).await?;
+                let owner = mapping[name]["mappings"]["_meta"]["people_index"]["run_id"].as_str();
+                if owner != Some(run_id) {
+                    return Err(EsError::IndexOwnership {
+                        index: name.to_owned(),
+                        run_id: run_id.to_owned(),
+                        owner: owner.map(str::to_owned),
+                    });
+                }
                 return Ok(CreateOutcome::AlreadyExists);
             }
             return Err(EsError::Http {

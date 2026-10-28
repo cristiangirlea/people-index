@@ -19,3 +19,5 @@ Run each from the repository root and report pass or fail, with the first error 
 12. `scripts/check-s3.sh` (needs Docker: the store and lease tests against SeaweedFS)
 
 Do not fix anything unless asked; say what failed and where.
+
+Also run `scripts/test-identity-config.sh` to test identity configuration validation.

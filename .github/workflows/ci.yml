@@ -143,6 +143,8 @@ jobs:
         run: |
           bash scripts/test-check-modes.sh
           bash scripts/check-modes.sh
+      - name: identity configuration rejects invalid inputs
+        run: bash scripts/test-identity-config.sh
       - name: schedule pod comparison catches differences
         run: sudo apt-get update && sudo apt-get install -y python3-yaml && bash scripts/test-check-schedule.sh
       - name: the S3 check passes and fails as it should

@@ -12,7 +12,7 @@ the stages, the storage layout and the `PI_*` settings used here.
 | `../k3d/cluster.yaml` | a local cluster: 1 server (control plane only) + 3 agents in zones `zone-a`, `zone-b`, `zone-c` |
 | `eck/` | `fetch.sh`: downloads the ECK 3.5.0 operator and CRDs from Elastic's release URLs and keeps them only when they match `SHA256SUMS`; `pin-operator.sh`: pins the operator image to the digest in `operator-image` |
 | `base/` | namespace, Elasticsearch (`es`: 3 masters, 3 data nodes), SeaweedFS (`s3:8333`) and its bucket Job, the pipeline ServiceAccount, the `people-index-config` ConfigMap, NetworkPolicies |
-| `components/snapshots/` | S3 snapshot repository `people-index` (prefix `snapshots/`) and the SLM policy `nightly` |
+| `components/snapshots/` | S3 snapshot repository `people-index` (bucket `people-index-snapshots`, prefix `snapshots/`) and the SLM policy `nightly` |
 | `components/schedule/` | optional CronJob for indexed coordinator and worker runs |
 | `components/monitoring/` | elasticsearch-exporter, ServiceMonitors, a PodMonitor for the pipeline's `:9464`, alert rules; needs the prometheus-operator CRDs and kube-state-metrics with Job labels allowlisted (see below) |
 | `overlays/local/` | k3d sizing (about 7.5 GiB for Elasticsearch), snapshots, `imagePullPolicy: Never` for `people-index:local` |
@@ -25,7 +25,8 @@ Names other parts rely on: namespace `people-index`; Elasticsearch HTTP service 
 `people-index-writer`, credentials in Secret `pipeline-es-credentials` (`username`, `password`);
 role `people-index-reader` for alias-only read access;
 object store service `s3:8333`, bucket `people-index`, credentials in Secret `s3-credentials`
-(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`).
+(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`); snapshots use a separate bucket and
+`snapshot-s3-credentials`.
 
 ## Local cluster
 

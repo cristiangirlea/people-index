@@ -1,10 +1,10 @@
 # Snapshots of the published index to the object store.
 #
 # - Elasticsearch gets the S3 client settings (endpoint, path-style addressing) on every node
-#   and the store's keys in its keystore through ECK secureSettings, read from the same
-#   `s3-credentials` Secret the pipeline uses.
+#   and the store's keys in its keystore through ECK secureSettings, read from the separate
+#   `snapshot-s3-credentials` Secret.
 # - A bootstrap Job (bootstrap.sh) registers the repository `people-index` (bucket
-#   `people-index`, prefix `snapshots/`, beside `raw/` and `runs/`) and the SLM policy
+#   `people-index-snapshots`, prefix `snapshots/`) and the SLM policy
 #   `nightly` (01:30 UTC, `persons*`, kept 14 days, at least 3).
 # - A NetworkPolicy lets Elasticsearch reach the store.
 #

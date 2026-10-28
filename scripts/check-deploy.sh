@@ -311,6 +311,25 @@ for dir in base "${overlays[@]}"; do
     fi
   done < <(yaml_images <"$work/rendered.yaml")
   report_unpinned
+  # Local overlays render the identity generator, both bucket initializers and bootstrap.
+  # Compare their actual rendered env values, so an overlay cannot silently split them.
+  if [[ "$dir" == overlays/local ]]; then
+    bucket_values="$(awk '
+      /^[[:space:]]*- name: (PIPELINE_BUCKET|SNAPSHOT_BUCKET|S3_BUCKET)$/ { name=$3; next }
+      name && /^[[:space:]]*value: / { print name, $2; name=""; next }
+      name && /^[[:space:]]*- name:/ { name="" }
+    ' "$work/rendered.yaml")"
+    pipeline="$(awk '$1 == "PIPELINE_BUCKET" {print $2}' <<<"$bucket_values")"
+    snapshots="$(awk '$1 == "SNAPSHOT_BUCKET" {print $2}' <<<"$bucket_values")"
+    initializers="$(awk '$1 == "S3_BUCKET" {print $2}' <<<"$bucket_values" | sort)"
+    [[ -n "$pipeline" && $(wc -l <<<"$snapshots") -eq 2 ]] || fail "local bucket environment is incomplete"
+    store_url="$(awk '$1 == "PI_STORE_URL:" {print $2}' "$work/rendered.yaml")"
+    [[ "$store_url" == "s3://$pipeline/"* ]] || fail "local pipeline store URL and bucket name disagree"
+    snapshot="$(head -n 1 <<<"$snapshots")"
+    [[ -n "$snapshot" && "$snapshots" == "$snapshot"$'\n'"$snapshot" && "$pipeline" != "$snapshot" &&
+       "$initializers" == "$(printf '%s\n%s\n' "$pipeline" "$snapshot" | sort)" ]] ||
+      fail "local identity, bucket-init and bootstrap bucket names disagree"
+  fi
   # ECK acts on spec.version, the pods run spec.image: the image tag must be that version.
   es_spec="$(awk '/^---/ { es = 0 } /^kind: Elasticsearch$/ { es = 1 }
     es && /^  (version|image):/ { print $1, $2 }' "$work/rendered.yaml")"
@@ -384,11 +403,12 @@ scripts=(
   "$root/deploy/k8s/eck/pin-operator.sh"
   "$root/deploy/k8s/jobs/render.sh"
   "$root/deploy/k8s/base/s3/bucket-init.sh"
+  "$root/deploy/k8s/base/s3/identity-config.sh"
   "$root/deploy/k8s/components/snapshots/bootstrap.sh"
 )
 for script in "${scripts[@]}"; do
   case "$script" in
-    */bucket-init.sh | */bootstrap.sh) sh -n "$script" ;;
+    */bucket-init.sh | */identity-config.sh | */bootstrap.sh) sh -n "$script" ;;
     *) bash -n "$script" ;;
   esac || fail "$script does not parse"
 done
@@ -416,10 +436,28 @@ compose="$root/deploy/compose/compose.yaml"
 if [[ -f "$compose" ]]; then
   command -v docker >/dev/null 2>&1 || fail "$compose exists but docker is not installed"
   step "docker compose config"
-  docker compose -f "$compose" config -q || fail "$compose does not validate"
-  docker compose -f "$compose" config --format json >"$work/compose.json" ||
-    fail "$compose could not render JSON"
-  if command -v python3 >/dev/null 2>&1; then python=python3; else python=python; fi
+  python="$(command -v python3 || command -v python)" || fail "needs python3 or python for compose bucket checks"
+  docker compose -f "$compose" config --format json >"$work/compose.json" || fail "$compose does not validate"
+  "$python" - "$work/compose.json" <<'PY' || fail "compose bucket names disagree"
+import copy, json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    services = json.load(f)["services"]
+def agrees(services):
+    s3 = services["s3"]["environment"]
+    init = services["s3-init"]["environment"]
+    pipeline = s3["PIPELINE_BUCKET"]
+    snapshot = s3["SNAPSHOT_BUCKET"]
+    return (pipeline != snapshot and init["S3_BUCKET"] == pipeline
+            and init["SNAPSHOT_BUCKET"] == snapshot
+            and all(services[name]["environment"]["PI_STORE_URL"].startswith("s3://" + pipeline + "/")
+                    for name in ("coordinator", "worker")))
+if not agrees(services):
+    sys.exit("rendered compose buckets disagree")
+bad = copy.deepcopy(services)
+bad["s3-init"]["environment"]["S3_BUCKET"] = "different-bucket"
+if agrees(bad):
+    sys.exit("bucket check accepted a mismatch")
+PY
   "$python" - "$work/compose.json" <<'PY' ||
 import json
 import sys

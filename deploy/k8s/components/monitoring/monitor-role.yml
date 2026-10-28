@@ -1,5 +1,5 @@
-# Read-only role for elasticsearch-exporter (verified against Elasticsearch 9.5.5 with every
-# collector enabled below). monitor_snapshot serves the snapshots collector. The SLM collector
+# Read-only role for elasticsearch-exporter (verified against Elasticsearch 9.5.5;
+# --es.indices_settings has not yet been verified against a live cluster). monitor_snapshot serves the snapshots collector. The SLM collector
 # stays off: `_slm/stats` needs manage_slm, which could rewrite the snapshot policy, and the
 # snapshots collector already shows snapshot age and failures.
 people-index-monitor:

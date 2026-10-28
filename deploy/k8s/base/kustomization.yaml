@@ -56,6 +56,12 @@ configMapGenerator:
       - PI_SEGMENT_TARGET_BYTES=16MiB
       - PI_METRICS_ADDR=0.0.0.0:9464
       - PI_LOG_FORMAT=json
+      # A feed with other field names reads its schema and index mapping from files
+      # (docs/OPERATIONS.md, Feed schema); unset, the built-in ones. Set both only in an
+      # overlay that mounts the files into every pipeline pod from a ConfigMap (the example
+      # in that section), never here:
+      # - PI_SCHEMA_FILE=/etc/people-index/feed/schema.json
+      # - PI_MAPPING_FILE=/etc/people-index/feed/mapping.json
   - name: s3-bucket-init
     files:
       - bucket-init.sh=s3/bucket-init.sh

@@ -15,10 +15,13 @@
 //! as they are, never parsed. Because the output names `organizations`,
 //! `unresolved_organization_ids` and `roles[].organization_resolved` itself, input fields with
 //! those names are replaced, and duplicate keys at the levels the builder writes are reduced to
-//! their last occurrence so the output never holds a duplicate key.
+//! their last occurrence so the output never holds a duplicate key. With another feed schema
+//! ([`FeedSchema`]), `roles` and `organization_id` are the names it gives the references and
+//! their organization id; the three output names stay the same.
 
 use std::collections::HashMap;
 use std::ops::AddAssign;
+use std::sync::Arc;
 
 use crate::error::{MalformedKind, MalformedRecord};
 use crate::json::{write_string, write_u64};
@@ -26,13 +29,12 @@ use crate::lookup::{OrgLookup, Resolution};
 use crate::raw::RawObject;
 use crate::roles::{PersonFields, Role};
 use crate::rows::{DocRow, PersonRow};
+use crate::schema::{
+    FeedSchema, ORGANIZATIONS_FIELD as ORGANIZATIONS, RESOLVED_FLAG, UNRESOLVED_FIELD as UNRESOLVED,
+};
 
 /// The default largest document, in bytes: one document must fit a default bulk request.
 pub const DEFAULT_MAX_DOCUMENT_BYTES: usize = 8 << 20;
-
-const ORGANIZATIONS: &str = "organizations";
-const UNRESOLVED: &str = "unresolved_organization_ids";
-const RESOLVED_FLAG: &str = "organization_resolved";
 
 /// Why a document could not be built.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -110,10 +112,12 @@ pub struct BuiltDocument {
     pub stats: DocumentStats,
 }
 
-/// Builds documents under a size limit.
-#[derive(Debug, Clone, Copy)]
+/// Builds documents under a size limit, reading person records as a feed schema names them.
+#[derive(Debug, Clone)]
 pub struct DocumentBuilder {
     max_document_bytes: usize,
+    /// `None` for the built-in schema, which needs no allocation.
+    schema: Option<Arc<FeedSchema>>,
 }
 
 impl Default for DocumentBuilder {
@@ -131,10 +135,27 @@ enum RoleState {
 }
 
 impl DocumentBuilder {
-    /// A builder that refuses documents larger than `max_document_bytes`.
+    /// A builder for the built-in schema that refuses documents larger than
+    /// `max_document_bytes`.
     #[must_use]
     pub fn new(max_document_bytes: usize) -> Self {
-        Self { max_document_bytes }
+        Self {
+            max_document_bytes,
+            schema: None,
+        }
+    }
+
+    /// The builder for person records named as `schema` says.
+    #[must_use]
+    pub fn with_schema(mut self, schema: Arc<FeedSchema>) -> Self {
+        self.schema = (!schema.is_builtin()).then_some(schema);
+        self
+    }
+
+    /// The schema person records are read with.
+    #[must_use]
+    pub fn schema(&self) -> &FeedSchema {
+        self.schema.as_deref().unwrap_or(FeedSchema::builtin())
     }
 
     /// The size limit.
@@ -165,11 +186,12 @@ impl DocumentBuilder {
                 format!("person body is not UTF-8: {e}"),
             ))
         })?;
-        let person = PersonFields::parse(text).map_err(BuildError::InvalidPerson)?;
+        let schema = self.schema();
+        let person = PersonFields::parse(text, schema).map_err(BuildError::InvalidPerson)?;
         let roles: &[Role<'_>] = person.roles.as_deref().unwrap_or(&[]);
         // Decide every role first, so the size check happens before any copying.
         let decisions = self.decide(roles, body.len(), lookup)?;
-        let out = write_document(&person, roles, &decisions, body.len());
+        let out = write_document(schema.references(), &person, roles, &decisions, body.len());
         if out.len() > self.max_document_bytes {
             return Err(BuildError::TooLarge {
                 bytes: out.len(),
@@ -187,7 +209,7 @@ impl DocumentBuilder {
 
     /// Resolves every role in order, collecting the output lists and the counters.
     fn decide<'o>(
-        self,
+        &self,
         roles: &[Role<'_>],
         body_len: usize,
         lookup: &'o impl OrgLookup,
@@ -241,7 +263,7 @@ impl DocumentBuilder {
 
     /// Looks up an id seen for the first time and records the answer.
     fn resolve_new<'o>(
-        self,
+        &self,
         d: &mut Decisions<'o>,
         id: u64,
         body_len: usize,
@@ -295,9 +317,10 @@ impl Decisions<'_> {
     }
 }
 
-/// Writes the document: the person's fields in input order (roles rewritten), then
-/// `organizations` and, when needed, `unresolved_organization_ids`.
+/// Writes the document: the person's fields in input order (the references field, `roles`,
+/// rewritten), then `organizations` and, when needed, `unresolved_organization_ids`.
 fn write_document(
+    references: &str,
     person: &PersonFields<'_>,
     roles: &[Role<'_>],
     decisions: &Decisions<'_>,
@@ -314,7 +337,7 @@ fn write_document(
             continue;
         }
         write_key(&mut out, &mut first, key);
-        if key == "roles" && person.roles.is_some() {
+        if key == references && person.roles.is_some() {
             write_roles(&mut out, roles, &decisions.flags);
         } else {
             out.extend_from_slice(value.get().as_bytes());
@@ -474,6 +497,40 @@ mod tests {
                 documents_with_unresolved: 1,
             }
         );
+    }
+
+    #[test]
+    fn a_schema_names_the_references_the_builder_rewrites() {
+        let schema = FeedSchema::from_json(
+            r#"{"person": {"references": "jobs", "reference_id": "org",
+                "fields": [{"name": "jobs", "kind": "object_array"}]}}"#,
+        )
+        .unwrap();
+        let builder = DocumentBuilder::default().with_schema(Arc::new(schema));
+        assert_eq!(builder.schema().references(), "jobs");
+        let table = orgs(&[(10, r#"{"id":10}"#)]);
+        let built = builder
+            .build(
+                1,
+                br#"{"roles":[{"organization_id":10}],"jobs":[{"org":10,"organization_resolved":"x"},{"org":7},{}],"organizations":1}"#,
+                &table,
+            )
+            .unwrap();
+        let doc: Value = serde_json::from_slice(&built.doc.body).unwrap();
+        assert_eq!(
+            doc,
+            json!({
+                "roles": [{"organization_id": 10}],
+                "jobs": [{"org": 10, "organization_resolved": true},
+                         {"org": 7, "organization_resolved": false}, {}],
+                "organizations": [{"id": 10}],
+                "unresolved_organization_ids": [7],
+            })
+        );
+        assert_eq!(built.stats.roles, 3);
+        // The built-in schema is held as nothing at all.
+        let builtin = DocumentBuilder::default().with_schema(Arc::new(FeedSchema::default()));
+        assert!(builtin.schema.is_none());
     }
 
     #[test]

@@ -1,6 +1,10 @@
 //! pi-datagen: seeded synthetic person and organization feeds, plus the exact counts the
 //! acceptance check expects (`expected.json`). See docs/ARCHITECTURE.md, "The data".
 //!
+//! The feeds are always in the built-in feed schema (`id`/`record`, `roles[].organization_id`,
+//! the built-in field names), and `expected.json` counts by the built-in mapping's fields: run
+//! them with `PI_SCHEMA_FILE` and `PI_MAPPING_FILE` unset.
+//!
 //! The output under a [`Sink`] is:
 //!
 //! ```text

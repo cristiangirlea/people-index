@@ -82,6 +82,7 @@ impl PlanStage {
             organizations,
             persons,
             total_bytes,
+            schema: Some(self.config.schema_pin()),
             created_at: OffsetDateTime::now_utc(),
         })
     }
@@ -148,12 +149,17 @@ impl Stage for PlanStage {
                 CreateOutcome::AlreadyExists => Plan::load(ctx).await?,
             }
         };
+        plan.check_schema(&self.config.schema_pin())?;
+        let pin = plan.schema_pin();
         tracing::info!(
             partitions = plan.partitions,
             organization_files = plan.organizations.len(),
             person_files = plan.persons.len(),
             input_bytes = plan.total_bytes,
             index = %plan.index,
+            builtin_schema = self.config.schema.is_builtin(),
+            feed_schema_sha256 = %pin.feed_schema_sha256,
+            mapping_sha256 = %pin.mapping_sha256,
             "plan ready"
         );
         let mut report = TaskReport {
@@ -294,6 +300,43 @@ mod tests {
         let plan = Plan::load(&ctx_b).await.unwrap();
         assert_eq!(plan.delivery.as_deref(), Some("a"));
         assert_eq!(plan.persons[0].key, "raw/a/persons/a.ndjson.gz");
+    }
+
+    #[tokio::test]
+    async fn the_plan_pins_the_schema_and_a_resume_with_another_one_fails_for_good() {
+        let store = Store::memory();
+        store.put("raw/persons/a.ndjson.gz", vec![1]).await.unwrap();
+        let ctx = RunContext::new("pinned", store.clone()).unwrap();
+        let task = TaskSpec::single(StageName::Plan);
+        let custom = StagesConfig {
+            schema: Arc::new(
+                pi_model::FeedSchema::from_json(r#"{"envelope": {"id": "key"}}"#).unwrap(),
+            ),
+            ..StagesConfig::default()
+        };
+        PlanStage::new(Arc::new(custom.clone()))
+            .run(&ctx, &task, &AttemptId::new())
+            .await
+            .unwrap();
+        let plan = Plan::load(&ctx).await.unwrap();
+        assert_eq!(plan.schema, Some(custom.schema_pin()));
+        assert_ne!(plan.schema_pin(), crate::plan_file::SchemaPin::builtin());
+        // The same settings resume; the built-in ones do not, at the plan or in any task.
+        PlanStage::new(Arc::new(custom.clone()))
+            .run(&ctx, &task, &AttemptId::new())
+            .await
+            .unwrap();
+        Plan::load_for(&ctx, &custom).await.unwrap();
+        let builtin = StagesConfig::default();
+        let err = PlanStage::new(Arc::new(builtin.clone()))
+            .run(&ctx, &task, &AttemptId::new())
+            .await
+            .unwrap_err();
+        assert!(pi_coord::is_permanent(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("PI_SCHEMA_FILE"), "{err:#}");
+        assert!(pi_coord::is_permanent(
+            &Plan::load_for(&ctx, &builtin).await.unwrap_err()
+        ));
     }
 
     #[tokio::test]

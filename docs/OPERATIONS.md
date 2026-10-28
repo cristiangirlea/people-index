@@ -602,3 +602,243 @@ For a synthetic delivery, `people-index datagen --delivery batch-20261028` write
 and `expected.json` there; create `_COMPLETE` separately after it succeeds. An explicit
 `datagen --out` names the exact destination instead. With `PI_INPUT_URL`, these paths are
 relative to that input prefix rather than `raw/`.
+
+## Feed schema
+
+The pipeline reads a few names in the feeds: the envelope keys (`id`, `record`), the person's
+list of references to organizations (`roles`) with each reference's organization id
+(`organization_id`), and the mapped fields whose JSON kinds extraction checks
+([ARCHITECTURE.md](ARCHITECTURE.md), "The data"). Those are the built-in schema. A feed that
+names them differently is described by two files, read once at startup by `run`, `worker` and
+`stage`:
+
+- a **schema file**, `PI_SCHEMA_FILE` (`--schema-file`): the names, below;
+- a **mapping file**, `PI_MAPPING_FILE` (`--mapping-file`): the index mapping with the same
+  names, the `mappings` body of a create-index request, as `crates/pi-es/src/mapping.json` is.
+
+Both unset (or empty, as compose passes an unset variable) means the built-in schema and
+mapping: a deployment that sets neither changes nothing.
+
+### The schema file
+
+A JSON object; every key is optional, and a key left out keeps its built-in value. A table
+that is given replaces the built-in table whole (it is not merged).
+
+| key | meaning | built-in |
+|---|---|---|
+| `envelope.id` | the envelope key of the person or organization id | `id` |
+| `envelope.record` | the envelope key of the record | `record` |
+| `person.references` | the person field listing references to organizations | `roles` |
+| `person.reference_id` | the field of a reference holding the organization id | `organization_id` |
+| `person.fields` | the checked top-level person fields: `[{"name", "kind"}]` | `PERSON_FIELDS` |
+| `person.reference_fields` | the checked fields of each reference | `ROLE_FIELDS` |
+| `person.disabled` | person fields the mapping disables (`enabled: false`) | `memberships`, `educations`, `certifications`, `languages` |
+| `organization.fields` | the checked organization fields | `ORGANIZATION_FIELDS` |
+| `organization.disabled` | organization fields the mapping disables | `addresses`, `locations`, `funding_rounds` |
+
+The tables are in `crates/pi-model/src/shape.rs`. A `kind` is the JSON a field takes, and must
+fit the field's type in the mapping:
+
+| kind | takes | mapping type |
+|---|---|---|
+| `number` | a number, or a string of decimal digits within `u64` (strict: anything else quarantines the record) | `long` or `integer` with `ignore_malformed: true` |
+| `boolean` | `true`, `false`, `"true"`, `"false"`, `""` (strict) | `boolean` |
+| `lenient_long`, `lenient_integer`, `lenient_boolean` | any scalar or array of scalars; values the index skips are counted, not quarantined | `long`, `integer`, `boolean` with `ignore_malformed: true` |
+| `string`, `string_array` | any scalar or array of scalars | `text`, `keyword`, or `date` with `ignore_malformed: true` |
+| `object_array` | an array of objects: only the references field | `object` |
+
+Every `long`, `integer` and `date` field needs `ignore_malformed: true`, whatever its kind: an
+id above `i64::MAX` passes `number`, a value past `i32` fits no `integer`, and a `string` takes
+text no date format reads; without it Elasticsearch fails the document and the load with it.
+
+The file is refused at startup, with the file and the field named (`PI_SCHEMA_FILE
+/etc/people-index/feed/schema.json: person.fields[2].name: "x" is listed twice (also at
+person.fields[1].name)`), for: an unknown key (anywhere), a section or field entry that is not
+an object, an empty name, a field name with a `.` (Elasticsearch reads it as an object path),
+the same envelope key for `id` and `record`, a name listed twice in one object's tables
+(`fields` and `disabled` together), a references field missing from `person.fields` or not an
+`object_array` (or another `object_array` field), the organization id (`person.reference_id`)
+listed in `person.reference_fields` with a kind other than `number` or `string` (the join reads
+it by the id rule anyway), and a name the document builder writes:
+`organizations` and `unresolved_organization_ids` on the person, `organization_resolved` in a
+reference. Those three output names are fixed whatever the feed calls its references: the
+document gets `organizations[]`, `unresolved_organization_ids[]` and
+`<references>[].organization_resolved` ("The output document").
+
+A complete example, for a feed whose lines look like
+`{"key": 7, "changed": "2026-10-28T12:00:00Z", "payload": {"given_name": "Ada", "positions":
+[{"company_ref": 3, "position_title": "Engineer"}]}}` and
+`{"key": 3, "payload": {"label": "Acme", "offices": [...]}}` (a test reads this block back and
+runs a renamed feed through it, `crates/people-index/tests/feed_schema.rs`):
+
+<!-- feed-schema-example -->
+```json
+{
+  "envelope": {"id": "key", "record": "payload"},
+  "person": {
+    "references": "positions",
+    "reference_id": "company_ref",
+    "fields": [
+      {"name": "id", "kind": "number"},
+      {"name": "given_name", "kind": "string"},
+      {"name": "family_name", "kind": "string"},
+      {"name": "full_name", "kind": "string"},
+      {"name": "headline", "kind": "string"},
+      {"name": "summary", "kind": "string"},
+      {"name": "country", "kind": "string"},
+      {"name": "region", "kind": "string"},
+      {"name": "city", "kind": "string"},
+      {"name": "industry", "kind": "string"},
+      {"name": "profile_url", "kind": "string"},
+      {"name": "skills", "kind": "string_array"},
+      {"name": "connections", "kind": "lenient_long"},
+      {"name": "followers", "kind": "lenient_long"},
+      {"name": "open_to_work", "kind": "lenient_boolean"},
+      {"name": "positions", "kind": "object_array"}
+    ],
+    "reference_fields": [
+      {"name": "id", "kind": "number"},
+      {"name": "position_title", "kind": "string"},
+      {"name": "company_ref", "kind": "number"},
+      {"name": "organization_name", "kind": "string"},
+      {"name": "organization_domain", "kind": "string"},
+      {"name": "employment_type", "kind": "string"},
+      {"name": "start_date", "kind": "string"},
+      {"name": "end_date", "kind": "string"},
+      {"name": "location", "kind": "string"},
+      {"name": "description", "kind": "string"}
+    ],
+    "disabled": ["memberships", "educations", "certifications", "languages"]
+  },
+  "organization": {
+    "fields": [
+      {"name": "id", "kind": "number"},
+      {"name": "label", "kind": "string"},
+      {"name": "domain", "kind": "string"},
+      {"name": "industry", "kind": "string"},
+      {"name": "country", "kind": "string"},
+      {"name": "city", "kind": "string"},
+      {"name": "size_range", "kind": "string"},
+      {"name": "employee_count", "kind": "lenient_long"},
+      {"name": "founded_year", "kind": "lenient_integer"},
+      {"name": "keywords", "kind": "string_array"},
+      {"name": "technologies", "kind": "string_array"},
+      {"name": "description", "kind": "string"}
+    ],
+    "disabled": ["offices", "locations", "funding_rounds"]
+  }
+}
+```
+
+### The mapping file
+
+Start from a copy of `crates/pi-es/src/mapping.json` (its reasons are in `mapping.md` next to
+it) and rename the same fields. For the example above: `first_name` and `last_name` become
+`given_name` and `family_name` (keep their `copy_to: full_name`), `roles` becomes `positions`
+with `title` and `organization_id` renamed inside it (and `positions.organization_resolved`, a
+`boolean`, added by the builder, kept), `organizations.name` becomes `organizations.label` and
+`organizations.addresses` becomes `organizations.offices`.
+
+Your own fields can be added to the mapping, each with an entry in the matching schema table
+(`person.fields`, `person.reference_fields` or `organization.fields`) of a kind its type takes,
+as long as they hold scalars or arrays of scalars. No kind takes an object other than the
+references, so a field of your own that holds one is never indexed: on the person or the
+organization, map it `{"type": "object", "enabled": false}` and list it under
+`person.disabled` or `organization.disabled`; inside a reference, leave it out of the mapping
+(there is no disabled list for references). Either way it stays in `_source`.
+
+At startup the mapping and the schema are checked against each other, and a run does not start
+when they disagree; the error lists every problem with its mapping path and both sources
+(`PI_SCHEMA_FILE: ..., PI_MAPPING_FILE: built-in`):
+
+- `"dynamic": false` at the top, and no other `dynamic` value anywhere: unknown fields stay in
+  `_source`, unindexed;
+- every field Elasticsearch parses (not disabled, not written by the builder) is in a schema
+  table with a kind its type takes (the table above), and every table entry is mapped; every
+  `long`, `integer` and `date` field has `ignore_malformed: true`; a type without a rule here
+  (`nested`, `float`, `wildcard`, ...) is refused;
+- every multi-field (under `"fields"`) takes what its field lets through: `text` and `keyword`
+  always, `long`, `integer`, `date` and `boolean` with `ignore_malformed: true`, anything else
+  only if it fits the field's kind;
+- every `copy_to` target is a `text` or `keyword` field;
+- the fields with `"enabled": false` are exactly the schema's `disabled` lists;
+- `organizations` is an `object`, `unresolved_organization_ids` a `long` with
+  `ignore_malformed: true` and `<references>.organization_resolved` a `boolean`.
+
+### Running with them
+
+Every process of a run reads the same files: the coordinator, every worker and `people-index
+stage`. `plan.json` records the SHA-256 of both, as canonical JSON
+(`"schema": {"feed_schema_sha256": ..., "mapping_sha256": ...}`; key order and whitespace do not
+matter, and a schema file that spells out the built-in names in the built-in order is the
+built-in schema: tables are compared in order), and every
+task checks them before it starts: a resumed run, or a worker, with another schema or mapping
+fails the run for good (`run 20261028T120000Z-a1b2c3 was planned with another feed schema or
+index mapping: the feed schema (PI_SCHEMA_FILE) has sha256 ..., the plan ...`). Resume it with the
+files it started with; a changed schema is a new run. A plan written before this field existed
+counts as the built-in schema and mapping. `summary.json` repeats the pin.
+
+**Compose** passes `PI_SCHEMA_FILE` and `PI_MAPPING_FILE` from `deploy/compose/.env` to every
+pipeline container, empty by default. The files must be inside the containers, for instance with
+a `deploy/compose/compose.override.yaml` next to `compose.yaml` (Compose reads it by itself):
+
+```yaml
+services:
+  coordinator:
+    volumes: [./feed:/etc/people-index/feed:ro]
+  worker:
+    volumes: [./feed:/etc/people-index/feed:ro]
+```
+
+and in `.env`: `PI_SCHEMA_FILE=/etc/people-index/feed/schema.json` and
+`PI_MAPPING_FILE=/etc/people-index/feed/mapping.json`. Compose merges volumes by their path in
+the container, so these add to the pipeline's own (`es-ca`, `/tmp`).
+
+**Kubernetes**: neither variable is set in `people-index-config` (base); an overlay that uses
+files puts them in a ConfigMap, sets the variables and mounts the ConfigMap into every pipeline
+pod. Not enabled anywhere by default; for an overlay with `schema.json` and `mapping.json` next
+to its `kustomization.yaml`:
+
+```yaml
+configMapGenerator:
+  - name: people-index-feed-schema
+    files:
+      - schema.json
+      - mapping.json
+  - name: people-index-config
+    behavior: merge
+    literals:
+      - PI_SCHEMA_FILE=/etc/people-index/feed/schema.json
+      - PI_MAPPING_FILE=/etc/people-index/feed/mapping.json
+```
+
+(with the overlay's `generatorOptions: disableNameSuffixHash: true`, as the local overlay has,
+so the Jobs find the fixed name), and in both Jobs of `deploy/k8s/jobs/run.yaml` (and the
+CronJob of the schedule component, if used) one more volume and mount:
+
+```yaml
+          volumeMounts:
+            - name: feed-schema
+              mountPath: /etc/people-index/feed
+              readOnly: true
+      volumes:
+        - name: feed-schema
+          configMap:
+            name: people-index-feed-schema
+```
+
+A changed ConfigMap reaches the next run's pods; a run already planned refuses it, as above.
+
+### What stays built-in
+
+- `people-index datagen` writes feeds in the built-in schema only, and its `expected.json`
+  counts role titles on `roles.title.keyword` and organization names on
+  `organizations.name.keyword`: `verify --source expected` is for those synthetic feeds.
+- `verify --source summary` reads the run's pin from `summary.json`: for a run with another
+  schema or mapping it checks `alias`, `count` and `sample:ids`, and leaves out
+  `sample:full_name` and `sample:organization_id`, which query the built-in mapping's
+  `full_name` and `organizations.id`.
+- Counter and summary names keep the built-in words whatever the feed calls its references
+  (`roles`, `roles_resolved`, `roles_unresolved` in `assemble`'s counters, `resolved_roles` and
+  `unresolved_roles` in `summary.json`), and `PI_PUBLISH_MAX_UNRESOLVED` bounds the share of
+  references whose organization did not resolve.

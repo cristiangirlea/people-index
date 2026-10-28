@@ -63,6 +63,10 @@ pub struct Published {
     pub index: String,
     /// The documents `publish` counted in it.
     pub docs: u64,
+    /// The run used the built-in feed schema and mapping, so `first_name`, `last_name`,
+    /// `full_name` and `organizations.id` are the fields the name and organization samples
+    /// query. With another schema or mapping those two checks are left out.
+    pub builtin_names: bool,
 }
 
 /// Every check of one verification.
@@ -165,6 +169,9 @@ impl Verifier {
     /// - `sample:organization_id`, when the sample carries a joined organization with an id
     ///   the mapping can index: a term query on it finds at least one document.
     ///
+    /// The last two query the built-in mapping's fields, so they run only for a run that used
+    /// the built-in feed schema and mapping ([`Published::builtin_names`]).
+    ///
     /// The sample prefers a document with both a last name and an organization, so the
     /// conditional checks run whenever the index has such a document; neither is required,
     /// since a real feed may lack names or resolve no organization. A non-empty index that
@@ -204,6 +211,9 @@ impl Verifier {
                 actual: self.admin.count(index, Some(&by_id)).await?,
                 at_least: false,
             });
+            if !published.builtin_names {
+                return self.finish(alias, index, before, checks).await;
+            }
             // Names that analyse to no terms at all (punctuation) match everything rather than
             // nothing: the check is that real names find their document.
             if !sample.names.is_empty() {

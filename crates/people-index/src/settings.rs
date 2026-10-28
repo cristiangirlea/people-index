@@ -1,6 +1,8 @@
 //! From command-line arguments to the library types: stores, the run context, the stage
-//! settings and the Elasticsearch client settings.
+//! settings (the feed schema and the index mapping included) and the Elasticsearch client
+//! settings.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -8,6 +10,7 @@ use pi_coord::{
     CancellationToken, LeaseConfig, LocalExecutor, RetryPolicy, RunContext, StoreCoordination,
 };
 use pi_es::{Auth, EsConfig, HealthStatus, Secret};
+use pi_model::FeedSchema;
 use pi_segment::SegmentConfig;
 use pi_stages::{EsStageConfig, StagesConfig};
 use pi_store::{RunLayout, Store, StoreOptions};
@@ -115,6 +118,35 @@ pub fn es_config(args: &EsArgs) -> anyhow::Result<EsConfig> {
     Ok(config)
 }
 
+/// A settings path, `None` when unset or empty (compose passes an unset variable as empty).
+fn file_setting(value: Option<&str>) -> Option<&Path> {
+    value.filter(|v| !v.trim().is_empty()).map(Path::new)
+}
+
+/// Reads `PI_SCHEMA_FILE`, or the built-in schema when it is unset.
+pub fn feed_schema(pipeline: &PipelineArgs) -> anyhow::Result<Option<FeedSchema>> {
+    let Some(path) = file_setting(pipeline.schema_file.as_deref()) else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("PI_SCHEMA_FILE: reading {}", path.display()))?;
+    FeedSchema::from_json(&text)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("PI_SCHEMA_FILE {}: {e}", path.display()))
+}
+
+/// Reads `PI_MAPPING_FILE`, or `None` for the built-in mapping when it is unset.
+pub fn index_mapping(pipeline: &PipelineArgs) -> anyhow::Result<Option<serde_json::Value>> {
+    let Some(path) = file_setting(pipeline.mapping_file.as_deref()) else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("PI_MAPPING_FILE: reading {}", path.display()))?;
+    pi_es::parse_mapping(&text)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("PI_MAPPING_FILE {}: {e}", path.display()))
+}
+
 /// The stage settings.
 pub fn stages_config(
     pipeline: &PipelineArgs,
@@ -130,7 +162,7 @@ pub fn stages_config(
         .publish_health
         .parse()
         .map_err(|e| anyhow::anyhow!("PI_PUBLISH_HEALTH: {e}"))?;
-    let config = StagesConfig {
+    let mut config = StagesConfig {
         alias: pipeline.alias.clone(),
         delivery: stores.delivery.clone(),
         require_complete_marker: pipeline.require_complete_marker,
@@ -166,7 +198,24 @@ pub fn stages_config(
             publish_max_unresolved: pipeline.publish_max_unresolved,
             publish_allow_empty_organizations: pipeline.publish_allow_empty_organizations,
         },
+        ..StagesConfig::default()
     };
+    if let Some(schema) = feed_schema(pipeline)? {
+        config.schema = Arc::new(schema);
+    }
+    if let Some(mapping) = index_mapping(pipeline)? {
+        config.mapping = Arc::new(mapping);
+    }
+    pi_es::check_mapping(&config.mapping, &config.schema).map_err(|e| {
+        let source = |value: Option<&str>| {
+            file_setting(value).map_or("built-in".to_owned(), |p| p.display().to_string())
+        };
+        anyhow::anyhow!(
+            "{e} (PI_SCHEMA_FILE: {}, PI_MAPPING_FILE: {})",
+            source(pipeline.schema_file.as_deref()),
+            source(pipeline.mapping_file.as_deref())
+        )
+    })?;
     config.validate()?;
     Ok(config)
 }
@@ -363,6 +412,79 @@ mod tests {
         let args = run_args(&["--store-url", "memory://", "--index-codec", "zip"]);
         let stores = Stores::open(&args.store).unwrap();
         assert!(stages_config(&args.pipeline, &args.es, &args.exec, &stores).is_err());
+    }
+
+    #[test]
+    fn schema_and_mapping_files_are_read_and_checked_against_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let schema = r#"{"envelope": {"id": "key"},
+            "person": {"references": "jobs",
+                "fields": [{"name": "name", "kind": "string"}, {"name": "jobs", "kind": "object_array"}],
+                "reference_fields": [{"name": "organization_id", "kind": "number"}], "disabled": []},
+            "organization": {"fields": [], "disabled": []}}"#;
+        let mapping = r#"{"dynamic": false, "properties": {
+            "name": {"type": "text"},
+            "jobs": {"type": "object", "properties": {
+                "organization_id": {"type": "long", "ignore_malformed": true},
+                "organization_resolved": {"type": "boolean"}}},
+            "organizations": {"type": "object", "properties": {}},
+            "unresolved_organization_ids": {"type": "long", "ignore_malformed": true}}}"#;
+        std::fs::write(path("schema.json"), schema).unwrap();
+        std::fs::write(path("mapping.json"), mapping).unwrap();
+        std::fs::write(path("bad.json"), r#"{"envelope": {"id": ""}}"#).unwrap();
+
+        let config = |extra: &[&str]| {
+            let mut command_line = vec!["--store-url", "memory://"];
+            command_line.extend_from_slice(extra);
+            let args = run_args(&command_line);
+            let stores = Stores::open(&args.store).unwrap();
+            stages_config(&args.pipeline, &args.es, &args.exec, &stores)
+        };
+        // Unset and empty both mean the built-in ones.
+        for extra in [&[][..], &["--schema-file", "", "--mapping-file", " "][..]] {
+            let cfg = config(extra).unwrap();
+            assert!(cfg.schema.is_builtin());
+            assert_eq!(*cfg.mapping, pi_es::mapping());
+        }
+
+        let (schema_file, mapping_file, bad) =
+            (path("schema.json"), path("mapping.json"), path("bad.json"));
+        let cfg = config(&[
+            "--schema-file",
+            &schema_file,
+            "--mapping-file",
+            &mapping_file,
+        ])
+        .unwrap();
+        assert_eq!(cfg.schema.envelope_id(), "key");
+        assert_eq!(cfg.schema.references(), "jobs");
+        assert_eq!(cfg.mapping["properties"]["jobs"]["type"], "object");
+
+        // Each without the other does not fit; the error names both sources.
+        let err = format!(
+            "{:#}",
+            config(&["--schema-file", &schema_file]).unwrap_err()
+        );
+        assert!(err.contains("does not fit the feed schema"), "{err}");
+        assert!(err.contains("PI_MAPPING_FILE: built-in"), "{err}");
+        assert!(err.contains(&schema_file), "{err}");
+        let err = format!(
+            "{:#}",
+            config(&["--mapping-file", &mapping_file]).unwrap_err()
+        );
+        assert!(err.contains("PI_SCHEMA_FILE: built-in"), "{err}");
+
+        // A bad or missing file names the setting, the file and the field.
+        let err = format!("{:#}", config(&["--schema-file", &bad]).unwrap_err());
+        assert!(err.contains("PI_SCHEMA_FILE"), "{err}");
+        assert!(err.contains(&bad), "{err}");
+        assert!(err.contains("envelope.id: empty name"), "{err}");
+        let missing = path("missing.json");
+        let err = format!("{:#}", config(&["--mapping-file", &missing]).unwrap_err());
+        assert!(err.contains("PI_MAPPING_FILE: reading"), "{err}");
+        let err = format!("{:#}", config(&["--mapping-file", &bad]).unwrap_err());
+        assert!(err.contains("does not fit the feed schema"), "{err}");
     }
 
     #[test]

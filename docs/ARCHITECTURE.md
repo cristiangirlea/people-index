@@ -67,6 +67,56 @@ is not an object, or any other `organization_id` makes the line malformed (kind 
 Unknown fields are carried through untouched (the record is kept as raw JSON; only the fields
 the join needs are parsed).
 
+### Feed schema
+
+The names above (`id` and `record` in the envelope, `roles[].organization_id`, and the checked
+fields below) are the built-in feed schema. A feed with other names is described by a schema
+file (`PI_SCHEMA_FILE`) and an index mapping with the same names (`PI_MAPPING_FILE`); both unset
+means the built-in ones, so a deployment that sets neither behaves exactly as before. The
+schema file is a JSON object with optional keys `envelope.{id, record}`,
+`person.{references, reference_id, fields, reference_fields, disabled}` and
+`organization.{fields, disabled}`; a field table is a list of `{"name", "kind"}` (kinds
+`number`, `boolean`, `lenient_long`, `lenient_integer`, `lenient_boolean`, `string`,
+`string_array`, `object_array`, the `JsonKind`s below), a `disabled` list a list of names. A key
+left out keeps its built-in value; a table given replaces the built-in one whole. Everywhere in
+this document, `roles` and `organization_id` stand for `person.references` and
+`person.reference_id`. [OPERATIONS.md](OPERATIONS.md), "Feed schema", has a complete example.
+
+- `pi-model` resolves the file once into a `FeedSchema` (`FeedSchema::from_json`), strictly:
+  unknown keys, a section or entry that is not an object, empty names, a field name with a `.`,
+  `id` equal to `record`, a name listed twice in one object's tables (`fields` and `disabled`
+  together), a references field missing from `person.fields` or not the one `object_array`,
+  the organization id listed in `person.reference_fields` as anything but `number` or `string`,
+  and the names the builder writes (`organizations`, `unresolved_organization_ids` on the
+  person, `organization_resolved` in a reference) are refused, the error naming the file and
+  the field (`person.fields[2].name: ...`). The built-in schema is a static that borrows the
+  compiled tables; parsing a line compares keys against the schema's strings as it did against
+  the literals, with no lookup by name and no allocation per record.
+- At startup (`run`, `worker`, `stage`) `pi-es` checks the mapping against the schema
+  (`check_mapping`) and refuses to start when they disagree, listing every problem: `dynamic`
+  must be `false`; every field Elasticsearch parses (not disabled, not builder-owned) must be in
+  a table with a kind its type takes, and every table entry mapped; every `long`, `integer` and
+  `date` field must have `ignore_malformed: true`, whatever its kind (an id above `i64::MAX`, a
+  value past `i32` or text no date format reads would otherwise fail the document and the
+  load); the `enabled: false` fields must be exactly the `disabled` lists; the builder's three
+  fields must be mapped as `object`, `long` with `ignore_malformed: true`, and `boolean`. Types
+  without a rule (`nested`, `float`, ...) are refused. Multi-fields (`fields`) must take what
+  their field lets through (`text`, `keyword`, or a number, date or boolean type with
+  `ignore_malformed: true`), and `copy_to` targets must be `text` or `keyword`. Fields of
+  one's own can be added to the mapping and the tables when they hold scalars; one that holds
+  an object (other than the references) is never indexed: on the person or the organization it
+  is mapped `enabled: false` and listed under `person.disabled` or `organization.disabled`,
+  inside a reference it is left out of the mapping. It stays in `_source` either way.
+- `plan` records the SHA-256 of both, as canonical JSON (keys sorted, no whitespace), in
+  `plan.json` (`schema`, under "Storage layout"), and every task checks it before it starts: a
+  resumed run, a worker or a `stage` command with another schema or mapping fails the run
+  permanently, naming the setting that differs. A plan without `schema` used the built-in ones.
+- Only the input names are configurable. The output's own names (`organizations`,
+  `unresolved_organization_ids`, `organization_resolved`), the counter and summary names
+  (`roles_resolved`, `resolved_roles`, ...) and `datagen`'s feeds (and so `verify --source
+  expected`) stay built-in; `verify --source summary` leaves out its two samples that query the
+  built-in mapping's fields for a run with another schema or mapping.
+
 **A number token longer than 1000 characters** (as written: sign, digits, `.`, exponent)
 anywhere in the record, mapped, unknown or inside a disabled object, makes the line malformed
 (kind `record`, the reason names the path, as in `addresses[2].zip: a number of 1001
@@ -96,8 +146,9 @@ in the extract counter `records_with_repeated_keys` (per extracted line, like
 (kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
 or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must
 cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELDS`,
-`ROLE_FIELDS`, `ORGANIZATION_FIELDS`), checked by `extract-persons` (the record and every role)
-and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. Identifiers (`id`,
+`ROLE_FIELDS`, `ORGANIZATION_FIELDS`, or the feed schema's tables), checked by
+`extract-persons` (the record and every role) and `extract-orgs`; `pi-es` checks it against the
+index mapping at startup (`check_mapping`). Identifiers (`id`,
 `roles[].id`, `roles[].organization_id`, the organization's `id`) are strict: a number or a
 string the id rule above accepts (decimal digits within `u64`, so `"007"` passes and `"7a"`,
 `" 7"`, `"-1"` and `""` do not). Measures (`connections`, `followers`, `open_to_work`, `employee_count`,
@@ -164,7 +215,8 @@ line number), for organizations and for persons alike, whatever the partition or
 The document `_id` is the person id, so a resend is idempotent.
 
 The explicit mapping lives in `crates/pi-es/src/mapping.json` (`dynamic: false`; `roles` and
-`organizations` are `object`, not `nested`), with the reasons in `crates/pi-es/src/mapping.md`.
+`organizations` are `object`, not `nested`), with the reasons in `crates/pi-es/src/mapping.md`;
+`PI_MAPPING_FILE` replaces it for a feed with other names ("Feed schema").
 Term queries on `roles.title.keyword` and `organizations.name.keyword` are part of the
 acceptance check.
 
@@ -176,7 +228,7 @@ once the previous one has committed every task:
 
 | stage | one task per | reads | writes |
 |---|---|---|---|
-| `plan` | run | the input listing | `plan.json`: input files, partition count `P`, index name |
+| `plan` | run | the input listing | `plan.json`: input files, partition count `P`, index name, schema and mapping digests |
 | `extract-orgs` | organization file | `raw/organizations/<file>` | `orgs/p=<p>/` segments of `OrgRow`, quarantine |
 | `extract-persons` | person file | `raw/persons/<file>` | `persons/q=<q>/` `PersonRow`, `edges/p=<p>/` `EdgeRow`, quarantine |
 | `join` | partition `p` | `orgs/p`, `edges/p` | `joined/q=<q>/` segments of `JoinedRow` |
@@ -312,8 +364,10 @@ the snapshots component stores them under `snapshots/`.
   are `20261015T120000Z-a1b2c3` (UTC start time first, so the greatest id is the newest run);
   `publish` reads that start second to tell older runs' indexes from newer ones.
 - `plan.json`: `{run_id, delivery, partitions, alias, index, organizations: [{key, size, version}],
-  persons: [{key, size, version}], total_bytes, created_at}`, written create-if-absent; a retry
-  reads it back. `version` is `{e_tag, version}` as the input listing reported it (the etag
+  persons: [{key, size, version}], total_bytes, schema: {feed_schema_sha256, mapping_sha256},
+  created_at}`, written create-if-absent; a retry reads it back. `schema` pins the feed schema
+  and the index mapping ("Feed schema"); every task refuses a run whose pin differs from its
+  own, and a plan without it means the built-in ones. `version` is `{e_tag, version}` as the input listing reported it (the etag
   always; a version id only where the store reports one). Extract reads each file with
   `If-Match` on that etag (and the version id, if any), so a run reads exactly the bytes it
   planned. The local filesystem's etag is its inode, modification time and size; it checks it
@@ -329,7 +383,7 @@ the snapshots component stores them under `snapshots/`.
 - `publish.json`: `{alias, index, previous, previous_docs}`, the indexes the alias pointed at (the run's own
   excluded) when the first publish attempt was about to move it; every attempt deletes
   these after the swap.
-- `summary.json`: `{run_id, delivery, alias, index, partitions, started_at, finished_at, wall_ms,
+- `summary.json`: `{run_id, delivery, alias, index, partitions, schema, started_at, finished_at, wall_ms,
   documents, persons_per_second, input_bytes, stages: [{stage, tasks, wall_ms, task_ms,
   bytes_in, bytes_out, counters}], publish: {docs, previous_docs, resolved_roles, unresolved_roles, indexed_organizations,
   min_share, max_unresolved, allow_empty_organizations, previous, deleted, not_deleted},
@@ -395,13 +449,13 @@ requires conditional writes (S3 or memory); local runs proceed without a run loc
 
 | crate | what it owns |
 |---|---|
-| `pi-model` | the row types, envelope parsing and validation, ids, `Partitioner`, `LastWins`, `JoinedGroups`, `DocumentBuilder` (the join's output rules). Pure: no I/O. |
+| `pi-model` | the row types, the feed schema (`FeedSchema`), envelope parsing and validation, ids, `Partitioner`, `LastWins`, `JoinedGroups`, `DocumentBuilder` (the join's output rules). Pure: no I/O. |
 | `pi-segment` | `SegmentWriter` / `SegmentReader` for the segment format, rolling, magic, varint framing, `MemorySink` / `FileSink`. |
 | `pi-store` | `Store`: a thin wrapper over `object_store` (S3-compatible / local / memory) with put, get, stream, list, create-if-absent and update-if-match; `RunLayout`: every path above, built in one place. |
 | `pi-coord` | `TaskSpec`, `StageSpec`, `CommitLog`, `LeaseManager`, the `Stage` trait, the `Executor` trait with `LocalExecutor` (a bounded pool in one process) and `DistributedExecutor` (coordinator) plus `Worker` (lease-claiming workers), `RunDriver`, `RunState`, retries. |
-| `pi-es` | `EsClient` (reqwest, rustls, basic or API-key auth, custom CA), `IndexAdmin`, `BulkIndexer`, `Publisher`, `Verifier` (expected counts, content digest), the mapping. |
+| `pi-es` | `EsClient` (reqwest, rustls, basic or API-key auth, custom CA), `IndexAdmin`, `BulkIndexer`, `Publisher`, `Verifier` (expected counts, content digest), the mapping and its check against the feed schema (`check_mapping`). |
 | `pi-stages` | one type per stage implementing `Stage`, and `build_registry`. |
-| `pi-datagen` | a seeded generator of both feeds with realistic skew (Zipf organization popularity, a third null organization ids, configurable unresolved, malformed and duplicate rates, duplicate ids across files) that also writes `expected.json`: exact counts for the acceptance check. |
+| `pi-datagen` | a seeded generator of both feeds (in the built-in schema only) with realistic skew (Zipf organization popularity, a third null organization ids, configurable unresolved, malformed and duplicate rates, duplicate ids across files) that also writes `expected.json`: exact counts for the acceptance check. |
 | `people-index` | the binary: `run`, `worker`, `datagen`, `verify`, `stage` (one task, for debugging). |
 
 The seams are traits so each piece is tested alone: a stage is tested against a local or
@@ -450,6 +504,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_STORE_URL` | object store prefix | `file://./store` |
 | `PI_INPUT_URL` | input prefix, if not `<store>/raw` | unset |
 | `PI_DELIVERY` | input sub-prefix for a delivery | unset |
+| `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the feed schema and the index mapping, as JSON files ("Feed schema"); empty is unset | unset: the built-in ones |
 | `PI_REQUIRE_COMPLETE_MARKER` | require `_COMPLETE` in the input root | false |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | S3-compatible store; an endpoint switches to path-style requests and an `http://` one allows plain HTTP | unset; region `us-east-1` |
 | `PI_ES_URL` | Elasticsearch | `http://localhost:9200` |
@@ -496,7 +551,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 - `people-index worker`: claims and runs tasks of the current stage of `--run-id` (or of the
   newest run) until the run is published or failed, or the idle timeout passes, then exits 0.
 - `people-index datagen --persons N --organizations M --files F --seed S --out <url>`: writes
-  `organizations/`, `persons/` and `expected.json` under `--out`.
+  `organizations/`, `persons/` and `expected.json` under `--out`, in the built-in schema.
 - `people-index verify --expected <file|url>`: runs the acceptance queries against the alias
   (count, `persons_with_unresolved`, title and organization-name term counts) and exits 1 when
   a check fails. `--source summary [--run-id R]` checks the alias against a run's

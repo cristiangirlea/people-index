@@ -20,16 +20,20 @@
 //! `long` string is counted, though Elasticsearch indexes it. An object still fails those
 //! fields, `ignore_malformed` or not, so it is quarantined there too.
 //!
-//! The tables below list every mapped field Elasticsearch parses, with the JSON kind it expects.
-//! A test in `pi-es` walks `mapping.json` and checks that the two agree, so they cannot drift.
+//! The tables below list every mapped field Elasticsearch parses, with the JSON kind it expects:
+//! they are the built-in schema's ([`crate::FeedSchema`]), and a schema file may replace them.
+//! At startup `pi-es` walks the index mapping and checks that it and the schema's tables agree
+//! (`pi_es::check_mapping`), so they cannot drift.
 //! Fields the mapping disables (`enabled: false`) accept any value and are not listed; neither
 //! are the fields the document builder writes itself ([`BUILDER_OWNED`]), since an input value
 //! of that name is replaced. `null` is always allowed, at any level: Elasticsearch skips it.
 //! When a key repeats in a person, role or organization object, only its last occurrence is
 //! checked, the one the document keeps.
 
+use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 
+use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use crate::error::{MalformedKind, MalformedRecord};
@@ -38,8 +42,13 @@ use crate::id::parse_decimal_id;
 use crate::line_stats::LineStats;
 use crate::raw::{RawObject, is_null};
 
-/// The JSON kind a mapped field expects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A name from a schema: compiled in (borrowed) or read from a schema file (owned).
+pub type Name = Cow<'static, str>;
+
+/// The JSON kind a mapped field expects. A schema file spells it in snake case
+/// ([`JsonKind::as_str`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JsonKind {
     /// A number, or a string of ASCII decimal digits within `u64` (the id rule,
     /// [`crate::parse_decimal_id`]; Elasticsearch coerces it): `long`, `integer`. Strict, for
@@ -72,6 +81,21 @@ pub enum JsonKind {
 }
 
 impl JsonKind {
+    /// The kind as a schema file spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::LenientLong => "lenient_long",
+            Self::LenientInteger => "lenient_integer",
+            Self::LenientBoolean => "lenient_boolean",
+            Self::String => "string",
+            Self::StringArray => "string_array",
+            Self::ObjectArray => "object_array",
+        }
+    }
+
     /// The kind in words, for a quarantine reason.
     #[must_use]
     pub fn describe(self) -> &'static str {
@@ -95,16 +119,34 @@ impl fmt::Display for JsonKind {
 }
 
 /// One mapped field and the JSON kind it expects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldShape {
     /// The field name inside its object.
-    pub name: &'static str,
+    pub name: Name,
     /// The JSON kind it expects.
     pub kind: JsonKind,
 }
 
+impl FieldShape {
+    /// A field of `kind` named `name`.
+    #[must_use]
+    pub fn new(name: impl Into<Name>, kind: JsonKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+        }
+    }
+}
+
 const fn field(name: &'static str, kind: JsonKind) -> FieldShape {
-    FieldShape { name, kind }
+    FieldShape {
+        name: Cow::Borrowed(name),
+        kind,
+    }
+}
+
+const fn name(name: &'static str) -> Name {
+    Cow::Borrowed(name)
 }
 
 /// The checked top-level fields of a person record (mapping paths without a prefix).
@@ -158,35 +200,45 @@ pub const ORGANIZATION_FIELDS: &[FieldShape] = &[
 ];
 
 /// Disabled top-level person fields.
-pub const PERSON_DISABLED: &[&str] = &["memberships", "educations", "certifications", "languages"];
+pub const PERSON_DISABLED: &[Name] = &[
+    name("memberships"),
+    name("educations"),
+    name("certifications"),
+    name("languages"),
+];
 /// Disabled top-level organization fields.
-pub const ORGANIZATION_DISABLED: &[&str] = &["addresses", "locations", "funding_rounds"];
+pub const ORGANIZATION_DISABLED: &[Name] =
+    &[name("addresses"), name("locations"), name("funding_rounds")];
 
-/// The mapped paths the document builder writes itself; input values of these names are
-/// replaced, so they are never checked.
+/// The mapped paths the document builder writes itself, with the built-in schema's references
+/// (`roles`); input values of these names are replaced, so they are never checked.
+/// [`crate::FeedSchema::builder_owned`] gives them for any schema.
 pub const BUILDER_OWNED: &[&str] = &[
     "organizations",
     "unresolved_organization_ids",
     "roles.organization_resolved",
 ];
 
-/// Checks the fields of `object` listed in `fields`; `role` is the index of the role `object`
-/// is (`None` for a whole record), so the reason names the field as `roles[3].title`. The
-/// values of lenient fields that Elasticsearch will skip are counted in `stats`.
+/// Checks the fields of `object` listed in `fields`; `role` is the references field and the
+/// index of the reference `object` is (`None` for a whole record), so the reason names the
+/// field as `roles[3].title`. The values of lenient fields that Elasticsearch will skip are
+/// counted in `stats`.
 pub(crate) fn check_fields(
     object: &RawObject<'_>,
     fields: &[FieldShape],
-    role: Option<usize>,
+    role: Option<(&str, usize)>,
     stats: &mut LineStats,
 ) -> Result<(), MalformedRecord> {
-    let prefix = role.map(|i| format!("roles[{i}].")).unwrap_or_default();
+    let prefix = role
+        .map(|(list, i)| format!("{list}[{i}]."))
+        .unwrap_or_default();
     for shape in fields {
-        if let Some(value) = object.get(shape.name) {
+        if let Some(value) = object.get(&shape.name) {
             let mut ignored = |at: &[usize], found| {
                 stats.ignore(|| format!("{prefix}{}{}", shape.name, indices(at)), found);
             };
             check_value(value, shape.kind, &mut ignored)
-                .map_err(|(at, found)| mismatch(&prefix, *shape, &at, found))?;
+                .map_err(|(at, found)| mismatch(&prefix, shape, &at, found))?;
         }
     }
     Ok(())
@@ -340,7 +392,7 @@ fn string_value(text: &str) -> Option<String> {
     }
 }
 
-fn mismatch(prefix: &str, shape: FieldShape, at: &str, found: &str) -> MalformedRecord {
+fn mismatch(prefix: &str, shape: &FieldShape, at: &str, found: &str) -> MalformedRecord {
     let expected = match (at.is_empty(), shape.kind) {
         (false, JsonKind::ObjectArray) => "an object",
         (_, kind) => kind.describe(),
@@ -683,13 +735,13 @@ mod tests {
     fn the_path_prefixes_the_reason() {
         let mut stats = LineStats::default();
         let object = RawObject::parse(r#"{"title":{"x":1}}"#).unwrap();
-        let err = check_fields(&object, ROLE_FIELDS, Some(2), &mut stats).unwrap_err();
+        let err = check_fields(&object, ROLE_FIELDS, Some(("roles", 2)), &mut stats).unwrap_err();
         assert_eq!(
             err.reason(),
             "roles[2].title: expected a string, number or boolean, found an object"
         );
         let object = RawObject::parse(r#"{"id":"abc"}"#).unwrap();
-        let err = check_fields(&object, ROLE_FIELDS, Some(0), &mut stats).unwrap_err();
+        let err = check_fields(&object, ROLE_FIELDS, Some(("roles", 0)), &mut stats).unwrap_err();
         assert_eq!(
             err.reason(),
             "roles[0].id: expected a number, found a string that is not a number"
@@ -726,11 +778,11 @@ mod tests {
         let cases = [
             (PERSON_FIELDS, "id", None),
             (ORGANIZATION_FIELDS, "id", None),
-            (ROLE_FIELDS, "id", Some(0)),
-            (ROLE_FIELDS, "organization_id", Some(0)),
+            (ROLE_FIELDS, "id", Some(("roles", 0))),
+            (ROLE_FIELDS, "organization_id", Some(("roles", 0))),
         ];
         for (fields, name, role) in cases {
-            let prefix = role.map_or(String::new(), |i| format!("roles[{i}]."));
+            let prefix = role.map_or(String::new(), |(list, i)| format!("{list}[{i}]."));
             for value in [r#""007""#, r#""7""#, "7"] {
                 let record = format!(r#"{{"{name}":{value}}}"#);
                 let object = RawObject::parse(&record).unwrap();

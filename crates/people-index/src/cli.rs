@@ -170,6 +170,14 @@ pub struct PipelineArgs {
     /// How long publish waits for that health.
     #[arg(long, env = "PI_HEALTH_TIMEOUT", value_parser = parse_duration, default_value = "30m")]
     pub health_timeout: Duration,
+    /// A JSON file naming the feeds' envelope keys, the person's references and the checked
+    /// fields (docs/OPERATIONS.md, Feed schema). Unset or empty: the built-in schema.
+    #[arg(long, env = "PI_SCHEMA_FILE")]
+    pub schema_file: Option<String>,
+    /// A JSON file with the index mapping (the mappings body of a create-index request).
+    /// Unset or empty: the built-in mapping.
+    #[arg(long, env = "PI_MAPPING_FILE")]
+    pub mapping_file: Option<String>,
 }
 
 /// How tasks are executed in this process.

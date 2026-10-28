@@ -18,7 +18,7 @@ use flate2::bufread::MultiGzDecoder;
 use pi_coord::{
     AttemptId, CancellationToken, Cancelled, RunContext, StageName, TaskReport, TaskSpec, permanent,
 };
-use pi_model::{LineStats, MalformedRecord, Partitioner, Seq};
+use pi_model::{FeedSchema, LineStats, MalformedRecord, Partitioner, Seq};
 use pi_segment::SegmentConfig;
 use pi_store::RunLayout;
 
@@ -69,6 +69,8 @@ pub(crate) struct SinkContext {
     pub(crate) partitioner: Partitioner,
     pub(crate) segment: SegmentConfig,
     pub(crate) buffer_bytes: usize,
+    /// The names lines are read by.
+    pub(crate) schema: Arc<FeedSchema>,
 }
 
 /// The tasks of an extract stage: one per input file of the feed, in feed order.
@@ -96,7 +98,7 @@ pub(crate) async fn run_extract(
     attempt: &AttemptId,
     make_sink: &SinkFactory,
 ) -> anyhow::Result<TaskReport> {
-    let plan = Plan::load(ctx).await?;
+    let plan = Plan::load_for(ctx, config).await?;
     let key = task
         .input
         .clone()
@@ -128,6 +130,7 @@ pub(crate) async fn run_extract(
         partitioner: plan.partitioner()?,
         segment: config.segment,
         buffer_bytes: config.buffer_bytes,
+        schema: Arc::clone(&config.schema),
     };
     let (feed_tx, inbox) = input_channel(INPUT_CHUNKS);
     let (outbox, uploads) = upload_channel(1);

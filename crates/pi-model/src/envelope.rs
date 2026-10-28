@@ -1,8 +1,9 @@
 //! The line envelope: `{"id": ..., "updated_at": ..., "record": {...}}`.
 //!
-//! Only `id` and `record` matter to the pipeline. `id` follows the rules in [`crate::id`];
-//! `record` must be an object and is kept as raw JSON, borrowed from the line. Other envelope
-//! fields (such as `updated_at`) are ignored. A duplicated `id` or `record` key is malformed
+//! Only `id` and `record` matter to the pipeline, under the names the feed schema gives them
+//! ([`parse_envelope_with_names`]; [`parse_envelope`] reads the built-in ones). `id` follows
+//! the rules in [`crate::id`]; `record` must be an object and is kept as raw JSON, borrowed
+//! from the line. Other envelope fields (such as `updated_at`) are ignored. A duplicated `id` or `record` key is malformed
 //! rather than last-wins: the envelope is the pipeline's own framing, and an ambiguous one is
 //! more likely a broken writer than a deliberate update.
 
@@ -34,6 +35,16 @@ const BOM: &str = "\u{feff}";
 
 /// Parses one NDJSON line (a trailing `\n` or `\r\n` is fine) into an envelope.
 pub fn parse_envelope(line: &[u8]) -> Result<Envelope<'_>, MalformedRecord> {
+    parse_envelope_with_names(line, "id", "record")
+}
+
+/// Parses one NDJSON line into an envelope whose id and record are under `id_key` and
+/// `record_key`.
+pub fn parse_envelope_with_names<'a>(
+    line: &'a [u8],
+    id_key: &str,
+    record_key: &str,
+) -> Result<Envelope<'a>, MalformedRecord> {
     let text = std::str::from_utf8(line).map_err(|e| {
         MalformedRecord::new(MalformedKind::Syntax, format!("line is not UTF-8: {e}"))
     })?;
@@ -47,10 +58,12 @@ pub fn parse_envelope(line: &[u8]) -> Result<Envelope<'_>, MalformedRecord> {
     let mut id = None;
     let mut record = None;
     for (key, value) in &object.entries {
-        let slot = match key.0.as_ref() {
-            "id" => &mut id,
-            "record" => &mut record,
-            _ => continue,
+        let slot = if key.0.as_ref() == id_key {
+            &mut id
+        } else if key.0.as_ref() == record_key {
+            &mut record
+        } else {
+            continue;
         };
         if slot.replace(*value).is_some() {
             return Err(MalformedRecord::new(
@@ -59,16 +72,19 @@ pub fn parse_envelope(line: &[u8]) -> Result<Envelope<'_>, MalformedRecord> {
             ));
         }
     }
-    let id = id.ok_or_else(|| MalformedRecord::new(MalformedKind::Envelope, "missing `id`"))?;
-    let record =
-        record.ok_or_else(|| MalformedRecord::new(MalformedKind::Envelope, "missing `record`"))?;
+    let id = id.ok_or_else(|| {
+        MalformedRecord::new(MalformedKind::Envelope, format!("missing `{id_key}`"))
+    })?;
+    let record = record.ok_or_else(|| {
+        MalformedRecord::new(MalformedKind::Envelope, format!("missing `{record_key}`"))
+    })?;
     let id = serde_json::from_str::<RecordId>(id.get())
-        .map_err(|e| MalformedRecord::new(MalformedKind::Envelope, format!("`id`: {e}")))?
+        .map_err(|e| MalformedRecord::new(MalformedKind::Envelope, format!("`{id_key}`: {e}")))?
         .0;
     if !is_object(record) {
         return Err(MalformedRecord::new(
             MalformedKind::Envelope,
-            "`record` is not an object",
+            format!("`{record_key}` is not an object"),
         ));
     }
     Ok(Envelope { id, record })
@@ -90,6 +106,29 @@ mod tests {
         let env = parse_envelope(b"{\"record\":{},\"id\":\"99\"}\r\n").unwrap();
         assert_eq!(env.id, 99);
         assert_eq!(env.record_text(), "{}");
+    }
+
+    #[test]
+    fn parses_named_envelope_fields() {
+        let env = parse_envelope_with_names(
+            br#"{"employee_id":"7","payload":{"name":"Ada"}}"#,
+            "employee_id",
+            "payload",
+        )
+        .unwrap();
+        assert_eq!(env.id, 7);
+        assert_eq!(env.record_text(), r#"{"name":"Ada"}"#);
+        let error = parse_envelope_with_names(
+            br#"{"employee_id":1,"employee_id":2,"payload":{}}"#,
+            "employee_id",
+            "payload",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .reason()
+                .contains("duplicate envelope field `employee_id`")
+        );
     }
 
     #[test]

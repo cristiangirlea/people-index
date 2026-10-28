@@ -82,7 +82,7 @@ impl Stage for LoadStage {
         task: &TaskSpec,
         _attempt: &AttemptId,
     ) -> anyhow::Result<TaskReport> {
-        let plan = Plan::load(ctx).await?;
+        let plan = Plan::load_for(ctx, &self.config).await?;
         let q = task_partition(task, &plan)?;
         let exists = IndexAdmin::new(self.client.clone())
             .exists(&plan.index)
@@ -193,6 +193,7 @@ mod tests {
             organizations: vec![],
             persons: vec![],
             total_bytes: 0,
+            schema: None,
             created_at: OffsetDateTime::UNIX_EPOCH,
             delivery: None,
         };

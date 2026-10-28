@@ -3,8 +3,8 @@
 #   certs        one-shot: CA + node certificates (elasticsearch-certutil), the CA for clients
 #   es01..es03   Elasticsearch 9.5.5, three master+data nodes, TLS on HTTP and transport,
 #                one zone attribute each (zone-a/b/c) with allocation awareness, as on k3d
-#   es-users     one-shot: waits for the formed cluster, creates role people-index-writer and
-#                user pipeline (the pipeline never uses the elastic superuser)
+#   es-users     one-shot: waits for the formed cluster, creates the writer and reader roles and
+#                users pipeline and reader (the pipeline never uses the elastic superuser)
 #   s3           SeaweedFS S3 gateway on s3:8333 (conditional writes verified by s3-init)
 #   s3-init      one-shot: creates the pipeline and snapshot buckets, verifies isolation and
 #                proves conditional writes return 412 for existing keys and stale etags
@@ -201,6 +201,7 @@ services:
       ES_NODES: "3"
       ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-elastic-dev-password}
       PIPELINE_ES_PASSWORD: ${PIPELINE_ES_PASSWORD:-pipeline-dev-password}
+      READER_ES_PASSWORD: ${READER_ES_PASSWORD:-reader-dev-password}
       PI_ALIAS: ${PI_ALIAS:-persons}
     volumes:
       - ./scripts:/scripts:ro

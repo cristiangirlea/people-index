@@ -14,6 +14,7 @@ them all.
 | Elasticsearch 9.5.5 | `es01`, `es02`, `es03`: three master+data nodes, zones a/b/c | ECK resource `es`: 3 dedicated masters + a data node set across zones; HTTP service `es-es-http:9200` |
 | TLS | CA and node certificates from `elasticsearch-certutil` (service `certs`) | ECK's self-signed CA, secret `es-es-http-certs-public` key `ca.crt` |
 | pipeline user | `pipeline`, role `people-index-writer`, created by `es-users` | the same user in ECK's file realm; credentials in secret `pipeline-es-credentials` (`username`, `password`) |
+| reader user | `reader`, role `people-index-reader`, created by `es-users` | role `people-index-reader` is available for an operator to assign to a user |
 | object store | SeaweedFS on `s3:8333`, buckets `people-index` and `people-index-snapshots`, created and probed by `s3-init` | SeaweedFS service `s3:8333`, buckets created by Job `s3-bucket-init`; credentials in secrets `s3-credentials` and `snapshot-s3-credentials` |
 | a run | services `coordinator` (`people-index run`) and `worker` (`people-index worker`, `--scale worker=N`) | Job `pi-run-<run_id>` and Job `pi-worker-<run_id>` (`parallelism: N`, spread over zones) |
 | synthetic data | service `datagen` (profile `datagen`) | Job `pi-datagen-<id>` |
@@ -77,7 +78,7 @@ waits until `certs`, `es-users` and `s3-init` have succeeded:
   and copies only the public CA into the `es-ca` volume, which the pipeline mounts read-only at
   `/etc/people-index/es-ca/ca.crt` (`PI_ES_CA_CERT`). Private keys never leave the `certs`
   volume.
-- `es-users` waits for a formed three-node cluster, then creates the role and the user.
+- `es-users` waits for a formed three-node cluster, then creates the writer and reader roles and users.
 - `s3-init` creates the pipeline and snapshot buckets and runs the conditional-write probe.
   Compose provisions the snapshot identity but does not configure Elasticsearch snapshots.
 
@@ -174,6 +175,64 @@ make k3d-down        # delete the cluster
 Both print one JSON object (`passed`, `report`, `digest`, and `run_id` in summary mode) and exit
 1 when a check fails; `--digest` adds the content digest in either mode (of the run's index in
 summary mode).
+
+## Querying the index
+
+`people-index-reader` grants `read` and `view_index_metadata` on the published alias `persons`
+only, with no cluster privileges. Compose creates the `reader` user with `READER_ES_PASSWORD`
+from its environment (a development default is provided); Kubernetes defines the role for an
+operator to assign to a user. Compose follows `PI_ALIAS` when creating the role. On Kubernetes,
+change the reader's alias in `deploy/k8s/base/elasticsearch/roles.yml` when changing `PI_ALIAS`.
+Use the alias in the API key descriptor and search URL below as well.
+
+On Elasticsearch 9.5.5 this reader can open a point in time (PIT) on the alias, but
+searching with its PIT id returns 403: PIT search requires `read` on the underlying
+`persons-*` indexes, which this role does not grant. Page through the alias with
+`search_after` without a PIT, or use `from` and `size`. Without a PIT, a publish or
+other index changes between requests can change the results.
+
+Create a key as an administrator with `manage_api_key` and access to the alias. API keys are
+limited by both their descriptor and the creating user's privileges; the descriptor below gives
+the key the reader role's privileges without granting access to run indexes by name. For example,
+using a securely supplied administrator credential and a trusted CA:
+
+```bash
+curl --cacert "$ES_CA" -u "$ES_ADMIN_USER:$ES_ADMIN_PASSWORD" \
+  -H 'Content-Type: application/json' -X POST "$ES_URL/_security/api_key" -d '{
+  "name": "people-index-reader",
+  "expiration": "90d",
+  "role_descriptors": {
+    "people-index-reader": {
+      "cluster": [],
+      "indices": [{"names": ["persons"], "privileges": ["read", "view_index_metadata"]}]
+    }
+  }
+}'
+```
+
+Save the returned `id` for revocation and `encoded` value as a secret; the latter is the
+credential supplied to search clients. Do not commit either credential. Search the alias:
+
+```bash
+curl --cacert "$ES_CA" -H "Authorization: ApiKey $ES_API_KEY" \
+  -H 'Content-Type: application/json' -X POST "$ES_URL/persons/_search" \
+  -d '{"query":{"match_all":{}},"size":10}'
+```
+
+Rotate keys by creating a new one and revoking the old key with an administrator credential that can manage it:
+
+```bash
+curl --cacert "$ES_CA" -u "$ES_ADMIN_USER:$ES_ADMIN_PASSWORD" \
+  -H 'Content-Type: application/json' -X DELETE "$ES_URL/_security/api_key" \
+  -d '{"ids":["<key-id>"]}'
+```
+
+For Compose, `make compose-ca` writes the public CA to `target/es-ca.crt`; set `ES_CA` to that
+file and `ES_URL` to `https://localhost:9200`. For ECK's default certificate, obtain the public
+CA with `kubectl -n people-index get secret es-es-http-certs-public -o jsonpath='{.data.ca\.crt}' | base64 -d > es-ca.crt`.
+For a supplied certificate, use its trusted CA chain instead. Set `ES_CA` to the CA file and
+`ES_URL` to the HTTPS endpoint whose hostname is covered by the certificate. The production
+overlay describes certificate and network exposure options.
 
 ## Scaling
 
@@ -450,6 +509,78 @@ and grant the snapshot identity only the permissions Elasticsearch needs on that
 identity access to it. Provisioning and retention incur provider costs; the example does not
 create or enable them. Verify snapshot and restore behavior with the chosen retention policy.
 
+## Scheduled runs
+
+A scheduled run reads whatever `PI_DELIVERY` the ConfigMap sets. With it unset, each run
+re-indexes `raw/`.
+
+Add `../../components/schedule` to an overlay's `components` and apply that overlay.
+The proposed defaults run at 02:00 UTC daily; patch the CronJob's `schedule`, `timeZone`,
+image and resources for the cluster. Its Indexed Job has one coordinator and three workers;
+change `completions` and `parallelism` together to change the worker count. Suspend it with
+`kubectl --context k3d-people-index -n people-index patch cronjob pi-schedule -p '{"spec":{"suspend":true}}'`.
+
+`Forbid` prevents overlapping Jobs from this CronJob. A store lease also excludes manual runs
+for the same alias: a different run fails with `a run is already in progress`. If a manual
+coordinator is refused before it creates run state, stop its separately started worker Job. The same run id
+may resume, taking over its lease; do not deliberately start two coordinators for that id.
+A crashed coordinator's lease expires after `PI_LEASE_TTL` plus clock skew. If it is still
+live, stop the holder and wait for expiry; only remove `_run-leases/<alias>.json` from the
+store after ensuring no coordinator is running. The run lock needs conditional updates (S3 or memory); local filesystem runs proceed without it. Hand-picked run ids without
+the UTC stamp are not ordered by publish.
+
+Start a scheduled-style run by hand using a current UTC minute in its Job name:
+
+```sh
+kubectl --context k3d-people-index -n people-index create job --from=cronjob/pi-schedule pi-schedule-$(( $(date -u +%s) / 60 ))
+```
+
+Use your own context in production.
+
+The run stamp is the scheduled minute, so a late Job within `startingDeadlineSeconds` can
+lose to a manual run started in the meantime. Scheduled worker failures exit 2 and count
+against the Job backoff limit; coordinator failures exit 1 and fail the Job.
+
+The schedule component defaults to 1 GiB and a 7200 second deadline. For the production
+example, patch the CronJob to match its task sizing and 43200 second deadline. For example,
+add this strategic merge patch to the overlay after enabling the component:
+
+```yaml
+patches:
+  - target:
+      kind: CronJob
+      name: pi-schedule
+    patch: |-
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: pi-schedule
+      spec:
+        jobTemplate:
+          spec:
+            activeDeadlineSeconds: 43200
+            template:
+              spec:
+                containers:
+                  - name: people-index
+                    image: ghcr.io/cristiangirlea/people-index:0.1.0@sha256:<digest>
+                    imagePullPolicy: IfNotPresent
+                    resources:
+                      requests:
+                        cpu: "2"
+                        memory: 4Gi
+                      limits:
+                        cpu: "2"
+                        memory: 4Gi
+                        ephemeral-storage: 8Gi
+                volumes:
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: 8Gi
+```
+
+Also configure zone spread and node anti-affinity for the cluster; the shared indexed pod
+shape deliberately has no hard worker-only spread rule.
 ## A feed delivery
 
 For a new delivery `batch-20261028`, place gzipped NDJSON files under

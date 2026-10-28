@@ -13,7 +13,7 @@ mod store;
 mod version;
 
 pub use error::{StoreError, StoreResult};
-pub use layout::{Dataset, LayoutError, RUNS_ROOT, RunLayout, validate_id};
+pub use layout::{Dataset, LayoutError, RUNS_ROOT, RunLayout, alias_lease, validate_id};
 pub use location::StoreLocation;
 pub use options::StoreOptions;
 pub use store::{

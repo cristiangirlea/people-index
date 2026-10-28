@@ -44,3 +44,6 @@ pub use retry::RetryPolicy;
 pub use settings::{Codec, IndexSpec, ServingSettings};
 pub use shards::{ShardCounts, require_complete};
 pub use verifier::{AliasCheck, Check, Published, Verifier, VerifyReport};
+
+/// Extracts the sortable UTC stamp from a run index.
+pub use runs::run_stamp;

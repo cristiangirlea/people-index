@@ -2,6 +2,8 @@
 # (PI_METRICS_ADDR). A PodMonitor rather than a ServiceMonitor: run pods are short-lived Job
 # pods with no Service in front of them, and each worker's counters matter on their own. The
 # run id and the pod's role become metric labels so runs and roles can be told apart.
+# Unlike run.yaml pods, scheduled pods use the Job name as run_id; the store run id is
+# derived from that name and logged in the "run starting" line.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -18,3 +20,15 @@ spec:
           targetLabel: run_id
         - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
           targetLabel: role
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_label_batch_kubernetes_io_job_name]
+          regex: scheduled;(.+)
+          targetLabel: run_id
+          replacement: $1
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_label_batch_kubernetes_io_job_completion_index]
+          regex: scheduled;0
+          targetLabel: role
+          replacement: coordinator
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_label_batch_kubernetes_io_job_completion_index]
+          regex: scheduled;([1-9][0-9]*)
+          targetLabel: role
+          replacement: worker

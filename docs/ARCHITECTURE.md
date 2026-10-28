@@ -278,6 +278,7 @@ All paths are under one prefix in the object store (`PI_STORE_URL`: `s3://bucket
 raw/organizations/*.ndjson.gz          inputs (or PI_INPUT_URL, a separate prefix)
 raw/persons/*.ndjson.gz
 raw/expected.json                      written by datagen, read by verify
+_run-leases/<alias>.json               conditional coordinator run lease
 raw/<delivery>/organizations/*.ndjson.gz
 raw/<delivery>/persons/*.ndjson.gz
 raw/<delivery>/_COMPLETE              optional readiness marker
@@ -380,8 +381,8 @@ the `expires_at` it already read, so a live lease costs no request on most polls
 Conditional updates need an S3-compatible store that answers 412 to a failed `If-None-Match: *`
 or a stale `If-Match`; the deployments use SeaweedFS 4.48, which does (see
 [ADR 0003](adr/0003-object-store-commits-and-leases.md)). The local filesystem store supports
-create-if-absent but not update-if-match, so it serves only the local executor; the distributed
-executor refuses it.
+create-if-absent but not update-if-match; the distributed executor refuses it. The run lock
+requires conditional writes (S3 or memory); local runs proceed without a run lock.
 
 ## Components
 
@@ -450,6 +451,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_ES_REQUEST_TIMEOUT`, `PI_ES_GZIP` | one request's timeout, gzip bulk bodies | `120s`, false |
 | `PI_ALIAS` | the published alias | `persons` |
 | `PI_RUN_ID` | run id (`run`, `worker`, `stage`) | generated; `worker` follows the newest run |
+| `PI_RUN_ID_FROM_JOB_NAME` | derive the run id for `run` or `worker` from a CronJob Job name; mutually exclusive with `PI_RUN_ID` | unset |
 | `PI_EXECUTOR` | `local` or `distributed` | `local` |
 | `PI_CONCURRENCY` | tasks at once in this process | number of CPUs |
 | `PI_WORKER_ID` | worker name in leases and commits | `HOSTNAME` |
@@ -480,6 +482,9 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
   with `distributed` it writes each stage's task list, runs the single-task stages, waits for
   the workers' commits, and moves on. An existing `PI_RUN_ID` is resumed. Exits 0 once
   published, 1 on failure.
+- `people-index scheduled`: rewrites to `run` for JOB_COMPLETION_INDEX 0 and `worker` for
+  other non-negative indices; a missing or invalid index fails. Scheduled worker failures exit 2
+  so the Job retries them, while coordinator failures exit 1.
 - `people-index worker`: claims and runs tasks of the current stage of `--run-id` (or of the
   newest run) until the run is published or failed, or the idle timeout passes, then exits 0.
 - `people-index datagen --persons N --organizations M --files F --seed S --out <url>`: writes
@@ -529,5 +534,15 @@ Failure model: a worker that dies loses its lease and another worker takes the t
 coordinator that dies is restarted by its Job and resumes from the commits already in the store
 (`run` with an existing `PI_RUN_ID` skips committed stages and tasks). Elasticsearch loss of a
 data node during the load is absorbed by retries; the count check in `publish` refuses to move
-the alias if documents are missing. Only one coordinator per run is assumed (the Job guarantees
-it); there is no coordinator lease.
+the alias if documents are missing. A coordinator holds the alias run lease when the store supports conditional updates.
+
+## Scheduled runs and coordinator lease
+
+The optional schedule component creates one Indexed Job per scheduled minute. Index zero is the
+coordinator; the others are workers. Each derives the same stamped run id from the Job name's
+numeric Unix-minute suffix and a stable hash of the name. The stamp is the scheduled minute;
+a late Job within startingDeadlineSeconds can lose to a manual run started in the meantime. The coordinator claims
+`_run-leases/<alias>.json` before planning using conditional writes, renews it, and releases it
+on exit. A different run is refused while the lease is live; the same run may resume and an
+expired lease can be taken over. Loss of the lease stops the coordinator. The lock requires a store supporting conditional updates; local runs have no lock. Publish orders stamped ids; hand-picked unstamped ids are not
+ordered.

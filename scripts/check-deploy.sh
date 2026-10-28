@@ -13,6 +13,8 @@
 #   - those ECK files (operator.yaml pinned), base and every overlay (rendered with kustomize)
 #     pass kubeconform -strict against the Kubernetes schemas and, for custom resources (ECK,
 #     prometheus-operator), the datreeio CRDs-catalog schemas at a pinned commit;
+#   - the schedule component renders with every overlay, passes the same check, and matches
+#     the local coordinator pod security, environment names and storage (requires PyYAML);
 #   - the run, datagen and verify Job templates render for every overlay and pass the same
 #     check;
 #   - deploy/k3d/cluster.yaml passes k3d's own config schema;
@@ -26,6 +28,9 @@
 # kubeconform v0.8.0 is used from PATH, or downloaded once to
 # ${XDG_CACHE_HOME:-$HOME/.cache}/people-index/ and checked against its pinned SHA-256.
 set -euo pipefail
+
+if command -v python3 >/dev/null 2>&1; then python=python3; else python=python; fi
+"$python" -c "import yaml" 2>/dev/null || { echo "check-deploy needs PyYAML (python3-yaml)" >&2; exit 1; }
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/people-index"
@@ -335,6 +340,28 @@ for dir in base "${overlays[@]}"; do
     es_tag="${es_tag##*:}"
     [[ "$es_tag" == "$es_version" ]] ||
       fail "deploy/k8s/$dir: Elasticsearch spec.version '$es_version' but spec.image '$es_image': make them equal"
+  fi
+done
+
+# Validate the optional schedule with each overlay without changing the checked-in overlays.
+for dir in "${overlays[@]}"; do
+  mkdir -p "$work/k8s/schedule-wrapper"
+  cat >"$work/k8s/schedule-wrapper/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../$dir
+components:
+  - ../components/schedule
+EOF
+  step "kustomize $dir with schedule"
+  kustomize_build "$work/k8s/schedule-wrapper" >"$work/scheduled.yaml" || fail "schedule does not render for $dir"
+  validate <"$work/scheduled.yaml" || fail "schedule does not validate for $dir"
+  while read -r ref; do check_ref "schedule $dir" "$ref"; done < <(yaml_images <"$work/scheduled.yaml")
+  report_unpinned
+  if [[ "$dir" == overlays/local ]]; then
+    RUN_ID=check JOB_ID=check bash "$work/k8s/jobs/render.sh" run --overlay local >"$work/run.yaml"
+    "$python" "$root/scripts/check-schedule-pod.py" "$work/run.yaml" "$work/scheduled.yaml" || fail "schedule pod differs from the coordinator"
   fi
 done
 

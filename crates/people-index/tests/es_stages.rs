@@ -61,6 +61,16 @@ fn es_config(server: &MockServer, base: StagesConfig) -> StagesConfig {
     cfg
 }
 
+async fn mount_previous_count(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/persons-old/_count"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"count": 1, "_shards": shards()})),
+        )
+        .mount(server)
+        .await;
+}
+
 fn shards() -> Value {
     json!({"total": 4, "successful": 4, "skipped": 0, "failed": 0})
 }
@@ -213,6 +223,7 @@ async fn prepare_and_publish_against_a_mock_cluster() {
     let documents = data.expected.persons;
 
     let server = MockServer::start().await;
+    mount_previous_count(&server).await;
     Mock::given(method("HEAD"))
         .and(path(format!("/{index}")))
         .respond_with(ResponseTemplate::new(200))
@@ -329,6 +340,7 @@ async fn prepare_and_publish_against_a_mock_cluster() {
     assert_eq!(summary.documents, documents);
     assert_eq!(summary.publish.docs, documents);
     assert_eq!(summary.publish.previous, ["persons-old"]);
+    assert_eq!(summary.publish.previous_docs, Some(1));
     assert_eq!(summary.publish.deleted, ["persons-old"]);
     assert_eq!(summary.stages.len(), 8);
     assert_eq!(summary.stages.last().unwrap().stage, StageName::Publish);
@@ -426,6 +438,10 @@ async fn mount_alias_on(server: &MockServer, target: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "exercise interrupted publish and resume"
+)]
 async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun() {
     let data = generate(small_config()).await;
     run_stages(&data.store, "run-c", config(1), &OFFLINE)
@@ -437,6 +453,7 @@ async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun(
 
     // First attempt: the alias moves, then the coordinator stops while the delete is in flight.
     let server = MockServer::start().await;
+    mount_previous_count(&server).await;
     mount_publish_checks(&server, index, documents).await;
     mount_alias_on(&server, "persons-old").await;
     Mock::given(method("POST"))
@@ -518,7 +535,10 @@ async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun(
         .unwrap()
         .unwrap()
         .0;
-    assert_eq!(record.previous, ["persons-old"]);
+    assert_eq!(
+        (record.previous.as_slice(), record.previous_docs),
+        (["persons-old".to_owned()].as_slice(), Some(1))
+    );
     let summary: Summary = ctx
         .store
         .get_json(&ctx.layout.summary())
@@ -527,6 +547,7 @@ async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun(
         .unwrap()
         .0;
     assert_eq!(summary.publish.previous, ["persons-old"]);
+    assert_eq!(summary.publish.previous_docs, Some(1));
     assert_eq!(summary.publish.deleted, ["persons-old"]);
     assert_eq!(
         summary.publish.not_deleted,

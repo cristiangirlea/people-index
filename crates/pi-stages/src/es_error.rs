@@ -14,6 +14,7 @@ pub(crate) fn es_error(err: EsError, doing: &str) -> anyhow::Error {
         | EsError::DocumentTooLarge { .. }
         | EsError::InvalidDocument { .. }
         | EsError::CountMismatch { .. }
+        | EsError::PublishRefused(_)
         | EsError::ConcreteIndexAtAlias(_)
         | EsError::NewerRunServing { .. }
         | EsError::IndexOwnership { .. }

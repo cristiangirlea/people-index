@@ -39,6 +39,8 @@ pub struct PublishRecord {
     pub index: String,
     /// The indexes the alias pointed at when the first attempt was about to move it.
     pub previous: Vec<String>,
+    #[serde(default)]
+    pub previous_docs: Option<u64>,
 }
 
 /// Records `on_alias` as the indexes to delete after the swap, create-if-absent. When an
@@ -49,12 +51,14 @@ async fn record_previous(
     alias: &str,
     index: &str,
     on_alias: Vec<String>,
-) -> anyhow::Result<Vec<String>> {
+    previous_docs: Option<u64>,
+) -> anyhow::Result<(Vec<String>, Option<u64>)> {
     let key = ctx.layout.publish_record();
     let record = PublishRecord {
         alias: alias.to_owned(),
         index: index.to_owned(),
         previous: on_alias,
+        previous_docs,
     };
     if ctx
         .store
@@ -62,10 +66,10 @@ async fn record_previous(
         .await?
         .is_created()
     {
-        return Ok(record.previous);
+        return Ok((record.previous, record.previous_docs));
     }
     match ctx.store.get_json::<PublishRecord>(&key).await? {
-        Some((earlier, _)) => Ok(earlier.previous),
+        Some((earlier, _)) => Ok((earlier.previous, earlier.previous_docs)),
         None => anyhow::bail!("{key} existed and then did not"),
     }
 }
@@ -102,6 +106,29 @@ impl PublishStage {
         }
         Ok(out)
     }
+}
+
+/// Checks feed quality before any alias changes.
+#[allow(clippy::cast_precision_loss, reason = "ratios of committed counters")]
+fn check_feed_bounds(
+    resolved: u64,
+    unresolved: u64,
+    organizations: u64,
+    config: &crate::config::EsStageConfig,
+) -> anyhow::Result<()> {
+    if organizations == 0 && !config.publish_allow_empty_organizations {
+        return Err(pi_coord::permanent(anyhow::anyhow!(
+            "publish refused: indexed organizations {organizations}, minimum 1 (allow empty is false)"
+        )));
+    }
+    let total = resolved as f64 + unresolved as f64;
+    if total > 0.0 && unresolved as f64 / total > config.publish_max_unresolved {
+        return Err(pi_coord::permanent(anyhow::anyhow!(
+            "publish refused: unresolved roles {unresolved}, resolved roles {resolved}, maximum unresolved share {}",
+            config.publish_max_unresolved
+        )));
+    }
+    Ok(())
 }
 
 /// Removes every object under the data stages and the quarantine that no commit lists.
@@ -172,16 +199,38 @@ impl Stage for PublishStage {
             .map_or(0, Summary::documents_of);
 
         let es = &self.config.es;
+        let counter = |stage, name: &str| {
+            stages
+                .iter()
+                .find(|s| s.stage == stage)
+                .and_then(|s| s.counters.get(name))
+                .copied()
+                .unwrap_or(0)
+        };
+        let resolved = counter(StageName::Assemble, "roles_resolved");
+        let unresolved = counter(StageName::Assemble, "roles_unresolved");
+        let organizations = counter(StageName::Assemble, "organizations");
+        if ctx
+            .store
+            .get_json::<PublishRecord>(&ctx.layout.publish_record())
+            .await?
+            .is_none()
+        {
+            check_feed_bounds(resolved, unresolved, organizations, es)?;
+        }
         let mut spec = PublishSpec::new(&plan.alias, &plan.index, documents);
         spec.serving = ServingSettings {
             replicas: es.replicas,
             ..ServingSettings::default()
         };
+        spec.min_share = es.publish_min_share;
         spec.wait_for = es.wait_for;
         spec.health_timeout = es.health_timeout;
+        let alias = &plan.alias;
+        let index = &plan.index;
         let published = Publisher::new(IndexAdmin::new(self.client.clone()))
-            .publish_recording(&spec, |on_alias| async {
-                record_previous(ctx, &plan.alias, &plan.index, on_alias)
+            .publish_recording(&spec, |on_alias, previous_docs| async move {
+                record_previous(ctx, alias, index, on_alias, previous_docs)
                     .await
                     .map_err(|e| EsError::Record(format!("{e:#}")))
             })
@@ -213,6 +262,13 @@ impl Stage for PublishStage {
             stages,
             publish: PublishSummary {
                 docs: published.docs,
+                previous_docs: published.previous_docs,
+                resolved_roles: resolved,
+                unresolved_roles: unresolved,
+                indexed_organizations: organizations,
+                min_share: es.publish_min_share,
+                max_unresolved: es.publish_max_unresolved,
+                allow_empty_organizations: es.publish_allow_empty_organizations,
                 previous: published.previous.clone(),
                 deleted: published.deleted.clone(),
                 not_deleted: published.not_deleted.clone(),
@@ -242,19 +298,185 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn feed_bounds_apply_even_on_first_publish() {
+        let mut config = crate::config::EsStageConfig::default();
+        assert!(check_feed_bounds(3, 1, 1, &config).is_ok());
+        assert!(pi_coord::is_permanent(
+            &check_feed_bounds(2, 1, 1, &config).unwrap_err()
+        ));
+        assert!(pi_coord::is_permanent(
+            &check_feed_bounds(0, 0, 0, &config).unwrap_err()
+        ));
+        config.publish_allow_empty_organizations = true;
+        assert!(check_feed_bounds(0, 1, 0, &config).is_err());
+        config.publish_max_unresolved = 1.0;
+        assert!(check_feed_bounds(0, 1, 0, &config).is_ok());
+    }
+
+    async fn stage_context(resolved: u64, unresolved: u64, organizations: u64) -> RunContext {
+        let ctx = RunContext::new("run-test", Store::memory()).unwrap();
+        let plan = Plan {
+            run_id: "run-test".into(),
+            partitions: 1,
+            alias: "persons".into(),
+            index: "persons-run-test".into(),
+            organizations: vec![],
+            persons: vec![],
+            total_bytes: 0,
+            created_at: OffsetDateTime::now_utc(),
+            delivery: None,
+        };
+        ctx.store.put_json(&ctx.layout.plan(), &plan).await.unwrap();
+        let mut report = TaskReport::default();
+        report.add("documents", 50);
+        report.add("roles_resolved", resolved);
+        report.add("roles_unresolved", unresolved);
+        report.add("organizations", organizations);
+        let record = pi_coord::CommitRecord {
+            stage: StageName::Assemble,
+            task_id: "part-00000".into(),
+            attempt: AttemptId::new(),
+            worker: "test".into(),
+            committed_at: OffsetDateTime::now_utc(),
+            report,
+        };
+        CommitLog::new(ctx.store.clone(), ctx.layout.clone())
+            .commit(&record)
+            .await
+            .unwrap();
+        ctx
+    }
+
+    async fn run_publish(ctx: &RunContext, url: &str) -> anyhow::Result<TaskReport> {
+        let client = EsClient::new(&pi_es::EsConfig::new(url)).unwrap();
+        PublishStage::new(
+            Arc::new(StagesConfig::default()),
+            Arc::new(CommitCache::new()),
+            client,
+        )
+        .run(
+            ctx,
+            &TaskSpec::single(StageName::Publish),
+            &AttemptId::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn stage_refuses_feed_bounds_before_contacting_es() {
+        let ctx = stage_context(2, 1, 1).await;
+        let error = run_publish(&ctx, "http://localhost:1").await.unwrap_err();
+        assert!(pi_coord::is_permanent(&error));
+        assert!(error.to_string().contains("unresolved roles"));
+        let ctx = stage_context(0, 0, 0).await;
+        let error = run_publish(&ctx, "http://localhost:1").await.unwrap_err();
+        assert!(pi_coord::is_permanent(&error));
+        assert!(error.to_string().contains("indexed organizations"));
+    }
+
+    #[tokio::test]
+    async fn stage_compares_previous_count_and_accepts_first_publish() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let shards = json!({"total": 1, "successful": 1, "failed": 0});
+        for op in ["_refresh", "_flush"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/persons-run-test/{op}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"_shards": shards})))
+                .mount(&server)
+                .await;
+        }
+        for (index, count) in [("persons-run-test", 50), ("persons-old", 100)] {
+            Mock::given(method("POST"))
+                .and(path(format!("/{index}/_count")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"count": count, "_shards": shards})),
+                )
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("PUT"))
+            .and(path("/persons-run-test/_settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/_cluster/health/persons-run-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "green"})))
+            .mount(&server)
+            .await;
+        let alias = Mock::given(method("GET"))
+            .and(path("/_alias/persons"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"persons-old": {}})))
+            .mount_as_scoped(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_aliases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = stage_context(3, 1, 1).await;
+        let error = run_publish(&ctx, &server.uri()).await.unwrap_err();
+        assert!(pi_coord::is_permanent(&error));
+        assert!(format!("{error:#}").contains("minimum document share"));
+        drop(alias);
+        Mock::given(method("GET"))
+            .and(path("/_alias/persons"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/persons"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        run_publish(&ctx, &server.uri()).await.unwrap();
+        let summary: Summary = ctx
+            .store
+            .get_json(&ctx.layout.summary())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(summary.publish.previous_docs, None);
+    }
+
+    #[tokio::test]
+    async fn recorded_publish_skips_feed_bounds_on_resume() {
+        let ctx = stage_context(0, 1, 0).await;
+        record_previous(&ctx, "persons", "persons-run-test", vec![], None)
+            .await
+            .unwrap();
+        // Reaching Elasticsearch proves the stricter bounds did not reject the recorded run.
+        let error = run_publish(&ctx, "http://localhost:1").await.unwrap_err();
+        assert!(!format!("{error:#}").contains("unresolved roles"));
+        assert!(format!("{error:#}").contains("publishing"));
+    }
+
     #[tokio::test]
     async fn the_first_record_wins() {
         let ctx = RunContext::new("run-r", Store::memory()).unwrap();
-        let first = record_previous(&ctx, "persons", "persons-run-r", vec!["persons-old".into()])
-            .await
-            .unwrap();
-        assert_eq!(first, ["persons-old"]);
+        let first = record_previous(
+            &ctx,
+            "persons",
+            "persons-run-r",
+            vec!["persons-old".into()],
+            Some(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, (vec!["persons-old".to_owned()], Some(10)));
         // A resumed attempt sees the alias on its own index already: the record still names
         // what it served before.
-        let again = record_previous(&ctx, "persons", "persons-run-r", Vec::new())
+        let again = record_previous(&ctx, "persons", "persons-run-r", Vec::new(), None)
             .await
             .unwrap();
-        assert_eq!(again, ["persons-old"]);
+        assert_eq!(again, (vec!["persons-old".to_owned()], Some(10)));
         let (stored, _) = ctx
             .store
             .get_json::<PublishRecord>(&ctx.layout.publish_record())
@@ -267,6 +489,7 @@ mod tests {
                 alias: "persons".into(),
                 index: "persons-run-r".into(),
                 previous: vec!["persons-old".into()],
+                previous_docs: Some(10),
             }
         );
     }

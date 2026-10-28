@@ -155,6 +155,15 @@ pub struct PipelineArgs {
     /// Cluster health publish waits for: green or yellow.
     #[arg(long, env = "PI_PUBLISH_HEALTH", default_value = "green")]
     pub publish_health: String,
+    /// Minimum share of the previous document count (0 disables).
+    #[arg(long, env = "PI_PUBLISH_MIN_SHARE", default_value_t = 0.9)]
+    pub publish_min_share: f64,
+    /// Maximum unresolved role organization share (1 disables).
+    #[arg(long, env = "PI_PUBLISH_MAX_UNRESOLVED", default_value_t = 0.25)]
+    pub publish_max_unresolved: f64,
+    /// Allow a run with no indexed organizations.
+    #[arg(long, env = "PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS", default_value_t = false, action = clap::ArgAction::Set)]
+    pub publish_allow_empty_organizations: bool,
     /// How long publish waits for that health.
     #[arg(long, env = "PI_HEALTH_TIMEOUT", value_parser = parse_duration, default_value = "30m")]
     pub health_timeout: Duration,

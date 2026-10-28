@@ -56,10 +56,24 @@ impl StageSummary {
 }
 
 /// What `publish` did to the cluster.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublishSummary {
     /// The documents counted in the index.
     pub docs: u64,
+    #[serde(default)]
+    pub previous_docs: Option<u64>,
+    #[serde(default)]
+    pub resolved_roles: u64,
+    #[serde(default)]
+    pub unresolved_roles: u64,
+    #[serde(default)]
+    pub indexed_organizations: u64,
+    #[serde(default)]
+    pub min_share: f64,
+    #[serde(default)]
+    pub max_unresolved: f64,
+    #[serde(default)]
+    pub allow_empty_organizations: bool,
     /// The indexes the alias pointed at before.
     pub previous: Vec<String>,
     /// The ones deleted.

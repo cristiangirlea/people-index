@@ -15,7 +15,7 @@ use crate::runs::{is_older_run, run_stamp};
 use crate::settings::ServingSettings;
 
 /// What to publish and what it must contain.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PublishSpec {
     /// `PI_ALIAS`.
     pub alias: String,
@@ -27,11 +27,13 @@ pub struct PublishSpec {
     /// The health the index must reach once replicas are restored, before the alias moves.
     pub wait_for: HealthStatus,
     pub health_timeout: Duration,
+    /// Minimum fraction of the previous count; zero disables the check.
+    pub min_share: f64,
 }
 
 impl PublishSpec {
     /// Defaults: one replica, `1s` refresh, wait up to 30 minutes for green (replica recovery
-    /// of a large index copies every segment once).
+    /// of a large index copies every segment once), and a minimum previous-count share of 0.9.
     #[must_use]
     pub fn new(alias: impl Into<String>, index: impl Into<String>, expected_docs: u64) -> Self {
         Self {
@@ -41,6 +43,7 @@ impl PublishSpec {
             serving: ServingSettings::default(),
             wait_for: HealthStatus::Green,
             health_timeout: Duration::from_secs(30 * 60),
+            min_share: 0.9,
         }
     }
 }
@@ -51,6 +54,8 @@ pub struct PublishReport {
     pub alias: String,
     pub index: String,
     pub docs: u64,
+    /// Count of documents in the indexes replaced, if any.
+    pub previous_docs: Option<u64>,
     /// Indices the alias pointed at before (the new index excluded): the ones the caller
     /// recorded before the first swap, and any the alias points at now besides the new index.
     pub previous: Vec<String>,
@@ -80,24 +85,28 @@ impl Publisher {
     ///    covers every copy there is and replicas later recover from committed segments;
     /// 2. count, and stop on any difference from what `assemble` committed;
     /// 3. restore replicas, refresh interval and request durability, and wait for `wait_for`;
-    /// 4. move the alias from the indices it served to this one in one `_aliases` request,
-    ///    unless it serves a newer run's index (then fail: the alias never moves back);
-    /// 5. delete the indices it served before;
-    /// 6. delete the `<alias>-*` indices of runs older than this one that no alias points at
+    /// 4. reject a newer serving run, then check the new count against the sum of the
+    ///    serving indices' counts when the minimum share is enabled;
+    /// 5. move the alias in one `_aliases` request;
+    /// 6. delete the indices it served before;
+    /// 7. delete the `<alias>-*` indices of runs older than this one that no alias points at
     ///    (runs that failed after `prepare-index`; `runs.rs` has the ordering rule). A
     ///    newer run's index is never touched: it may still be loading.
     ///
-    /// Any failure in 1 to 4 returns an error with the alias untouched. Safe to run again: the
+    /// Any failure in 1 to 5 returns an error with the alias untouched. Safe to run again: the
     /// checks repeat and moving an alias to where it already points changes nothing. An attempt
-    /// interrupted between 4 and 5 forgets the old indices, though; [`Self::publish_recording`]
+    /// interrupted between 5 and 6 forgets the old indices, though; [`Self::publish_recording`]
     /// is the variant that survives that.
     pub async fn publish(&self, spec: &PublishSpec) -> Result<PublishReport> {
-        self.publish_recording(spec, |on_alias| async move { Ok(on_alias) })
-            .await
+        self.publish_recording(spec, |on_alias, previous_docs| async move {
+            Ok((on_alias, previous_docs))
+        })
+        .await
     }
 
     /// [`Self::publish`], with `record` called just before the alias moves. It gets the indices
-    /// the alias points at now (this index excluded) and returns the indices to delete once the
+    /// the alias points at now (this index excluded) and their count, and returns the recorded
+    /// count and the indices to delete once the
     /// alias has moved. A caller that stores the list on the first attempt and hands the stored
     /// list back on every later one makes the cleanup survive an interruption: an attempt that
     /// resumes after the swap finds the alias on this index already, and only the record still
@@ -108,8 +117,8 @@ impl Publisher {
         record: F,
     ) -> Result<PublishReport>
     where
-        F: FnOnce(Vec<String>) -> Fut,
-        Fut: Future<Output = Result<Vec<String>>>,
+        F: FnOnce(Vec<String>, Option<u64>) -> Fut,
+        Fut: Future<Output = Result<(Vec<String>, Option<u64>)>>,
     {
         validate_index_name(&spec.alias)?;
         validate_index_name(&spec.index)?;
@@ -146,8 +155,8 @@ impl Publisher {
             .into_iter()
             .filter(|name| name != &spec.index)
             .collect();
-        // An older run resumed after a newer one published (its index deleted by that publish
-        // and re-created by `load`) must not take the alias back.
+        // An older run resumed after a newer one published must not take the alias back,
+        // even if its index survived that publish.
         if let Some(newer) = on_alias
             .iter()
             .find(|name| is_older_run(&spec.alias, &spec.index, name))
@@ -158,7 +167,26 @@ impl Publisher {
                 serving: newer.clone(),
             });
         }
-        let mut previous = record(on_alias.clone()).await?;
+        let previous_docs = if on_alias.is_empty() || spec.min_share == 0.0 {
+            None
+        } else {
+            let mut count = 0_u64;
+            for index in &on_alias {
+                count = count
+                    .checked_add(admin.count(index, None).await?)
+                    .ok_or_else(|| EsError::Config("previous count overflow".into()))?;
+            }
+            Some(count)
+        };
+        #[allow(clippy::cast_precision_loss, reason = "comparison of document counts")]
+        if previous_docs.is_some_and(|old| (docs as f64) < spec.min_share * (old as f64)) {
+            return Err(EsError::PublishRefused(format!(
+                "minimum document share: new {docs}, previous {}, minimum {}",
+                previous_docs.unwrap_or(0),
+                spec.min_share
+            )));
+        }
+        let (mut previous, previous_docs) = record(on_alias.clone(), previous_docs).await?;
         previous.extend(on_alias.iter().cloned());
         previous.retain(|name| name != &spec.index);
         previous.sort();
@@ -183,13 +211,14 @@ impl Publisher {
             alias: spec.alias.clone(),
             index: spec.index.clone(),
             docs,
+            previous_docs,
             previous,
             deleted,
             not_deleted,
         })
     }
 
-    /// Deletes the indices of older runs that never published (step 6). Nothing here is fatal:
+    /// Deletes the indices of older runs that never published (step 7). Nothing here is fatal:
     /// the alias has moved, so failures are reported in `not_deleted` and logged.
     async fn delete_older_runs(
         &self,

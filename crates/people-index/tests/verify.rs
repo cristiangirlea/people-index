@@ -273,3 +273,26 @@ async fn expected_mode_reads_expected_json_as_before() {
     assert_eq!(outcome.report.alias, None);
     assert_eq!(outcome.report.checks.len(), 2);
 }
+
+#[tokio::test]
+async fn expected_mode_reads_selected_delivery() {
+    let store = TempDir::new().unwrap();
+    let raw = store.path().join("raw/batch");
+    std::fs::create_dir_all(&raw).unwrap();
+    std::fs::write(
+        raw.join("expected.json"),
+        json!({
+            "persons": 50, "organizations": 10,
+            "malformed": {"persons": 0, "organizations": 0},
+            "persons_with_unresolved": 20, "role_title_counts": {}, "organization_name_counts": {}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = MockServer::start().await;
+    mount_cluster(&server, "persons", 50, 20).await;
+    let outcome = verify::run(args(&store, &server, &["--delivery", "batch"]))
+        .await
+        .unwrap();
+    assert!(outcome.report.passed());
+}

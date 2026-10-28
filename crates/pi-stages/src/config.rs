@@ -76,6 +76,10 @@ impl Default for EsStageConfig {
 pub struct StagesConfig {
     /// The alias `publish` moves; the index is `<alias>-<run_id>` (`PI_ALIAS`).
     pub alias: String,
+    /// Selected delivery, recorded in the plan.
+    pub delivery: Option<String>,
+    /// Require the supplier completion marker.
+    pub require_complete_marker: bool,
     /// Input bytes per partition (`PI_PARTITION_TARGET_BYTES`).
     pub partition_target_bytes: u64,
     /// The fewest partitions (`PI_MIN_PARTITIONS`), rounded up to a power of two.
@@ -104,7 +108,7 @@ pub struct StagesConfig {
     /// document larger than the buffer still passes, alone.
     pub load_buffer_bytes: Option<usize>,
     /// Where the inputs live when not under `raw/` in the run's store (`PI_INPUT_URL`). The
-    /// run layout must then be built with `with_input_root("")`.
+    /// run layout uses `with_input_root("")`, or the delivery name when one is selected.
     pub input_store: Option<Store>,
     /// The Elasticsearch stages.
     pub es: EsStageConfig,
@@ -114,6 +118,8 @@ impl Default for StagesConfig {
     fn default() -> Self {
         Self {
             alias: "persons".to_owned(),
+            delivery: None,
+            require_complete_marker: false,
             partition_target_bytes: DEFAULT_PARTITION_TARGET_BYTES,
             min_partitions: DEFAULT_MIN_PARTITIONS,
             max_malformed: DEFAULT_MAX_MALFORMED,

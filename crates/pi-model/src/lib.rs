@@ -36,7 +36,10 @@ pub use builder::{
 pub use dedup::LastWins;
 pub use envelope::{Envelope, parse_envelope};
 pub use error::{MalformedKind, MalformedRecord};
-pub use extract::{parse_org_line, parse_person_line};
+pub use extract::{
+    log_field_name, parse_org_line, parse_org_line_with_names, parse_person_line,
+    parse_person_line_with_names,
+};
 pub use id::parse_decimal_id;
 pub use joined::{JoinedGroup, JoinedGroups, NoJoins, PersonJoins};
 pub use line_stats::{IgnoredValue, LineStats};
@@ -46,5 +49,6 @@ pub use pass::{MAX_PASSES, PASS_SEED, Passes};
 pub use rows::{DocRow, EdgeRow, JoinedRow, OrgRow, PersonRow};
 pub use seq::Seq;
 pub use shape::{
-    BUILDER_OWNED, FieldShape, JsonKind, ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS,
+    BUILDER_OWNED, FieldShape, JsonKind, ORGANIZATION_DISABLED, ORGANIZATION_FIELDS,
+    PERSON_DISABLED, PERSON_FIELDS, ROLE_FIELDS,
 };

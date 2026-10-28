@@ -87,6 +87,9 @@ pub struct PublishSummary {
 pub struct Summary {
     /// The run.
     pub run_id: String,
+    /// The selected input delivery, absent in older summaries.
+    #[serde(default)]
+    pub delivery: Option<String>,
     /// The published alias.
     pub alias: String,
     /// The index it now points at.

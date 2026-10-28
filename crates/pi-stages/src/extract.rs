@@ -49,6 +49,7 @@ pub(crate) trait LineSink: Send + 'static {
         &mut self,
         line: &[u8],
         seq: Seq,
+        collect_names: bool,
     ) -> anyhow::Result<Result<LineStats, MalformedRecord>>;
 
     /// Writes out everything buffered; returns the totals and feed-specific counters.
@@ -169,6 +170,7 @@ pub(crate) async fn run_extract(
     report.add(counters::RECORDS, counts.records);
     report.add(counters::MALFORMED, counts.malformed);
     report.add(counters::VALUES_IGNORED_BY_INDEX, counts.ignored.total());
+    report.add(counters::FIELDS_NOT_INDEXED, counts.fields_not_indexed);
     report.add(counters::RECORDS_WITH_REPEATED_KEYS, counts.repeated_keys);
     report.add(counters::DECOMPRESSED_BYTES, counts.decompressed);
     report.add(counters::SEGMENTS, counts.written.segments);
@@ -196,6 +198,8 @@ struct Counts {
     malformed_by_kind: BTreeMap<&'static str, u64>,
     /// Values of kept records Elasticsearch will skip, and the lines logged about them.
     ignored: IgnoredLog,
+    fields_not_indexed: u64,
+    unknown_names: std::collections::BTreeSet<String>,
     /// Kept records rewritten to the last occurrence of a repeated key.
     repeated_keys: u64,
     decompressed: u64,
@@ -252,7 +256,11 @@ impl Job {
                     ),
                 ))
             } else {
-                match sink.handle(&buf, Seq::new(self.file_index, info.number))? {
+                match sink.handle(
+                    &buf,
+                    Seq::new(self.file_index, info.number),
+                    counts.unknown_names.len() < 5,
+                )? {
                     Ok(stats) => Ok(stats),
                     Err(m) => Err((m.kind().as_str(), m.reason().to_owned())),
                 }
@@ -261,6 +269,14 @@ impl Job {
                 Ok(stats) => {
                     counts.records += 1;
                     counts.repeated_keys += u64::from(stats.repeated_keys);
+                    counts.fields_not_indexed += stats.fields_not_indexed;
+                    for name in &stats.unknown_fields {
+                        if counts.unknown_names.len() < 5
+                            && counts.unknown_names.insert(name.clone())
+                        {
+                            tracing::info!(file = %self.file, field = ?pi_model::log_field_name(name), "record field is not mapped by the index");
+                        }
+                    }
                     counts.ignored.note(&self.file, info.number, stats);
                 }
                 Err((kind, reason)) => {

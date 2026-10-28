@@ -29,6 +29,8 @@ x-logging: &logging
     max-file: "3"
 
 x-es-env: &es-env
+  # A different PI_ALIAS needs the matching pattern; interpolation supplies it here.
+  action.auto_create_index: "-${PI_ALIAS:-persons}-*,+*"
   cluster.name: people-index
   cluster.initial_master_nodes: es01,es02,es03
   node.roles: master,data,ingest

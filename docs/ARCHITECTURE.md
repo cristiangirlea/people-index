@@ -191,6 +191,9 @@ once the previous one has committed every task:
   output segments differs, and nothing downstream depends on that order. The counter `passes`
   records `k` per task. The estimate is a model, not a measurement: the overheads assume maps
   and vectors up to half empty after growing.
+- `load` checks the run index exists once per task before any bulk request; a missing index
+  permanently fails the task because a resume cannot recreate it. The deployment also blocks
+  auto-creation of run indexes, including if an index disappears after this check.
 - `load` sends byte-bounded bulk requests (`bulk_max_bytes`, default 8 MiB) with
   `senders_per_worker` in flight per task (default 2), retries 429/502/503/504 and transport
   errors with jittered exponential backoff, resends only the failed items, and checks every
@@ -203,8 +206,9 @@ once the previous one has committed every task:
   load task's memory is about `(senders_per_worker + 1) × bulk_max_bytes + load_buffer_bytes`.
 - `prepare-index` creates `<alias>-<run_id>` (lowercased) with `number_of_replicas: 0`,
   `refresh_interval: -1`, `translog.durability: async`, the codec, and `shards` primaries
-  (default: 2 per data node, read from `_nodes`); an existing index counts as created, so a
-  retry succeeds.
+  (default: 2 per data node, read from `_nodes`). Its mapping `_meta.people_index.run_id`
+  records the exact run id. A retry reuses an existing index only when that id matches
+  case-sensitively; a different or missing owner fails the run permanently before loading.
 - `publish` first checks the run's own feed bounds, before contacting Elasticsearch: the
   unresolved role organization share (no references gives a share of zero) and at least one
   indexed organization, unless allowed; these are skipped once `publish.json` exists, since an
@@ -235,8 +239,7 @@ once the previous one has committed every task:
   runs either). These deletes, and a failed listing (as `<alias>-*`), are reported under
   `deleted` and `not_deleted` like the previous indexes, and are not failures either. The same
   order holds the other way: a publish whose alias points at a newer run's index fails for good
-  before recording or moving anything, so a run resumed after a newer one published (its index
-  deleted, and re-created by `load`'s bulk writes) never takes the alias back. Runs of one alias
+  before recording or moving anything, so a run resumed after a newer one published (whose index may have been deleted) never takes the alias back. Runs of one alias
   must not publish at the same moment: between the listing and the delete, a concurrent publish
   could move the alias onto the index being deleted.
   Publish then writes `summary.json` and deletes orphaned files (data and quarantine files no

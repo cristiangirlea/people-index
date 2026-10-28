@@ -17,6 +17,7 @@ pub(crate) fn es_error(err: EsError, doing: &str) -> anyhow::Error {
         | EsError::PublishRefused(_)
         | EsError::ConcreteIndexAtAlias(_)
         | EsError::NewerRunServing { .. }
+        | EsError::IndexOwnership { .. }
         | EsError::Expected(_) => true,
         EsError::Http { status, .. } => (400..500).contains(status) && !matches!(status, 408 | 429),
         _ => false,

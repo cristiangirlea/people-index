@@ -86,6 +86,11 @@ async fn load_sends_every_document_once_and_resends_rejected_items() {
     let plan = Plan::load(&ctx).await.unwrap();
 
     let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/{}", plan.index)))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     let bulk = Bulk {
         calls: AtomicUsize::new(0),
         reject_first: true,
@@ -161,6 +166,11 @@ async fn load_with_a_buffer_smaller_than_one_document_sends_every_document() {
     let plan = Plan::load(&ctx).await.unwrap();
 
     let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/{}", plan.index)))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     let bulk = Bulk {
         calls: AtomicUsize::new(0),
         reject_first: false,
@@ -214,6 +224,11 @@ async fn prepare_and_publish_against_a_mock_cluster() {
 
     let server = MockServer::start().await;
     mount_previous_count(&server).await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/{index}")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/_nodes/settings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({

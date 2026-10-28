@@ -141,6 +141,8 @@ jobs:
         run: |
           bash scripts/test-check-modes.sh
           bash scripts/check-modes.sh
+      - name: identity configuration rejects invalid inputs
+        run: bash scripts/test-identity-config.sh
       - name: the S3 check passes and fails as it should
         run: bash scripts/test-check-s3.sh
 

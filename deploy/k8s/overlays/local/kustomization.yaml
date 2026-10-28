@@ -40,6 +40,9 @@ secretGenerator:
   - name: s3-credentials
     envs:
       - secrets/s3.env
+  - name: snapshot-s3-credentials
+    envs:
+      - secrets/snapshot-s3.env
 
 patches:
   - target:

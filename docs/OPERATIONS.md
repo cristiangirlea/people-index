@@ -14,7 +14,7 @@ them all.
 | Elasticsearch 9.5.5 | `es01`, `es02`, `es03`: three master+data nodes, zones a/b/c | ECK resource `es`: 3 dedicated masters + a data node set across zones; HTTP service `es-es-http:9200` |
 | TLS | CA and node certificates from `elasticsearch-certutil` (service `certs`) | ECK's self-signed CA, secret `es-es-http-certs-public` key `ca.crt` |
 | pipeline user | `pipeline`, role `people-index-writer`, created by `es-users` | the same user in ECK's file realm; credentials in secret `pipeline-es-credentials` (`username`, `password`) |
-| object store | SeaweedFS on `s3:8333`, bucket `people-index`, created and probed by `s3-init` | SeaweedFS service `s3:8333`, bucket created by Job `s3-bucket-init`; credentials in secret `s3-credentials` |
+| object store | SeaweedFS on `s3:8333`, buckets `people-index` and `people-index-snapshots`, created and probed by `s3-init` | SeaweedFS service `s3:8333`, buckets created by Job `s3-bucket-init`; credentials in secrets `s3-credentials` and `snapshot-s3-credentials` |
 | a run | services `coordinator` (`people-index run`) and `worker` (`people-index worker`, `--scale worker=N`) | Job `pi-run-<run_id>` and Job `pi-worker-<run_id>` (`parallelism: N`, spread over zones) |
 | synthetic data | service `datagen` (profile `datagen`) | Job `pi-datagen-<id>` |
 | metrics | Prometheus (profile `metrics`) | `deploy/k8s/components/monitoring` (Prometheus Operator) |
@@ -74,7 +74,8 @@ waits until `certs`, `es-users` and `s3-init` have succeeded:
   `/etc/people-index/es-ca/ca.crt` (`PI_ES_CA_CERT`). Private keys never leave the `certs`
   volume.
 - `es-users` waits for a formed three-node cluster, then creates the role and the user.
-- `s3-init` creates the bucket and runs the conditional-write probe.
+- `s3-init` creates the pipeline and snapshot buckets and runs the conditional-write probe.
+  Compose provisions the snapshot identity but does not configure Elasticsearch snapshots.
 
 Configuration: copy `deploy/compose/.env.example` to `deploy/compose/.env` (git-ignored) and
 change what you need: passwords, published ports, heap and memory limits, worker shape, the
@@ -113,7 +114,7 @@ make k3d-down        # delete the cluster
 - `make secrets` (run by `deploy-local`) creates `deploy/k8s/overlays/local/secrets/*.env` with
   random values when they are missing (`deploy/k8s/gen-secrets.sh`). Those files are the only
   place the credentials live; the overlay turns them into the secrets `pipeline-es-credentials`
-  and `s3-credentials`.
+  `s3-credentials` and `snapshot-s3-credentials`.
 - Run Jobs are rendered by `deploy/k8s/jobs/render.sh` from the templates in `deploy/k8s/jobs/`
   and the defaults in `deploy/k8s/overlays/local/jobs.vars`; an environment variable of the same
   name wins (`WORKERS=6 make run`). The rendered files stay in `target/jobs/` for inspection.
@@ -358,3 +359,25 @@ still exists in its registry, since a registry can delete one when a tag is re-p
 `e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
 `make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
 the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+
+## Snapshot storage
+
+The Kubernetes snapshots component registers `people-index-snapshots` with the separate
+`snapshot-s3-credentials` Secret. Change `SNAPSHOT_BUCKET` in the bootstrap Job per overlay,
+and configure the corresponding identity and endpoint. For local SeaweedFS, also update the
+matching bucket environment variables in the SeaweedFS identity init and bucket-init Job (or compose);
+local keys must contain only letters, digits, underscores or hyphens. Local SeaweedFS scopes each identity
+to its own bucket; existing shared-bucket snapshots are not migrated automatically.
+If an existing local store created with the previous global admin identity denies access after
+an upgrade, back up anything you need, then recreate the store: `docker compose -f deploy/compose/compose.yaml down -v`
+removes all Compose volumes, including Elasticsearch data; on Kubernetes delete the SeaweedFS
+data PVC after stopping the StatefulSet. This discards the old store and its data.
+
+For production, provision a separate external bucket with versioning. If using object lock,
+prefer governance mode and test deletion and repository updates with your provider and policy.
+Elasticsearch deletes unreferenced blobs and updates repository metadata; even retention at or
+below the SLM `expire_after` of 14 days does not guarantee these operations can succeed sooner.
+Follow [Elastic's S3 repository guidance](https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/s3-repository)
+and grant the snapshot identity only the permissions Elasticsearch needs on that bucket. Do not grant the pipeline
+identity access to it. Provisioning and retention incur provider costs; the example does not
+create or enable them. Verify snapshot and restore behavior with the chosen retention policy.

@@ -2,7 +2,7 @@
 # object store, the pipeline's identity and settings, and the network policies.
 #
 # Not applied on its own: an overlay adds the credentials (pipeline-es-credentials,
-# s3-credentials) from git-ignored env files and sizes the cluster. Runs are Jobs rendered from
+# s3-credentials, snapshot-s3-credentials) from git-ignored env files and sizes the cluster. Runs are Jobs rendered from
 # deploy/k8s/jobs, which refer to the names below, so generated names carry no hash suffix.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -55,6 +55,7 @@ configMapGenerator:
   - name: s3-bucket-init
     files:
       - bucket-init.sh=s3/bucket-init.sh
+      - identity-config.sh=s3/identity-config.sh
 
 secretGenerator:
   # Role definitions are not secret, but ECK reads them only from a Secret.

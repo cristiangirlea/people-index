@@ -12,10 +12,8 @@
 # rebuild). Production uses real S3 (overlays/production-example removes all of this).
 #
 # Only the S3 gateway (8333) and the metrics port (9327) listen on the pod IP; the internal
-# master, volume and filer ports bind to loopback, so nothing but S3 is reachable even before
-# the NetworkPolicies apply. Credentials come from the `s3-credentials` Secret through the
-# AWS_* variables, which SeaweedFS turns into its single admin identity; anonymous requests get
-# 403.
+# master, volume and filer ports bind to loopback. Separate bucket-scoped identities are
+# generated from the pipeline and snapshot Secrets into an ephemeral configuration file.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -44,6 +42,34 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: identity-config
+          image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+          command: ["/bin/sh", "/scripts/identity-config.sh"]
+          env:
+            - {name: PIPELINE_BUCKET, value: people-index}
+            - {name: SNAPSHOT_BUCKET, value: people-index-snapshots}
+            - name: PIPELINE_KEY
+              valueFrom: {secretKeyRef: {name: s3-credentials, key: AWS_ACCESS_KEY_ID}}
+            - name: PIPELINE_SECRET
+              valueFrom: {secretKeyRef: {name: s3-credentials, key: AWS_SECRET_ACCESS_KEY}}
+            - name: SNAPSHOT_KEY
+              valueFrom: {secretKeyRef: {name: snapshot-s3-credentials, key: AWS_ACCESS_KEY_ID}}
+            - name: SNAPSHOT_SECRET
+              valueFrom: {secretKeyRef: {name: snapshot-s3-credentials, key: AWS_SECRET_ACCESS_KEY}}
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: identity-config, mountPath: /config}
+            - {name: scripts, mountPath: /scripts, readOnly: true}
       containers:
         - name: seaweedfs
           image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
@@ -51,6 +77,7 @@ spec:
           args:
             - server
             - -s3
+            - -s3.config=/config/s3.json
             - -ip=127.0.0.1
             - -ip.bind=127.0.0.1
             - -s3.ip.bind=0.0.0.0
@@ -58,17 +85,6 @@ spec:
             - -metricsPort=9327
             - -s3.port.iceberg=0
             - -s3.port.lance=0
-          env:
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: AWS_ACCESS_KEY_ID
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: AWS_SECRET_ACCESS_KEY
           ports:
             - name: s3
               containerPort: 8333
@@ -99,12 +115,17 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - {name: identity-config, mountPath: /config, readOnly: true}
             - name: data
               mountPath: /data
             # gRPC unix sockets between the embedded servers.
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: identity-config
+          emptyDir: {medium: Memory}
+        - name: scripts
+          configMap: {name: s3-bucket-init}
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi

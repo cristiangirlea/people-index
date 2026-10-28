@@ -255,8 +255,10 @@ runs/<run_id>/<stage>/data/<dataset>/<p|q>=<n>/<task>-<attempt>-<n>.seg
 runs/<run_id>/quarantine/<task>-<attempt>.ndjson
 runs/<run_id>/publish.json             the indexes the alias served before (create-if-absent)
 runs/<run_id>/summary.json             written by publish, read by verify --source summary
-snapshots/                             reserved for Elasticsearch snapshots (k8s component)
 ```
+
+Elasticsearch snapshots use a separate bucket (default `people-index-snapshots`) and credentials;
+the snapshots component stores them under `snapshots/`.
 
 - Datasets: `orgs` and `edges` use the partition key `p`; `persons`, `joined` and `docs` use
   `q`. The partition number is not zero-padded.
@@ -478,7 +480,7 @@ Served on `PI_METRICS_ADDR` at `/metrics`:
   server and three agents labelled with three zones, so the multi-node layout is exercised on
   one machine. Components add monitoring (Elasticsearch exporter, ServiceMonitors, a PodMonitor
   for the pipeline, alert rules; no dashboards yet) and snapshots to the object store
-  (`snapshots/`, SLM policy `nightly`).
+  (a separate bucket, `snapshots/`, SLM policy `nightly`).
 - **Compose** (`deploy/compose`): the same topology on one Docker host: three Elasticsearch
   nodes (master and data, one zone each), SeaweedFS, the coordinator and `--scale worker=N`.
 

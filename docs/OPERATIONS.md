@@ -390,6 +390,14 @@ What to watch during a load: a rising rate of bulk retries means the cluster is 
 
 ## Sizing
 
+**Run store.** Budget for roughly `PI_RETAIN_RUNS` (default 3) published runs of segments,
+plus current and unfinished runs and runs sharing a boundary timestamp. Set it to 0 to disable
+cleanup. Retention is store-wide: aliases or deployments sharing a bucket prefix share one
+window. A current run ID without a timestamp also skips cleanup. Failed and unstamped runs
+are never cleaned; remove their `runs/<id>/<stage>/data/` by hand once abandoned. Run history
+and committed quarantine are retained. Failed run inspections and failed deletes are logged and counted as
+`retention_failures` in the publishing run summary; subsequent publishes retry.
+
 **Partitions.** `plan` picks `P` from the total input bytes divided by
 `PI_PARTITION_TARGET_BYTES` (256 MiB), at least `PI_MIN_PARTITIONS` (16), rounded up to a power
 of two. The input bytes are the gzipped sizes, so a partition decoded is several times its

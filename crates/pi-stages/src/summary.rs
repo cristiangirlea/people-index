@@ -118,6 +118,9 @@ pub struct Summary {
     pub orphans_deleted: u64,
     /// Orphans that could not be removed (they are harmless; a later cleanup may retry).
     pub orphans_left: u64,
+    /// Retention cleanup failures; a later publish can retry.
+    #[serde(default)]
+    pub retention_failures: u64,
 }
 
 impl Summary {

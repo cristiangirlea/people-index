@@ -14,6 +14,7 @@ them all.
 | Elasticsearch 9.5.5 | `es01`, `es02`, `es03`: three master+data nodes, zones a/b/c | ECK resource `es`: 3 dedicated masters + a data node set across zones; HTTP service `es-es-http:9200` |
 | TLS | CA and node certificates from `elasticsearch-certutil` (service `certs`) | ECK's self-signed CA, secret `es-es-http-certs-public` key `ca.crt` |
 | pipeline user | `pipeline`, role `people-index-writer`, created by `es-users` | the same user in ECK's file realm; credentials in secret `pipeline-es-credentials` (`username`, `password`) |
+| reader user | `reader`, role `people-index-reader`, created by `es-users` | role `people-index-reader` is available for an operator to assign to a user |
 | object store | SeaweedFS on `s3:8333`, bucket `people-index`, created and probed by `s3-init` | SeaweedFS service `s3:8333`, bucket created by Job `s3-bucket-init`; credentials in secret `s3-credentials` |
 | a run | services `coordinator` (`people-index run`) and `worker` (`people-index worker`, `--scale worker=N`) | Job `pi-run-<run_id>` and Job `pi-worker-<run_id>` (`parallelism: N`, spread over zones) |
 | synthetic data | service `datagen` (profile `datagen`) | Job `pi-datagen-<id>` |
@@ -73,7 +74,7 @@ waits until `certs`, `es-users` and `s3-init` have succeeded:
   and copies only the public CA into the `es-ca` volume, which the pipeline mounts read-only at
   `/etc/people-index/es-ca/ca.crt` (`PI_ES_CA_CERT`). Private keys never leave the `certs`
   volume.
-- `es-users` waits for a formed three-node cluster, then creates the role and the user.
+- `es-users` waits for a formed three-node cluster, then creates the writer and reader roles and users.
 - `s3-init` creates the bucket and runs the conditional-write probe.
 
 Configuration: copy `deploy/compose/.env.example` to `deploy/compose/.env` (git-ignored) and
@@ -169,6 +170,64 @@ make k3d-down        # delete the cluster
 Both print one JSON object (`passed`, `report`, `digest`, and `run_id` in summary mode) and exit
 1 when a check fails; `--digest` adds the content digest in either mode (of the run's index in
 summary mode).
+
+## Querying the index
+
+`people-index-reader` grants `read` and `view_index_metadata` on the published alias `persons`
+only, with no cluster privileges. Compose creates the `reader` user with `READER_ES_PASSWORD`
+from its environment (a development default is provided); Kubernetes defines the role for an
+operator to assign to a user. Compose follows `PI_ALIAS` when creating the role. On Kubernetes,
+change the reader's alias in `deploy/k8s/base/elasticsearch/roles.yml` when changing `PI_ALIAS`.
+Use the alias in the API key descriptor and search URL below as well.
+
+On Elasticsearch 9.5.5 this reader can open a point in time (PIT) on the alias, but
+searching with its PIT id returns 403: PIT search requires `read` on the underlying
+`persons-*` indexes, which this role does not grant. Page through the alias with
+`search_after` without a PIT, or use `from` and `size`. Without a PIT, a publish or
+other index changes between requests can change the results.
+
+Create a key as an administrator with `manage_api_key` and access to the alias. API keys are
+limited by both their descriptor and the creating user's privileges; the descriptor below gives
+the key the reader role's privileges without granting access to run indexes by name. For example,
+using a securely supplied administrator credential and a trusted CA:
+
+```bash
+curl --cacert "$ES_CA" -u "$ES_ADMIN_USER:$ES_ADMIN_PASSWORD" \
+  -H 'Content-Type: application/json' -X POST "$ES_URL/_security/api_key" -d '{
+  "name": "people-index-reader",
+  "expiration": "90d",
+  "role_descriptors": {
+    "people-index-reader": {
+      "cluster": [],
+      "indices": [{"names": ["persons"], "privileges": ["read", "view_index_metadata"]}]
+    }
+  }
+}'
+```
+
+Save the returned `id` for revocation and `encoded` value as a secret; the latter is the
+credential supplied to search clients. Do not commit either credential. Search the alias:
+
+```bash
+curl --cacert "$ES_CA" -H "Authorization: ApiKey $ES_API_KEY" \
+  -H 'Content-Type: application/json' -X POST "$ES_URL/persons/_search" \
+  -d '{"query":{"match_all":{}},"size":10}'
+```
+
+Rotate keys by creating a new one and revoking the old key with an administrator credential that can manage it:
+
+```bash
+curl --cacert "$ES_CA" -u "$ES_ADMIN_USER:$ES_ADMIN_PASSWORD" \
+  -H 'Content-Type: application/json' -X DELETE "$ES_URL/_security/api_key" \
+  -d '{"ids":["<key-id>"]}'
+```
+
+For Compose, `make compose-ca` writes the public CA to `target/es-ca.crt`; set `ES_CA` to that
+file and `ES_URL` to `https://localhost:9200`. For ECK's default certificate, obtain the public
+CA with `kubectl -n people-index get secret es-es-http-certs-public -o jsonpath='{.data.ca\.crt}' | base64 -d > es-ca.crt`.
+For a supplied certificate, use its trusted CA chain instead. Set `ES_CA` to the CA file and
+`ES_URL` to the HTTPS endpoint whose hostname is covered by the certificate. The production
+overlay describes certificate and network exposure options.
 
 ## Scaling
 

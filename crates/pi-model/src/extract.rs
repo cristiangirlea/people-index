@@ -170,7 +170,7 @@ mod tests {
         );
         let (_, stats) = parse_org_line_with_names(line, Seq::default(), false).unwrap();
         assert_eq!(stats.fields_not_indexed, 2);
-        assert!(stats.unknown_fields.is_empty());
+        assert_eq!(stats.unknown_fields, Vec::<String>::new());
     }
 
     #[test]

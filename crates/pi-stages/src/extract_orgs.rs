@@ -29,7 +29,11 @@ impl ExtractOrgsStage {
     /// The stage with the given settings.
     #[must_use]
     pub fn new(config: Arc<StagesConfig>) -> Self {
-        Self { config }
+        let mut resolved = Arc::unwrap_or_clone(config);
+        resolved.schema = Arc::new(resolved.schema.with_keyword_limits(&resolved.mapping));
+        Self {
+            config: Arc::new(resolved),
+        }
     }
 }
 

@@ -32,6 +32,20 @@ Making a new field searchable is a mapping change and a new run, which is how it
 `size_range`, `keywords`, `technologies`: exact values used in filters and facets, never
 analysed.
 
+Every keyword with an index or doc values, including multi-fields, has `ignore_above`:
+8191 for codes without a smaller limit, 512 or 1024 for the others. Elasticsearch measures
+Java string length in UTF-16 code units (an emoji is two). A unit takes at most three UTF-8
+bytes, so 8191 units take at most 24,573 bytes, below Lucene's 32,766-byte term limit;
+the safe ceiling is 10,922 units. On Elasticsearch 9.5.5, 4,095 emoji were indexed and
+found by a term query; 5,000 emoji were ignored and listed in `_ignored`; 8191 three-byte
+BMP characters were indexed. A further probe indexed a document containing 8192 emoji in
+`country`, `first_name`, `roles.location`, `organizations.domain` and `skills`; the original
+`_source` remained and `_ignored` listed each affected keyword path.
+
+`values_ignored_by_index` counts each input value over the smallest applicable keyword limit,
+once even if multiple fields ignore it, and counts each array element separately. It counts
+before deduplication and assembly, so it does not equal the number of `_ignored` entries.
+
 ## Not indexed: large or display-only fields
 
 - `summary`, `roles.description`, `organizations.description`: `text` with `index: false`.
@@ -85,7 +99,7 @@ digits within `u64` (`pi_model::parse_decimal_id`, so `"007"` passes), is quaran
 `followers`, `open_to_work`, `organizations.employee_count`, `organizations.founded_year`) are
 lenient (`JsonKind::LenientLong`, `LenientInteger` for `founded_year`, `LenientBoolean`): any
 scalar or array of scalars passes, and only an object is quarantined. `values_ignored_by_index`
-counts the values Elasticsearch skips (lists in `_ignored`), following the rules observed on
+counts the values Elasticsearch skips (listed in `_ignored`), following the rules observed on
 9.5.5 and pinned in `pi-model`'s tests (`pi_model` `es_number`): in either number type a
 boolean; in a `long` a string other than `""` that is not an exact decimal (no surrounding
 whitespace) or whose integer part is outside `i64`, or whose exponent is outside `int` or

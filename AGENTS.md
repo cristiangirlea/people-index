@@ -27,9 +27,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 scripts/check-deploy.sh        # kustomize build | kubeconform, compose config, promtool tests (Docker); needs PyYAML (python3-yaml)
 scripts/test-check-schedule.sh # schedule pod comparison regression tests
+scripts/test-check-s3-endpoints.sh # the S3 endpoint rule of check-deploy, on rendered documents
 scripts/scrub-check.sh
 scripts/test-scrub-check.sh   # the scrub check and hooks, in a throwaway repo and worktree
 scripts/test-check-republish.sh  # the compose republish check, against stub curl and aws
+scripts/test-restore-drill.sh  # the compose restore drill's cleanup, against stub docker and curl
 scripts/test-check-pins-resolve.sh  # the pinned-image resolve check, against a stub docker
 scripts/test-check-modes.sh   # the mode check, in a throwaway repo
 scripts/check-modes.sh        # hooks and *.sh are stored as 100755
@@ -41,8 +43,9 @@ cargo deny check               # audit job (also weekly)
 
 CI also checks the MSRV (`cargo check` at `rust-version`), lints the workflow, shell scripts and
 Dockerfile (actionlint, shellcheck, hadolint), builds the image, and on pushes to `main` runs
-the compose end-to-end (`make compose-e2e`: a run that fails in publish, then two runs, so
-the second publish replaces the first and the failed run's index is deleted). `make check` runs the list above (cargo-deny when installed); `/check`
+the compose end-to-end (`make compose-e2e`: a run that fails in publish, then two runs with
+the restore drill between them, so the second publish replaces a restored index and the failed
+run's index is deleted). `make check` runs the list above (cargo-deny when installed); `/check`
 (`.claude/skills/check`) runs all but cargo-deny.
 
 ## Rules

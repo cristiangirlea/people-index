@@ -73,6 +73,31 @@ async fn malformed_lines_up_to_the_limit_pass() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyword_omissions_are_counted_in_extract_and_summary() {
+    let line = serde_json::json!({"id": 5, "record": {"first_name": "a".repeat(513), "skills": ["b".repeat(513), "ok", "c".repeat(513)]}}).to_string() + "\n";
+    let (_dir, store) = store_with(gzip(&line)).await;
+    run_stages(&store, "run-keywords", config(1), &OFFLINE)
+        .await
+        .unwrap();
+    let stage = StageName::ExtractPersons;
+    assert_eq!(
+        counters(&store, "run-keywords", stage)
+            .await
+            .get("values_ignored_by_index"),
+        Some(&3)
+    );
+    let ctx = RunContext::new("run-keywords", store.clone()).unwrap();
+    let commits = CommitLog::new(store.clone(), ctx.layout.clone())
+        .list(stage)
+        .await
+        .unwrap();
+    assert_eq!(
+        StageSummary::from_commits(stage, &commits).counters["values_ignored_by_index"],
+        3
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mapped_fields_of_the_wrong_type_are_quarantined_not_fatal() {
     let orgs = "{\"id\":1,\"record\":{\"name\":\"A\",\"founded_year\":1999}}\n\
                 {\"id\":2,\"record\":{\"name\":\"B\",\"founded_year\":{\"year\":1999}}}\n\

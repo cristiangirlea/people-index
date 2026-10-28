@@ -41,6 +41,7 @@ pub fn parse_mapping(text: &str) -> Result<Value, EsError> {
 /// - every field Elasticsearch parses (not disabled, not written by the document builder) is
 ///   in the schema's tables with a JSON kind its type accepts (`kind_fits`), and every table
 ///   entry is mapped; every `long`, `integer` and `date` field has `ignore_malformed: true`;
+/// - every keyword with an index or doc values, including multi-fields, has `ignore_above` at most 8191;
 /// - every multi-field takes what its field lets through (`multi_field_fits`), and every
 ///   `copy_to` target is a `text` or `keyword` field;
 /// - the fields disabled in the mapping (`enabled: false`) are exactly the schema's disabled
@@ -73,6 +74,7 @@ fn mapping_problems(mapping: &Value, schema: &FeedSchema) -> Vec<String> {
             "\"dynamic\" must be false: unknown record fields stay in _source, unindexed".into(),
         );
     }
+    keyword_problems(mapping, "", &mut problems);
     let table = shape_table(schema);
     let disabled: BTreeSet<String> = schema
         .person_disabled()
@@ -162,6 +164,34 @@ fn mapping_problems(mapping: &Value, schema: &FeedSchema) -> Vec<String> {
     problems
 }
 
+// Check all mapped keywords, including multi-fields and builder-owned fields. Disabled
+// objects are not parsed, but an unindexed parent can still have indexed multi-fields.
+fn keyword_problems(node: &Value, path: &str, problems: &mut Vec<String>) {
+    if node["enabled"] == Value::Bool(false) {
+        return;
+    }
+    if node_type(node) == Some("keyword")
+        && !(node["index"] == Value::Bool(false) && node["doc_values"] == Value::Bool(false))
+        && !matches!(node["ignore_above"].as_u64(), Some(0..=8191))
+    {
+        problems.push(format!(
+            "{path}: a keyword with an index or doc values needs ignore_above as an integer no greater than 8191"
+        ));
+    }
+    for key in ["properties", "fields"] {
+        if let Some(children) = node.get(key).and_then(Value::as_object) {
+            for (name, child) in children {
+                let child_path = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                keyword_problems(child, &child_path, problems);
+            }
+        }
+    }
+}
+
 /// The schema's checked fields as mapping paths (references under `<references>.`, the
 /// organization's under `organizations.`), each with its kind and the schema table it is in.
 fn shape_table(schema: &FeedSchema) -> BTreeMap<String, (JsonKind, &'static str)> {
@@ -204,7 +234,9 @@ fn visit(node: &Value, prefix: &str, f: &mut dyn FnMut(&str, &Value)) {
     for (name, child) in properties {
         let path = format!("{prefix}{name}");
         f(&path, child);
-        visit(child, &format!("{path}."), f);
+        if child["enabled"] != Value::Bool(false) {
+            visit(child, &format!("{path}."), f);
+        }
     }
 }
 
@@ -658,7 +690,7 @@ mod tests {
                     "org": {"type": "long", "ignore_malformed": true},
                     "organization_resolved": {"type": "boolean"},
                 }},
-                "organizations": {"type": "object", "properties": {"label": {"type": "keyword"}}},
+                "organizations": {"type": "object", "properties": {"label": {"type": "keyword", "ignore_above": 8191}}},
                 "unresolved_organization_ids": {"type": "long", "ignore_malformed": true},
             }
         });
@@ -678,6 +710,77 @@ mod tests {
             err.contains("first_name is in person.fields but not mapped"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn indexed_keywords_require_safe_limits() {
+        let schema = FeedSchema::builtin();
+        for value in [
+            Value::Null,
+            json!(8192),
+            json!(-1),
+            json!("8191"),
+            json!(1.5),
+        ] {
+            let error = problems_after(schema, |m| {
+                m["properties"]["country"]["ignore_above"] = value;
+            });
+            assert!(
+                error.contains("country: a keyword with an index or doc values needs"),
+                "{error}"
+            );
+        }
+        let error = problems_after(schema, |m| {
+            m["properties"]["first_name"]["fields"]["keyword"]
+                .as_object_mut()
+                .unwrap()
+                .remove("ignore_above");
+        });
+        assert!(
+            error.contains("first_name.keyword: a keyword with an index or doc values needs"),
+            "{error}"
+        );
+        let error = problems_after(schema, |m| {
+            m["properties"]["profile_url"]["fields"] = json!({"raw": {"type": "keyword"}});
+        });
+        assert!(
+            error.contains("profile_url.raw: a keyword with an index or doc values needs"),
+            "{error}"
+        );
+        for (path, change) in [
+            ("country", 0),
+            ("first_name.keyword", 1),
+            ("roles.location", 2),
+            ("full_name", 3),
+            ("country", 4),
+        ] {
+            let error = problems_after(schema, |m| match change {
+                0 => m["properties"]["country"] = json!({"type":"keyword", "index":false}),
+                1 => {
+                    m["properties"]["first_name"]["fields"]["keyword"] =
+                        json!({"type":"keyword", "index":false});
+                }
+                2 => {
+                    m["properties"]["roles"]["properties"]["location"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("ignore_above");
+                }
+                3 => m["properties"]["full_name"] = json!({"type":"keyword"}),
+                _ => m["properties"]["country"] = json!({"type":"keyword", "doc_values":false}),
+            });
+            assert!(
+                error.contains(&format!(
+                    "{path}: a keyword with an index or doc values needs"
+                )),
+                "{error}"
+            );
+        }
+        let mut m = mapping();
+        m["properties"]["country"] =
+            json!({"type": "keyword", "index": false, "doc_values": false});
+        m["properties"]["memberships"]["properties"] = json!({"hidden": {"type": "keyword"}});
+        check_mapping(&m, schema).unwrap();
     }
 
     #[test]

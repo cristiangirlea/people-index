@@ -233,6 +233,8 @@ being resumed.
 
 ## Metrics, logs and the run summary
 
+`fields_not_indexed` counts unknown top-level keys in kept records, summed in stage summaries.
+
 - Every pipeline process serves Prometheus metrics on `PI_METRICS_ADDR` (`:9464`, path
   `/metrics`): tasks committed, failed and retried, task and stage durations, lease takeovers
   and losses, malformed lines, and bulk requests, retries, retried items, indexed documents and
@@ -405,6 +407,7 @@ shards unassigned; free space, or for a throwaway dev stack set
 | too many malformed lines (`PI_MAX_MALFORMED`) | one file over the limit fails its extract task at once; a feed over the limit in total fails the next stage (`extract-persons` for organizations, `join` for persons); quarantined lines are in `runs/<run_id>/quarantine/` | fix the input, start a new run |
 | a Windows `file://` run fails a write with "Access is denied" | the local store renames a staging file over an object another handle holds for a moment (observed in the store's own conformance test, about 1 run in 100 to 300; a retry on a 5 s budget did not prevent it, and the cause is unknown) | rerun or `make compose-resume`; use the S3 store (compose, k3d) for anything that matters; the local store is for one-machine tries and tests, and Linux is unaffected (#43) |
 | the store refuses conditional writes | `s3-init` (compose) stops the stack before any run; never run the distributed executor on such a store | use a conforming S3 server |
+| publish refuses a feed bound | the alias stays on its current index and the new index is kept for inspection until a newer run publishes, which deletes it; resuming after that fails because the index is gone, so start a new run | inspect the feed and counts; correct the feed and start a new run, or relax the appropriate bounds and resume (see [Resuming a failed run](#resuming-a-failed-run)). `PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS=true` alone does not allow an empty organizations feed when references are unresolved: the unresolved-share bound still refuses unless `PI_PUBLISH_MAX_UNRESOLVED=1` |
 | a run fails at any stage | the alias still points at the previous index, which keeps serving | resume or start a new run |
 
 Things outside the model: losing the object store loses the run's intermediate state (inputs
@@ -423,3 +426,17 @@ still exists in its registry, since a registry can delete one when a tag is re-p
 `e2e` on pushes to main and manual dispatch: the compose stack with a small data set through
 `make compose-e2e` (a run that fails in publish, then two runs, so the second publish replaces
 the first and the failed run's index is deleted), logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and file-mode checks locally.
+
+## A feed delivery
+
+For a new delivery `batch-20261028`, place gzipped NDJSON files under
+`raw/batch-20261028/persons/` and `raw/batch-20261028/organizations/`. Place an optional
+`expected.json` beside those directories for synthetic verification. After all files are
+written, create the empty `raw/batch-20261028/_COMPLETE` object. Then run with
+`PI_DELIVERY=batch-20261028 PI_REQUIRE_COMPLETE_MARKER=true`; use the same `PI_DELIVERY`
+for `verify --source expected`. Never modify a completed delivery; use a new prefix.
+
+For a synthetic delivery, `people-index datagen --delivery batch-20261028` writes the feeds
+and `expected.json` there; create `_COMPLETE` separately after it succeeds. An explicit
+`datagen --out` names the exact destination instead. With `PI_INPUT_URL`, these paths are
+relative to that input prefix rather than `raw/`.

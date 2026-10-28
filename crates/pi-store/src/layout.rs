@@ -138,7 +138,8 @@ impl RunLayout {
     }
 
     /// Moves the inputs to another root: `""` when they live at the top of their own store
-    /// (`PI_INPUT_URL`), so `organizations/` and `persons/` are read from there.
+    /// (`PI_INPUT_URL`), or the delivery root (`raw/<delivery>` or `<delivery>` in a
+    /// separate input store), so `organizations/` and `persons/` are read from there.
     #[must_use]
     pub fn with_input_root(mut self, root: &str) -> Self {
         root.trim_matches('/').clone_into(&mut self.input_root);
@@ -177,6 +178,12 @@ impl RunLayout {
     #[must_use]
     pub fn raw_persons(&self) -> String {
         self.input_dir("persons")
+    }
+
+    /// A key under the selected input root.
+    #[must_use]
+    pub fn input_key(&self, name: &str) -> String {
+        self.input_dir(name)
     }
 
     fn input_dir(&self, feed: &str) -> String {

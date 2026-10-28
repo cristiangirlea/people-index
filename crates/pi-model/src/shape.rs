@@ -157,6 +157,11 @@ pub const ORGANIZATION_FIELDS: &[FieldShape] = &[
     field("description", JsonKind::String),
 ];
 
+/// Disabled top-level person fields.
+pub const PERSON_DISABLED: &[&str] = &["memberships", "educations", "certifications", "languages"];
+/// Disabled top-level organization fields.
+pub const ORGANIZATION_DISABLED: &[&str] = &["addresses", "locations", "funding_rounds"];
+
 /// The mapped paths the document builder writes itself; input values of these names are
 /// replaced, so they are never checked.
 pub const BUILDER_OWNED: &[&str] = &[

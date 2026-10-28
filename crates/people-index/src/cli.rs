@@ -63,6 +63,9 @@ pub struct StoreArgs {
     /// Input prefix holding organizations/ and persons/, when not <store>/raw.
     #[arg(long, env = "PI_INPUT_URL")]
     pub input_url: Option<String>,
+    /// Delivery sub-prefix beneath the input root.
+    #[arg(long, env = "PI_DELIVERY")]
+    pub delivery: Option<String>,
     /// S3-compatible endpoint (MinIO). Credentials come from AWS_* variables.
     #[arg(long, env = "PI_S3_ENDPOINT")]
     pub s3_endpoint: Option<String>,
@@ -100,6 +103,9 @@ pub struct PipelineArgs {
     /// The published alias; the run's index is <alias>-<run_id>.
     #[arg(long, env = "PI_ALIAS", default_value = "persons")]
     pub alias: String,
+    /// Require a supplier completion marker before planning.
+    #[arg(long, env = "PI_REQUIRE_COMPLETE_MARKER", default_value_t = false)]
+    pub require_complete_marker: bool,
     /// Input bytes per partition.
     #[arg(long, env = "PI_PARTITION_TARGET_BYTES", value_parser = parse_byte_size, default_value = "256MiB")]
     pub partition_target_bytes: u64,
@@ -149,6 +155,15 @@ pub struct PipelineArgs {
     /// Cluster health publish waits for: green or yellow.
     #[arg(long, env = "PI_PUBLISH_HEALTH", default_value = "green")]
     pub publish_health: String,
+    /// Minimum share of the previous document count (0 disables).
+    #[arg(long, env = "PI_PUBLISH_MIN_SHARE", default_value_t = 0.9)]
+    pub publish_min_share: f64,
+    /// Maximum unresolved role organization share (1 disables).
+    #[arg(long, env = "PI_PUBLISH_MAX_UNRESOLVED", default_value_t = 0.25)]
+    pub publish_max_unresolved: f64,
+    /// Allow a run with no indexed organizations.
+    #[arg(long, env = "PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS", default_value_t = false, action = clap::ArgAction::Set)]
+    pub publish_allow_empty_organizations: bool,
     /// How long publish waits for that health.
     #[arg(long, env = "PI_HEALTH_TIMEOUT", value_parser = parse_duration, default_value = "30m")]
     pub health_timeout: Duration,

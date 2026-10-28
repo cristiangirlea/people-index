@@ -2,7 +2,7 @@
 //!
 //! Settings every participant must agree on (the partition count, the index name, the alias)
 //! are fixed once by `plan` and read back from `plan.json`; everything here may differ between
-//! processes without changing the result, only its speed and memory.
+//! processes; publish bounds control whether a completed run may replace the alias.
 
 use std::time::Duration;
 
@@ -49,6 +49,9 @@ pub struct EsStageConfig {
     pub wait_for: HealthStatus,
     /// How long `publish` waits for that health.
     pub health_timeout: Duration,
+    pub publish_min_share: f64,
+    pub publish_max_unresolved: f64,
+    pub publish_allow_empty_organizations: bool,
 }
 
 impl Default for EsStageConfig {
@@ -61,6 +64,9 @@ impl Default for EsStageConfig {
             codec: Codec::BestCompression,
             wait_for: HealthStatus::Green,
             health_timeout: Duration::from_secs(30 * 60),
+            publish_min_share: 0.9,
+            publish_max_unresolved: 0.25,
+            publish_allow_empty_organizations: false,
         }
     }
 }
@@ -70,6 +76,10 @@ impl Default for EsStageConfig {
 pub struct StagesConfig {
     /// The alias `publish` moves; the index is `<alias>-<run_id>` (`PI_ALIAS`).
     pub alias: String,
+    /// Selected delivery, recorded in the plan.
+    pub delivery: Option<String>,
+    /// Require the supplier completion marker.
+    pub require_complete_marker: bool,
     /// Input bytes per partition (`PI_PARTITION_TARGET_BYTES`).
     pub partition_target_bytes: u64,
     /// The fewest partitions (`PI_MIN_PARTITIONS`), rounded up to a power of two.
@@ -98,7 +108,7 @@ pub struct StagesConfig {
     /// document larger than the buffer still passes, alone.
     pub load_buffer_bytes: Option<usize>,
     /// Where the inputs live when not under `raw/` in the run's store (`PI_INPUT_URL`). The
-    /// run layout must then be built with `with_input_root("")`.
+    /// run layout uses `with_input_root("")`, or the delivery name when one is selected.
     pub input_store: Option<Store>,
     /// The Elasticsearch stages.
     pub es: EsStageConfig,
@@ -108,6 +118,8 @@ impl Default for StagesConfig {
     fn default() -> Self {
         Self {
             alias: "persons".to_owned(),
+            delivery: None,
+            require_complete_marker: false,
             partition_target_bytes: DEFAULT_PARTITION_TARGET_BYTES,
             min_partitions: DEFAULT_MIN_PARTITIONS,
             max_malformed: DEFAULT_MAX_MALFORMED,
@@ -157,6 +169,14 @@ impl StagesConfig {
         anyhow::ensure!(
             self.load_buffer_bytes != Some(0),
             "load_buffer_bytes must be positive"
+        );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.es.publish_min_share),
+            "publish_min_share must be between 0 and 1"
+        );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.es.publish_max_unresolved),
+            "publish_max_unresolved must be between 0 and 1"
         );
         Ok(())
     }
@@ -216,6 +236,27 @@ mod tests {
         cfg.validate().unwrap();
         cfg.load_buffer_bytes = Some(0);
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn publish_bounds_validate_endpoints_and_reject_invalid_values() {
+        for (value, valid) in [
+            (f64::NAN, false),
+            (-0.1, false),
+            (1.1, false),
+            (0.0, true),
+            (1.0, true),
+        ] {
+            for min in [true, false] {
+                let mut cfg = StagesConfig::default();
+                if min {
+                    cfg.es.publish_min_share = value;
+                } else {
+                    cfg.es.publish_max_unresolved = value;
+                }
+                assert_eq!(cfg.validate().is_ok(), valid);
+            }
+        }
     }
 
     #[test]

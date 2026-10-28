@@ -26,6 +26,10 @@ pub struct LineStats {
     /// Whether some object of the record, at any depth, repeated a key: the row keeps each
     /// key's last occurrence only.
     pub repeated_keys: bool,
+    /// Number of unmapped top-level keys in this kept record.
+    pub fields_not_indexed: u64,
+    /// Unmapped names from this record.
+    pub unknown_fields: Vec<String>,
 }
 
 impl LineStats {

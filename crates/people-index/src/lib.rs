@@ -22,7 +22,9 @@ use serde_json::json;
 use crate::cli::{Cli, Command};
 
 /// Parses the command line, runs the subcommand and returns the process exit code: 0 on
-/// success, 1 on failure (or failed checks), 143 after a shutdown signal.
+/// success, 1 on failure (or failed checks, or a setting refused after parsing), 2 when the
+/// command line does not parse (clap exits) or a scheduled worker fails, 143 after a shutdown
+/// signal (`run`, `worker` and `stage`).
 #[must_use]
 pub fn run_cli() -> ExitCode {
     let mut argv: Vec<_> = std::env::args_os().collect();

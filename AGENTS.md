@@ -17,7 +17,7 @@ before changing anything; when code and it disagree, fix one of them in the same
 - `crates/pi-datagen`: seeded synthetic feeds and their `expected.json`.
 - `crates/people-index`: the binary.
 - `deploy/k3d`, `deploy/k8s` (Kustomize, ECK), `deploy/compose`, `Dockerfile`, `Makefile`.
-- `docs/`: architecture, operations, decisions in `docs/adr/`.
+- `docs/`: architecture, operations, the integration guide and compatibility policy, decisions in `docs/adr/`.
 
 ## Commands CI runs
 

@@ -8,7 +8,8 @@ Elasticsearch is a multi-node cluster with dedicated master nodes.
 
 This document is the contract between the crates, the deployment and the docs. When code and
 this file disagree, one of them is wrong: fix it in the same change. The reasons behind the
-main choices are in [adr/](adr/).
+main choices are in [adr/](adr/). Which parts of it an integrator can rely on between versions
+is the compatibility policy in [INTEGRATING.md](INTEGRATING.md#compatibility-policy).
 
 ## Feed delivery contract
 
@@ -496,8 +497,9 @@ checks the organization feed, `join` checks the person feed.
 
 ## Configuration
 
-Every option is a CLI flag with a `PI_*` environment variable (clap `env`). Byte sizes accept
-suffixes (`256MiB`), durations humantime (`60s`, `30m`).
+Every option is a CLI flag with a `PI_*` environment variable (clap `env`), except `stage`'s
+stage name and `--task`, and `verify`'s `--digest` and `--page-size`, which are flags only. Byte
+sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 
 | variable | meaning | default |
 |---|---|---|
@@ -563,7 +565,9 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
   through the local executor, for debugging. It rewrites `stages/<stage>.json` with the tasks it
   ran, so never point it at a run that workers are following.
 
-`run` and `worker` exit 143 on SIGTERM or Ctrl-C (a second signal exits at once).
+`run`, `worker` and `stage` exit 143 on SIGTERM or Ctrl-C (a second signal exits at once). A
+command line that does not parse (an unknown flag, a malformed value) exits 2; a setting refused
+after parsing exits 1.
 
 ## Metrics
 

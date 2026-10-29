@@ -6,7 +6,7 @@
 //! the check of the mapped fields' JSON kinds ([`crate::shape`]) that keeps a single record
 //! from failing a bulk request.
 
-use crate::envelope::parse_envelope;
+use crate::envelope::parse_envelope_with_names;
 use crate::error::{MalformedKind, MalformedRecord};
 use crate::line_stats::LineStats;
 use std::ops::ControlFlow;
@@ -17,21 +17,44 @@ use crate::repeated_keys::with_repeated_keys;
 use crate::roles::{PersonFields, distinct_in_order};
 use crate::rows::{OrgRow, PersonRow};
 use crate::scan::scan;
+use crate::schema::FeedSchema;
 use crate::seq::Seq;
-use crate::shape::{ORGANIZATION_FIELDS, PERSON_FIELDS, ROLE_FIELDS, check_fields};
+use crate::shape::{FieldShape, Name, check_fields};
 
-/// Parses an organization feed line into its row. The join never reads inside an organization
-/// body, it splices it into `organizations[]` as it is; so its mapped fields' JSON kinds are
-/// checked here (and every number's length, [`LongNumbers`]), and a body that repeats a key at
-/// any depth keeps each key's last occurrence only ([`crate::repeated_keys::RepeatedKeys`]).
+/// Parses an organization feed line of the built-in schema into its row, collecting unknown
+/// field names; [`parse_org_line_with`] for another schema.
 pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<(OrgRow, LineStats), MalformedRecord> {
-    let envelope = parse_envelope(line)?;
+    parse_org_line_with(FeedSchema::builtin(), line, seq, true)
+}
+
+/// Parses an organization feed line, named as `schema` says, into its row, collecting the
+/// first unknown field names for logging when `collect_names` is set. The join never reads
+/// inside an organization body, it splices it into `organizations[]` as it is; so its mapped
+/// fields' JSON kinds are checked here (and every number's length, [`LongNumbers`]), and a body
+/// that repeats a key at any depth keeps each key's last occurrence only
+/// ([`crate::repeated_keys::RepeatedKeys`]).
+pub fn parse_org_line_with(
+    schema: &FeedSchema,
+    line: &[u8],
+    seq: Seq,
+    collect_names: bool,
+) -> Result<(OrgRow, LineStats), MalformedRecord> {
+    let envelope = parse_envelope_with_names(line, schema.envelope_id(), schema.envelope_record())?;
     let record = envelope.record_text();
     let object = RawObject::parse(record)
         .map_err(|e| MalformedRecord::from_json(MalformedKind::Record, &e))?;
     let (body, repeated_keys) = reduce(record)?;
     let mut stats = LineStats::default();
-    check_fields(&object, ORGANIZATION_FIELDS, None, &mut stats)?;
+    check_fields(&object, schema.organization_fields(), None, &mut stats)?;
+    unknown_fields(
+        &object,
+        schema.organization_fields(),
+        schema.organization_disabled(),
+        &[],
+        collect_names,
+        repeated_keys,
+        &mut stats,
+    );
     stats.repeated_keys = repeated_keys;
     let row = OrgRow {
         org_id: envelope.id,
@@ -41,20 +64,46 @@ pub fn parse_org_line(line: &[u8], seq: Seq) -> Result<(OrgRow, LineStats), Malf
     Ok((row, stats))
 }
 
-/// Parses a person feed line into its row, validating `roles[].organization_id` and the JSON
-/// kinds of the mapped fields, the record's and each role's, and the length of every number. A
-/// record that repeats a key at any depth keeps each key's last occurrence only
-/// ([`crate::repeated_keys::RepeatedKeys`]), the one the checks read. The row's edges are
-/// [`PersonRow::edges`].
+/// Parses a person feed line of the built-in schema into its row, collecting unknown field
+/// names; [`parse_person_line_with`] for another schema.
 pub fn parse_person_line(line: &[u8], seq: Seq) -> Result<(PersonRow, LineStats), MalformedRecord> {
-    let envelope = parse_envelope(line)?;
+    parse_person_line_with(FeedSchema::builtin(), line, seq, true)
+}
+
+/// Parses a person feed line, named as `schema` says, into its row, validating
+/// `roles[].organization_id` and the JSON kinds of the mapped fields, the record's and each
+/// role's, and the length of every number, and collecting the first unknown field names for
+/// logging when `collect_names` is set. A record that repeats a key at any depth keeps each
+/// key's last occurrence only ([`crate::repeated_keys::RepeatedKeys`]), the one the checks
+/// read. The row's edges are [`PersonRow::edges`].
+pub fn parse_person_line_with(
+    schema: &FeedSchema,
+    line: &[u8],
+    seq: Seq,
+    collect_names: bool,
+) -> Result<(PersonRow, LineStats), MalformedRecord> {
+    let envelope = parse_envelope_with_names(line, schema.envelope_id(), schema.envelope_record())?;
     let record = envelope.record_text();
-    let fields = PersonFields::parse(record)?;
+    let fields = PersonFields::parse(record, schema)?;
     let (body, repeated_keys) = reduce(record)?;
     let mut stats = LineStats::default();
-    check_fields(&fields.object, PERSON_FIELDS, None, &mut stats)?;
+    check_fields(&fields.object, schema.person_fields(), None, &mut stats)?;
+    unknown_fields(
+        &fields.object,
+        schema.person_fields(),
+        schema.person_disabled(),
+        &schema.builder_owned(),
+        collect_names,
+        repeated_keys,
+        &mut stats,
+    );
     for (index, role) in fields.roles.iter().flatten().enumerate() {
-        check_fields(&role.object, ROLE_FIELDS, Some(index), &mut stats)?;
+        check_fields(
+            &role.object,
+            schema.reference_fields(),
+            Some((schema.references(), index)),
+            &mut stats,
+        )?;
     }
     stats.repeated_keys = repeated_keys;
     let row = PersonRow {
@@ -64,6 +113,42 @@ pub fn parse_person_line(line: &[u8], seq: Seq) -> Result<(PersonRow, LineStats)
         org_ids: distinct_in_order(fields.role_organization_ids()),
     };
     Ok((row, stats))
+}
+
+fn unknown_fields(
+    object: &RawObject<'_>,
+    fields: &[FieldShape],
+    other_mapped: &[Name],
+    builder_owned: &[&str],
+    collect_names: bool,
+    repeated: bool,
+    stats: &mut LineStats,
+) {
+    let last = repeated.then(|| object.last_occurrences());
+    for (i, (key, _)) in object.entries.iter().enumerate() {
+        let keep = last.as_ref().is_none_or(|v| v[i]);
+        let name = key.0.as_ref();
+        if keep
+            && !fields.iter().any(|field| field.name == name)
+            && !other_mapped.iter().any(|other| other == name)
+            && !builder_owned.contains(&name)
+        {
+            stats.fields_not_indexed += 1;
+            if collect_names && stats.unknown_fields.len() < 5 {
+                stats.unknown_fields.push(name.to_owned());
+            }
+        }
+    }
+}
+
+/// Returns a prefix of a field name of at most 128 bytes, on a character boundary.
+#[must_use]
+pub fn log_field_name(name: &str) -> &str {
+    let mut end = name.len().min(128);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
 }
 
 /// One scan of `record` (valid JSON) for both its too-long numbers and its repeated keys: the
@@ -85,16 +170,54 @@ mod tests {
     use crate::error::MalformedKind;
 
     #[test]
+    fn organization_builder_names_are_unknown_and_collection_can_stop() {
+        let line = br#"{"id":1,"record":{"organizations":{},"unresolved_organization_ids":[]}}"#;
+        let (_, stats) = parse_org_line(line, Seq::default()).unwrap();
+        assert_eq!(stats.fields_not_indexed, 2);
+        assert_eq!(
+            stats.unknown_fields,
+            ["organizations", "unresolved_organization_ids"]
+        );
+        let (_, stats) =
+            parse_org_line_with(FeedSchema::builtin(), line, Seq::default(), false).unwrap();
+        assert_eq!(stats.fields_not_indexed, 2);
+        assert_eq!(stats.unknown_fields, Vec::<String>::new());
+    }
+
+    #[test]
+    fn log_name_cut_respects_utf8_boundary() {
+        let name = format!("{}{}z", "a".repeat(127), 'é');
+        assert_eq!(log_field_name(&name), "a".repeat(127));
+        assert!(log_field_name(&name).len() <= 128);
+        assert_eq!(log_field_name("short"), "short");
+    }
+
+    #[test]
     fn org_lines_keep_the_raw_record() {
         let (row, stats) = parse_org_line(
             br#"{"id":"5","record":{"name":"A","n":1.10,"x":{"deep":[1]}}}"#,
             Seq::new(1, 2),
         )
         .unwrap();
-        assert_eq!(stats, LineStats::default());
+        assert_eq!(
+            stats,
+            LineStats {
+                fields_not_indexed: 2,
+                unknown_fields: vec!["n".into(), "x".into()],
+                ..LineStats::default()
+            }
+        );
         assert_eq!(row.org_id, 5);
         assert_eq!(row.seq, Seq::new(1, 2));
         assert_eq!(row.body, br#"{"name":"A","n":1.10,"x":{"deep":[1]}}"#);
+    }
+
+    #[test]
+    fn unknown_names_use_decoded_last_keys_and_exclude_builder_fields() {
+        let (_, stats) = parse_person_line(br#"{"id":1,"record":{"organizations":{},"unresolved_organization_ids":[],"\u0066irst_name":"A","x":1,"x":2,"a":1,"b":2,"c":3,"d":4,"e":5}}"#, Seq::default()).unwrap();
+        assert_eq!(stats.fields_not_indexed, 6);
+        assert_eq!(stats.unknown_fields, ["x", "a", "b", "c", "d"]);
+        assert!(stats.repeated_keys);
     }
 
     #[test]
@@ -464,6 +587,77 @@ mod tests {
             assert_eq!(err.kind(), MalformedKind::Record);
             assert!(err.reason().starts_with("a.big: "), "{}", err.reason());
         }
+    }
+
+    #[test]
+    fn a_schema_renames_every_name_extraction_reads() {
+        let schema = FeedSchema::from_json(
+            r#"{
+                "envelope": {"id": "key", "record": "payload"},
+                "person": {
+                    "references": "jobs",
+                    "reference_id": "org",
+                    "fields": [
+                        {"name": "key", "kind": "number"},
+                        {"name": "followers", "kind": "lenient_long"},
+                        {"name": "jobs", "kind": "object_array"}
+                    ],
+                    "reference_fields": [
+                        {"name": "org", "kind": "number"},
+                        {"name": "title", "kind": "string"}
+                    ],
+                    "disabled": ["extras"]
+                },
+                "organization": {
+                    "fields": [{"name": "label", "kind": "string"}],
+                    "disabled": ["offices"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let line = br#"{"key":"8","id":"x","payload":{"key":8,"followers":"n/a","extras":{"a":1},
+            "roles":7,"organizations":[],"jobs.organization_resolved":true,
+            "jobs":[{"org":4,"title":"T","organization_id":"bad"},{"org":null},{"org":"2"}]}}"#;
+        let (row, stats) = parse_person_line_with(&schema, line, Seq::new(0, 1), true).unwrap();
+        assert_eq!(row.person_id, 8);
+        assert_eq!(row.org_ids, [4, 2]);
+        assert_eq!(stats.ignored_by_index, 1);
+        // `roles` is an unknown field here; builder-owned names are not.
+        assert_eq!(stats.unknown_fields, ["roles"]);
+        // The built-in names mean nothing to this schema, and its names nothing to the default.
+        let err = parse_person_line_with(&schema, br#"{"id":1,"record":{}}"#, Seq::default(), true)
+            .unwrap_err();
+        assert_eq!(err.reason(), "missing `key`");
+        assert!(parse_person_line(line, Seq::default()).is_err());
+        for (record, reason) in [
+            (
+                r#"{"jobs":[{"title":{"x":1}}]}"#,
+                "jobs[0].title: expected a string, number or boolean, found an object",
+            ),
+            (r#"{"jobs":[{"org":"a"}]}"#, "jobs[0].org: id string"),
+            (r#"{"jobs":"x"}"#, "`jobs` is not an array or null"),
+        ] {
+            let line = format!(r#"{{"key":1,"payload":{record}}}"#);
+            let err =
+                parse_person_line_with(&schema, line.as_bytes(), Seq::default(), true).unwrap_err();
+            assert!(err.reason().starts_with(reason), "{record}: {err}");
+        }
+
+        let org = br#"{"key":5,"payload":{"label":"Acme","name":{"x":1},"offices":[{}]}}"#;
+        let (row, stats) = parse_org_line_with(&schema, org, Seq::default(), true).unwrap();
+        assert_eq!(row.org_id, 5);
+        assert_eq!(stats.unknown_fields, ["name"]);
+        let err = parse_org_line_with(
+            &schema,
+            br#"{"key":5,"payload":{"label":{"x":1}}}"#,
+            Seq::default(),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.reason(),
+            "label: expected a string, number or boolean, found an object"
+        );
     }
 
     #[test]

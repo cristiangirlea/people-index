@@ -27,6 +27,14 @@ impl PlanStage {
 
     async fn make(&self, ctx: &RunContext) -> anyhow::Result<Plan> {
         let inputs = self.config.input_store(&ctx.store);
+        if self.config.require_complete_marker {
+            let marker = ctx.layout.input_key("_COMPLETE");
+            if inputs.head(&marker).await?.is_none() {
+                return Err(permanent(anyhow::anyhow!(
+                    "missing completion marker {marker}"
+                )));
+            }
+        }
         let organizations = list_inputs(inputs, &ctx.layout.raw_organizations()).await?;
         let persons = list_inputs(inputs, &ctx.layout.raw_persons()).await?;
         if persons.is_empty() {
@@ -67,12 +75,14 @@ impl PlanStage {
             .map_err(|e| permanent(anyhow::anyhow!("index name {index:?}: {e}")))?;
         Ok(Plan {
             run_id: ctx.run_id.clone(),
+            delivery: self.config.delivery.clone(),
             partitions,
             alias: self.config.alias.clone(),
             index,
             organizations,
             persons,
             total_bytes,
+            schema: Some(self.config.schema_pin()),
             created_at: OffsetDateTime::now_utc(),
         })
     }
@@ -139,12 +149,17 @@ impl Stage for PlanStage {
                 CreateOutcome::AlreadyExists => Plan::load(ctx).await?,
             }
         };
+        plan.check_schema(&self.config.schema_pin())?;
+        let pin = plan.schema_pin();
         tracing::info!(
             partitions = plan.partitions,
             organization_files = plan.organizations.len(),
             person_files = plan.persons.len(),
             input_bytes = plan.total_bytes,
             index = %plan.index,
+            builtin_schema = self.config.schema.is_builtin(),
+            feed_schema_sha256 = %pin.feed_schema_sha256,
+            mapping_sha256 = %pin.mapping_sha256,
             "plan ready"
         );
         let mut report = TaskReport {
@@ -198,5 +213,153 @@ mod tests {
         let text = format!("{err:#}");
         assert!(pi_coord::is_permanent(&err), "{text}");
         assert!(text.contains("raw/persons/b.ndjson.gz"), "{text}");
+    }
+    #[tokio::test]
+    async fn delivery_marker_and_input_selection() {
+        let store = Store::memory();
+        store
+            .put("raw/other/persons/a.ndjson.gz", b"other".to_vec())
+            .await
+            .unwrap();
+        store
+            .put("raw/batch/persons/a.ndjson.gz", b"person".to_vec())
+            .await
+            .unwrap();
+        store
+            .put("raw/batch/organizations/a.ndjson.gz", b"org".to_vec())
+            .await
+            .unwrap();
+        let layout = pi_store::RunLayout::new("r1")
+            .unwrap()
+            .with_input_root("raw/batch");
+        let ctx = RunContext::with_layout(store.clone(), layout);
+        let config = StagesConfig {
+            delivery: Some("batch".into()),
+            require_complete_marker: true,
+            ..StagesConfig::default()
+        };
+        let stage = PlanStage::new(Arc::new(config.clone()));
+        let err = stage.make(&ctx).await.unwrap_err();
+        assert!(pi_coord::is_permanent(&err));
+        assert!(format!("{err:#}").contains("raw/batch/_COMPLETE"));
+        store.put("raw/batch/_COMPLETE", Vec::new()).await.unwrap();
+        let plan = stage.make(&ctx).await.unwrap();
+        assert_eq!(plan.delivery.as_deref(), Some("batch"));
+        assert_eq!(plan.persons.len(), 1);
+        assert_eq!(plan.persons[0].key, "raw/batch/persons/a.ndjson.gz");
+        assert_eq!(
+            plan.organizations[0].key,
+            "raw/batch/organizations/a.ndjson.gz"
+        );
+        let default_ctx = RunContext::new("r2", store.clone()).unwrap();
+        store
+            .put("raw/persons/a.ndjson.gz", b"default".to_vec())
+            .await
+            .unwrap();
+        let default_plan = PlanStage::new(Arc::new(StagesConfig::default()))
+            .make(&default_ctx)
+            .await
+            .unwrap();
+        assert_eq!(default_plan.delivery, None);
+        assert_eq!(default_plan.persons.len(), 1);
+        assert_eq!(default_plan.persons[0].key, "raw/persons/a.ndjson.gz");
+    }
+    #[tokio::test]
+    async fn resume_keeps_first_plan_when_delivery_changes() {
+        let store = Store::memory();
+        store
+            .put("raw/a/persons/a.ndjson.gz", vec![1])
+            .await
+            .unwrap();
+        store.put("raw/a/_COMPLETE", vec![]).await.unwrap();
+        let ctx_a = RunContext::with_layout(
+            store.clone(),
+            pi_store::RunLayout::new("resume")
+                .unwrap()
+                .with_input_root("raw/a"),
+        );
+        let stage_a = PlanStage::new(Arc::new(StagesConfig {
+            delivery: Some("a".into()),
+            require_complete_marker: true,
+            ..StagesConfig::default()
+        }));
+        let task = TaskSpec::single(StageName::Plan);
+        stage_a.run(&ctx_a, &task, &AttemptId::new()).await.unwrap();
+        let ctx_b = RunContext::with_layout(
+            store.clone(),
+            pi_store::RunLayout::new("resume")
+                .unwrap()
+                .with_input_root("raw/b"),
+        );
+        let stage_b = PlanStage::new(Arc::new(StagesConfig {
+            delivery: Some("b".into()),
+            require_complete_marker: true,
+            ..StagesConfig::default()
+        }));
+        stage_b.run(&ctx_b, &task, &AttemptId::new()).await.unwrap();
+        let plan = Plan::load(&ctx_b).await.unwrap();
+        assert_eq!(plan.delivery.as_deref(), Some("a"));
+        assert_eq!(plan.persons[0].key, "raw/a/persons/a.ndjson.gz");
+    }
+
+    #[tokio::test]
+    async fn the_plan_pins_the_schema_and_a_resume_with_another_one_fails_for_good() {
+        let store = Store::memory();
+        store.put("raw/persons/a.ndjson.gz", vec![1]).await.unwrap();
+        let ctx = RunContext::new("pinned", store.clone()).unwrap();
+        let task = TaskSpec::single(StageName::Plan);
+        let custom = StagesConfig {
+            schema: Arc::new(
+                pi_model::FeedSchema::from_json(r#"{"envelope": {"id": "key"}}"#).unwrap(),
+            ),
+            ..StagesConfig::default()
+        };
+        PlanStage::new(Arc::new(custom.clone()))
+            .run(&ctx, &task, &AttemptId::new())
+            .await
+            .unwrap();
+        let plan = Plan::load(&ctx).await.unwrap();
+        assert_eq!(plan.schema, Some(custom.schema_pin()));
+        assert_ne!(plan.schema_pin(), crate::plan_file::SchemaPin::builtin());
+        // The same settings resume; the built-in ones do not, at the plan or in any task.
+        PlanStage::new(Arc::new(custom.clone()))
+            .run(&ctx, &task, &AttemptId::new())
+            .await
+            .unwrap();
+        Plan::load_for(&ctx, &custom).await.unwrap();
+        let builtin = StagesConfig::default();
+        let err = PlanStage::new(Arc::new(builtin.clone()))
+            .run(&ctx, &task, &AttemptId::new())
+            .await
+            .unwrap_err();
+        assert!(pi_coord::is_permanent(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("PI_SCHEMA_FILE"), "{err:#}");
+        assert!(pi_coord::is_permanent(
+            &Plan::load_for(&ctx, &builtin).await.unwrap_err()
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_input_root_marker_and_feed_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::local(dir.path()).unwrap();
+        store.put("persons/a.ndjson.gz", vec![1]).await.unwrap();
+        store.put("persons/_COMPLETE", vec![]).await.unwrap();
+        let ctx = RunContext::with_layout(
+            store.clone(),
+            pi_store::RunLayout::new("local")
+                .unwrap()
+                .with_input_root(""),
+        );
+        let stage = PlanStage::new(Arc::new(StagesConfig {
+            input_store: Some(store.clone()),
+            require_complete_marker: true,
+            ..StagesConfig::default()
+        }));
+        assert!(stage.make(&ctx).await.is_err());
+        store.put("_COMPLETE", vec![]).await.unwrap();
+        let plan = stage.make(&ctx).await.unwrap();
+        assert_eq!(plan.persons.len(), 1);
+        assert_eq!(plan.persons[0].key, "persons/a.ndjson.gz");
     }
 }

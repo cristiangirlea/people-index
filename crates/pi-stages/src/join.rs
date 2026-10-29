@@ -244,7 +244,7 @@ impl Stage for JoinStage {
         task: &TaskSpec,
         attempt: &AttemptId,
     ) -> anyhow::Result<TaskReport> {
-        let plan = Plan::load(ctx).await?;
+        let plan = Plan::load_for(ctx, &self.config).await?;
         let p = task_partition(task, &plan)?;
         let org_commits = self.cache.finished(ctx, StageName::ExtractOrgs).await?;
         let person_commits = self.cache.finished(ctx, StageName::ExtractPersons).await?;

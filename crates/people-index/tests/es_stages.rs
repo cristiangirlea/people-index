@@ -61,6 +61,16 @@ fn es_config(server: &MockServer, base: StagesConfig) -> StagesConfig {
     cfg
 }
 
+async fn mount_previous_count(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/persons-old/_count"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"count": 1, "_shards": shards()})),
+        )
+        .mount(server)
+        .await;
+}
+
 fn shards() -> Value {
     json!({"total": 4, "successful": 4, "skipped": 0, "failed": 0})
 }
@@ -76,6 +86,11 @@ async fn load_sends_every_document_once_and_resends_rejected_items() {
     let plan = Plan::load(&ctx).await.unwrap();
 
     let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/{}", plan.index)))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     let bulk = Bulk {
         calls: AtomicUsize::new(0),
         reject_first: true,
@@ -151,6 +166,11 @@ async fn load_with_a_buffer_smaller_than_one_document_sends_every_document() {
     let plan = Plan::load(&ctx).await.unwrap();
 
     let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/{}", plan.index)))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     let bulk = Bulk {
         calls: AtomicUsize::new(0),
         reject_first: false,
@@ -186,23 +206,48 @@ async fn load_with_a_buffer_smaller_than_one_document_sends_every_document() {
     assert_eq!(acknowledged, docs);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
     reason = "one mock per cluster call, in request order"
 )]
-async fn prepare_and_publish_against_a_mock_cluster() {
+async fn prepare_and_publish_against_a_mock_cluster(corrupt: bool) {
     let data = generate(small_config()).await;
-    run_stages(&data.store, "run-p", config(2), &OFFLINE)
+    let mut delivery_config = config(2);
+    delivery_config.delivery = Some("batch".into());
+    run_stages(&data.store, "20261028-120000", delivery_config, &OFFLINE)
         .await
         .unwrap();
-    let ctx = RunContext::new("run-p", data.store.clone()).unwrap();
+    let ctx = RunContext::new("20261028-120000", data.store.clone()).unwrap();
     let plan = Plan::load(&ctx).await.unwrap();
     let index = plan.index.clone();
-    assert_eq!(index, "persons-run-p");
+    assert_eq!(index, "persons-20261028-120000");
     let documents = data.expected.persons;
 
+    let old = pi_store::RunLayout::new("20261020-120000").unwrap();
+    let old_data = format!("{}/segment", old.data_dir("join").unwrap());
+    data.store.put(&old_data, "data").await.unwrap();
+    data.store
+        .put(&old.publish_record(), "record")
+        .await
+        .unwrap();
+    let mut state = pi_coord::RunState::new(old.run_id());
+    state.status = pi_coord::RunStatus::Published;
+    state.save(&data.store, &old).await.unwrap();
+    if corrupt {
+        let bad = pi_store::RunLayout::new("20261019-120000").unwrap();
+        data.store
+            .put(&bad.publish_record(), "record")
+            .await
+            .unwrap();
+        data.store.put(&bad.state(), "invalid").await.unwrap();
+    }
     let server = MockServer::start().await;
+    mount_previous_count(&server).await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/{index}")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/_nodes/settings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -282,10 +327,12 @@ async fn prepare_and_publish_against_a_mock_cluster() {
         .mount(&server)
         .await;
 
+    let mut cfg = es_config(&server, config(2));
+    cfg.es.retain_runs = 1;
     let reports = run_stages(
         &data.store,
-        "run-p",
-        es_config(&server, config(2)),
+        "20261028-120000",
+        cfg,
         &[StageName::PrepareIndex, StageName::Load, StageName::Publish],
     )
     .await
@@ -311,9 +358,39 @@ async fn prepare_and_publish_against_a_mock_cluster() {
         .unwrap()
         .unwrap()
         .0;
+    assert_eq!(summary.delivery.as_deref(), Some("batch"));
+    assert_eq!(summary.retention_failures, u64::from(corrupt));
+    assert!(data.store.get_opt(&old_data).await.unwrap().is_none());
+    for stage in [StageName::ExtractOrgs, StageName::ExtractPersons] {
+        let commits = pi_coord::CommitLog::new(data.store.clone(), ctx.layout.clone())
+            .list(stage)
+            .await
+            .unwrap();
+        let expected: u64 = commits
+            .iter()
+            .map(|c| {
+                c.report
+                    .counters
+                    .get("fields_not_indexed")
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        let actual = summary
+            .stages
+            .iter()
+            .find(|s| s.stage == stage)
+            .unwrap()
+            .counters
+            .get("fields_not_indexed")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(actual, expected);
+    }
     assert_eq!(summary.documents, documents);
     assert_eq!(summary.publish.docs, documents);
     assert_eq!(summary.publish.previous, ["persons-old"]);
+    assert_eq!(summary.publish.previous_docs, Some(1));
     assert_eq!(summary.publish.deleted, ["persons-old"]);
     assert_eq!(summary.stages.len(), 8);
     assert_eq!(summary.stages.last().unwrap().stage, StageName::Publish);
@@ -324,6 +401,16 @@ async fn prepare_and_publish_against_a_mock_cluster() {
         assert_eq!(extract.counters.get("values_ignored_by_index"), Some(&0));
     }
     assert_eq!(reports[2].counter("documents"), documents);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publish_cleans_old_data() {
+    prepare_and_publish_against_a_mock_cluster(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publish_continues_after_corrupt_old_state() {
+    prepare_and_publish_against_a_mock_cluster(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -411,6 +498,10 @@ async fn mount_alias_on(server: &MockServer, target: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "exercise interrupted publish and resume"
+)]
 async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun() {
     let data = generate(small_config()).await;
     run_stages(&data.store, "run-c", config(1), &OFFLINE)
@@ -422,6 +513,7 @@ async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun(
 
     // First attempt: the alias moves, then the coordinator stops while the delete is in flight.
     let server = MockServer::start().await;
+    mount_previous_count(&server).await;
     mount_publish_checks(&server, index, documents).await;
     mount_alias_on(&server, "persons-old").await;
     Mock::given(method("POST"))
@@ -503,7 +595,10 @@ async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun(
         .unwrap()
         .unwrap()
         .0;
-    assert_eq!(record.previous, ["persons-old"]);
+    assert_eq!(
+        (record.previous.as_slice(), record.previous_docs),
+        (["persons-old".to_owned()].as_slice(), Some(1))
+    );
     let summary: Summary = ctx
         .store
         .get_json(&ctx.layout.summary())
@@ -512,6 +607,7 @@ async fn a_publish_stopped_after_the_alias_moved_deletes_the_old_index_on_rerun(
         .unwrap()
         .0;
     assert_eq!(summary.publish.previous, ["persons-old"]);
+    assert_eq!(summary.publish.previous_docs, Some(1));
     assert_eq!(summary.publish.deleted, ["persons-old"]);
     assert_eq!(
         summary.publish.not_deleted,

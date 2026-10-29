@@ -11,7 +11,7 @@ use pi_coord::{
     AttemptId, CancellationToken, Cancelled, RunContext, Stage, StageName, TaskReport, TaskSpec,
     permanent,
 };
-use pi_es::{BulkIndexer, BulkStats, EsClient};
+use pi_es::{BulkIndexer, BulkStats, EsClient, IndexAdmin};
 use pi_model::DocRow;
 use pi_store::Dataset;
 
@@ -82,8 +82,18 @@ impl Stage for LoadStage {
         task: &TaskSpec,
         _attempt: &AttemptId,
     ) -> anyhow::Result<TaskReport> {
-        let plan = Plan::load(ctx).await?;
+        let plan = Plan::load_for(ctx, &self.config).await?;
         let q = task_partition(task, &plan)?;
+        let exists = IndexAdmin::new(self.client.clone())
+            .exists(&plan.index)
+            .await
+            .map_err(|e| es_error(e, &format!("checking index {}", plan.index)))?;
+        if !exists {
+            return Err(permanent(anyhow::anyhow!(
+                "run index {} does not exist; a resume cannot recreate it",
+                plan.index
+            )));
+        }
         let commits = self.cache.finished(ctx, StageName::Assemble).await?;
         let keys = partition_outputs(ctx, &commits, StageName::Assemble, Dataset::Docs, q)?;
         // The assemble task of partition q has the same id as this one.
@@ -159,4 +169,144 @@ impl Stage for LoadStage {
 
 fn duration_ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_coord::{CommitLog, CommitRecord};
+    use pi_es::EsConfig;
+    use pi_segment::{MemorySink, SegmentConfig, SegmentWriter};
+    use pi_store::Store;
+    use serde_json::json;
+    use time::OffsetDateTime;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn fixture(server: &MockServer) -> (RunContext, LoadStage, TaskSpec) {
+        let ctx = RunContext::new("r1", Store::memory()).unwrap();
+        let plan = Plan {
+            run_id: "r1".into(),
+            partitions: 1,
+            alias: "persons".into(),
+            index: "persons-r1".into(),
+            organizations: vec![],
+            persons: vec![],
+            total_bytes: 0,
+            schema: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            delivery: None,
+        };
+        ctx.store.put_json(&ctx.layout.plan(), &plan).await.unwrap();
+        let key = format!(
+            "{}/test.seg",
+            ctx.layout
+                .partition_dir("assemble", Dataset::Docs, 0)
+                .unwrap()
+        );
+        let mut writer = SegmentWriter::new(MemorySink::new(), SegmentConfig::default());
+        writer
+            .push(&DocRow {
+                person_id: 1,
+                body: br#"{"id":1}"#.to_vec(),
+            })
+            .unwrap();
+        let (segment, _, _) = writer.finish().unwrap();
+        ctx.store.put(&key, segment.unwrap().bytes).await.unwrap();
+        let mut report = TaskReport {
+            outputs: vec![key],
+            ..TaskReport::default()
+        };
+        report.add(counters::DOCUMENTS, 1);
+        let task = TaskSpec::for_partition(StageName::Load, 0);
+        CommitLog::new(ctx.store.clone(), ctx.layout.clone())
+            .commit(&CommitRecord {
+                stage: StageName::Assemble,
+                task_id: task.task_id.clone(),
+                attempt: AttemptId::new(),
+                worker: "test".into(),
+                committed_at: OffsetDateTime::now_utc(),
+                report,
+            })
+            .await
+            .unwrap();
+        let client = EsClient::new(&EsConfig::new(server.uri())).unwrap();
+        (
+            ctx,
+            LoadStage::new(
+                Arc::new(StagesConfig::default()),
+                Arc::new(CommitCache::new()),
+                client,
+            ),
+            task,
+        )
+    }
+
+    #[tokio::test]
+    async fn missing_index_fails_permanently_without_bulk() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/persons-r1"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/persons-r1/_bulk"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (ctx, stage, task) = fixture(&server).await;
+        let err = stage.run(&ctx, &task, &AttemptId::new()).await.unwrap_err();
+        assert!(pi_coord::is_permanent(&err));
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("persons-r1") && message.contains("resume cannot recreate it"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_head_server_error_is_retryable_without_bulk() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/persons-r1"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/persons-r1/_bulk"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (ctx, stage, task) = fixture(&server).await;
+        let err = stage.run(&ctx, &task, &AttemptId::new()).await.unwrap_err();
+        assert!(!pi_coord::is_permanent(&err));
+    }
+
+    #[tokio::test]
+    async fn existing_index_proceeds_to_bulk() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/persons-r1"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/persons-r1/_bulk"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"errors": false, "items": [{"index": {"status": 201}}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (ctx, stage, task) = fixture(&server).await;
+        let report = stage.run(&ctx, &task, &AttemptId::new()).await.unwrap();
+        assert_eq!(report.counter(counters::DOCS_INDEXED), 1);
+    }
 }

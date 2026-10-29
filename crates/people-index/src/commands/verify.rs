@@ -47,13 +47,10 @@ pub async fn load_expected(args: &VerifyArgs) -> anyhow::Result<Expected> {
         }
         None => {
             let stores = Stores::open(&args.store)?;
-            let (store, key) = match &stores.inputs {
-                Some(inputs) => (inputs.clone(), pi_datagen::EXPECTED_FILE.to_owned()),
-                None => (
-                    stores.runs.clone(),
-                    format!("raw/{}", pi_datagen::EXPECTED_FILE),
-                ),
-            };
+            let key = stores
+                .layout("verify")?
+                .input_key(pi_datagen::EXPECTED_FILE);
+            let store = stores.inputs.clone().unwrap_or_else(|| stores.runs.clone());
             store
                 .get(&key)
                 .await
@@ -162,6 +159,7 @@ pub async fn run(args: VerifyArgs) -> anyhow::Result<VerifyOutcome> {
             let run_id = summary_run(&args, &admin, &stores.runs).await?;
             let summary = load_summary(&args, &stores.runs, &run_id).await?;
             let published = Published {
+                builtin_names: summary.builtin_schema(),
                 index: summary.index,
                 docs: summary.publish.docs,
             };

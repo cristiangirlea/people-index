@@ -14,7 +14,12 @@ pub async fn run(args: StageArgs, cancel: CancellationToken) -> anyhow::Result<S
     let name: StageName = args.name.parse()?;
     let stores = Stores::open(&args.store)?;
     let ctx = stores.context(&args.run_id, cancel)?;
-    let registry = pi_stages::build_registry(stages_config(&args.pipeline, &args.es, &stores)?)?;
+    let registry = pi_stages::build_registry(stages_config(
+        &args.pipeline,
+        &args.es,
+        &args.exec,
+        &stores,
+    )?)?;
     let stage = registry
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("stage {name} is not registered"))?;

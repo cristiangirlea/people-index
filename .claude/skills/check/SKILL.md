@@ -11,12 +11,16 @@ Run each from the repository root and report pass or fail, with the first error 
 4. `scripts/check-deploy.sh`
 5. `scripts/scrub-check.sh`
 6. `scripts/test-scrub-check.sh`
-7. `scripts/test-release-notes.sh`
-8. `scripts/test-check-republish.sh`
-9. `scripts/test-check-pins-resolve.sh`
-10. `scripts/test-check-modes.sh`
-11. `scripts/check-modes.sh`
-12. `scripts/test-check-s3.sh`
-13. `scripts/check-s3.sh` (needs Docker: the store and lease tests against SeaweedFS)
+7. `scripts/test-check-republish.sh`
+8. `scripts/test-release-notes.sh`
+9. `scripts/test-restore-drill.sh`
+10. `scripts/test-check-s3-endpoints.sh` (needs PyYAML)
+11. `scripts/test-check-pins-resolve.sh`
+12. `scripts/test-check-modes.sh`
+13. `scripts/check-modes.sh`
+14. `scripts/test-check-s3.sh`
+15. `scripts/check-s3.sh` (needs Docker: the store and lease tests against SeaweedFS)
 
 Do not fix anything unless asked; say what failed and where.
+
+Also run `scripts/test-identity-config.sh` to test identity configuration validation.

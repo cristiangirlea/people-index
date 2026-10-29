@@ -19,6 +19,16 @@ async fn mount_checks(server: &MockServer, count: u64) {
 /// [`mount_checks`] for any index.
 async fn mount_checks_for(server: &MockServer, index: &str, count: u64) {
     Mock::given(method("POST"))
+        .and(wiremock::matchers::path_regex(
+            r"^/persons-(old|older|other|previous|2026[^/]*)/_count$",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"count": 1, "_shards": shards(4)})),
+        )
+        .with_priority(10)
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
         .and(path(format!("/{index}/_refresh")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"_shards": shards(4)})))
         .mount(server)
@@ -414,9 +424,14 @@ async fn a_resumed_publish_deletes_what_the_record_names() {
 
     let seen = std::sync::Mutex::new(None);
     let report = Publisher::new(IndexAdmin::new(client(&server)))
-        .publish_recording(&spec(5), |on_alias| {
+        .publish_recording(&spec(5), |on_alias, previous_docs| {
             *seen.lock().expect("lock") = Some(on_alias);
-            async { Ok(vec!["persons-old".to_owned(), "persons-new".to_owned()]) }
+            async move {
+                Ok((
+                    vec!["persons-old".to_owned(), "persons-new".to_owned()],
+                    previous_docs,
+                ))
+            }
         })
         .await
         .expect("published");
@@ -442,7 +457,7 @@ async fn a_failed_record_never_touches_the_alias() {
         .await;
 
     let outcome = Publisher::new(IndexAdmin::new(client(&server)))
-        .publish_recording(&spec(5), |_| async {
+        .publish_recording(&spec(5), |_, _| async {
             Err(EsError::Record("store unavailable".into()))
         })
         .await;
@@ -731,9 +746,9 @@ async fn an_older_run_never_takes_the_alias_back_from_a_newer_one() {
 
     let mut recorded = false;
     let outcome = Publisher::new(IndexAdmin::new(client(&server)))
-        .publish_recording(&stamped_spec(), |on_alias| {
+        .publish_recording(&stamped_spec(), |on_alias, previous_docs| {
             recorded = true;
-            async move { Ok(on_alias) }
+            async move { Ok((on_alias, previous_docs)) }
         })
         .await;
     match outcome {
@@ -819,4 +834,111 @@ async fn a_malformed_listing_is_reported_not_fatal() {
         "{:?}",
         report.not_deleted
     );
+}
+
+#[tokio::test]
+async fn minimum_share_refuses_before_alias_swap() {
+    let server = MockServer::start().await;
+    mount_checks(&server, 50).await;
+    Mock::given(method("GET"))
+        .and(path("/_alias/persons"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"persons-old": {}})))
+        .mount(&server)
+        .await;
+    // This specific mock wins over the fallback.
+    Mock::given(method("POST"))
+        .and(path("/persons-old/_count"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"count": 100, "_shards": shards(4)})),
+        )
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_aliases"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/persons-new"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut settings = spec(50);
+    settings.min_share = 0.9;
+    let error = Publisher::new(IndexAdmin::new(client(&server)))
+        .publish(&settings)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EsError::PublishRefused(_)));
+    assert!(error.to_string().contains("previous 100"));
+}
+
+#[tokio::test]
+async fn disabled_share_does_not_count_an_unavailable_previous_index() {
+    let server = MockServer::start().await;
+    mount_checks(&server, 5).await;
+    mount_alias_moving_after(&server, u64::MAX).await;
+    Mock::given(method("POST"))
+        .and(path("/persons-old/_count"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(0)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_aliases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_delete_old(&server, 200).await;
+    let mut input = spec(5);
+    input.min_share = 0.0;
+    let report = Publisher::new(IndexAdmin::new(client(&server)))
+        .publish(&input)
+        .await
+        .unwrap();
+    assert_eq!(report.previous_docs, None);
+}
+
+#[tokio::test]
+async fn share_compares_the_sum_and_accepts_the_exact_boundary() {
+    let server = MockServer::start().await;
+    mount_checks(&server, 90).await;
+    for (index, count) in [("persons-old", 40), ("persons-other", 60)] {
+        Mock::given(method("POST"))
+            .and(path(format!("/{index}/_count")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"count": count, "_shards": shards(4)})),
+            )
+            .expect(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_delete(&server, index, 200, 1).await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/_alias/persons"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"persons-old": {}, "persons-other": {}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_aliases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let report = Publisher::new(IndexAdmin::new(client(&server)))
+        .publish(&spec(90))
+        .await
+        .unwrap();
+    assert_eq!(report.previous_docs, Some(100));
 }

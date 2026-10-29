@@ -1,4 +1,4 @@
-# Creates the `people-index` bucket once the store is up (bucket-init.sh, idempotent).
+# Creates the pipeline and snapshot buckets once the store is up (bucket-init.sh, idempotent).
 #
 # A short TTL removes the finished Job, so every `kubectl apply -k` runs it again; that is
 # harmless (create returns 409, HEAD decides) and re-proves the credentials after a rotation.
@@ -29,6 +29,28 @@ spec:
         runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: snapshot-bucket-init
+          image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+          command: ["/bin/sh", "/scripts/bucket-init.sh"]
+          env:
+            - {name: S3_ENDPOINT, value: "http://s3:8333"}
+            - {name: S3_BUCKET, value: people-index-snapshots}
+          envFrom:
+            - secretRef: {name: snapshot-s3-credentials}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
       containers:
         - name: bucket-init
           # The store's own image (it has curl): no separate image whose pinned digest a registry

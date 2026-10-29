@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Creates the bucket, then proves the store supports the conditional writes the commit and lease
+# Creates the pipeline and snapshot buckets, probes their isolation, then proves the store
+# supports the conditional writes the commit and lease
 # protocol depends on (docs/ARCHITECTURE.md, Commits and Leases):
 #   - PUT If-None-Match: * on an existing key  -> 412 (create-if-absent: commits, lease claims)
 #   - PUT If-Match: <stale etag>               -> 412 (update-if-match: lease renewals, takeovers)
@@ -12,6 +13,8 @@ deadline=$((SECONDS + ${S3_WAIT_SECONDS:-120}))
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+PIPELINE_KEY="$AWS_ACCESS_KEY_ID" PIPELINE_SECRET="$AWS_SECRET_ACCESS_KEY"
+: "${SNAPSHOT_BUCKET:?}" "${SNAPSHOT_KEY:?}" "${SNAPSHOT_SECRET:?}"
 s3api() { aws --endpoint-url "$S3_ENDPOINT" s3api "$@"; }
 
 echo "s3-init: waiting for ${S3_ENDPOINT}"
@@ -30,6 +33,40 @@ else
   echo "s3-init: creating bucket ${S3_BUCKET}"
   s3api create-bucket --bucket "$S3_BUCKET" >/dev/null
 fi
+
+# Create the snapshot bucket with its own scoped identity.
+export AWS_ACCESS_KEY_ID="$SNAPSHOT_KEY" AWS_SECRET_ACCESS_KEY="$SNAPSHOT_SECRET"
+if ! s3api head-bucket --bucket "$SNAPSHOT_BUCKET" >/dev/null 2>&1; then
+  s3api create-bucket --bucket "$SNAPSHOT_BUCKET" >/dev/null
+fi
+s3api head-bucket --bucket "$SNAPSHOT_BUCKET" >/dev/null
+export AWS_ACCESS_KEY_ID="$PIPELINE_KEY" AWS_SECRET_ACCESS_KEY="$PIPELINE_SECRET"
+
+# Each identity must be denied list, write and delete on the other bucket.
+expect_403() {
+  local what="$1"
+  shift
+  if "$@" >"$work/out" 2>"$work/err"; then
+    echo "s3-init: $what unexpectedly succeeded" >&2
+    exit 1
+  fi
+  if ! grep -Eq '403|AccessDenied' "$work/err"; then
+    echo "s3-init: $what failed without access denied:" >&2
+    cat "$work/err" >&2
+    exit 1
+  fi
+}
+printf 'probe\n' >"$work/isolation"
+for bucket in "$SNAPSHOT_BUCKET" "$S3_BUCKET"; do
+  if [[ "$bucket" == "$S3_BUCKET" ]]; then
+    export AWS_ACCESS_KEY_ID="$SNAPSHOT_KEY" AWS_SECRET_ACCESS_KEY="$SNAPSHOT_SECRET"
+  fi
+  expect_403 "list $bucket" s3api list-objects-v2 --bucket "$bucket"
+  expect_403 "put $bucket" s3api put-object --bucket "$bucket" --key _isolation-probe --body "$work/isolation"
+  expect_403 "delete $bucket" s3api delete-object --bucket "$bucket" --key _isolation-probe
+done
+export AWS_ACCESS_KEY_ID="$PIPELINE_KEY" AWS_SECRET_ACCESS_KEY="$PIPELINE_SECRET"
+echo "s3-init: bucket isolation verified"
 
 # expect_412 <description> <command...>: the command must fail with PreconditionFailed.
 expect_412() {

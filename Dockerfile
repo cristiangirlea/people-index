@@ -7,11 +7,11 @@
 #   planner  reduces the workspace to recipe.json (manifests and lockfile only), so the
 #            dependency layer below is rebuilt only when a Cargo.toml or Cargo.lock changes
 #   builder  compiles the dependencies from the recipe (cached layer), then the workspace
-#   runtime  gcr.io/distroless/cc-debian12:nonroot: glibc, libgcc, CA certificates and nothing
+#   runtime  gcr.io/distroless/cc-debian13:nonroot: glibc, libgcc, CA certificates and nothing
 #            else (no shell, no package manager), uid 65532
 #
-# The builder is Debian 12 (bookworm) on purpose: the binary links against the builder's glibc,
-# and the runtime is Debian 12 too, so the two always agree.
+# The builder is Debian 13 (trixie) on purpose: the binary links against the builder's glibc,
+# and the runtime is Debian 13 too, so the two always agree.
 #
 # Build: docker build -t people-index:local .   (or `make image`)
 #
@@ -22,7 +22,7 @@
 
 ARG CARGO_CHEF_VERSION=0.1.78
 
-FROM rust:1.99.1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS chef
+FROM rust:1.99.1-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS chef
 ARG CARGO_CHEF_VERSION
 RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src
@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --package people-index --bin people-index \
     && install -D -m 0755 target/release/people-index /out/people-index
 
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e AS runtime
 LABEL org.opencontainers.image.title="people-index" \
       org.opencontainers.image.description="Staged, multi-node person and organization join loaded into Elasticsearch" \
       org.opencontainers.image.source="https://github.com/cristiangirlea/people-index" \

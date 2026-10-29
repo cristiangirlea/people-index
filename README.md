@@ -122,6 +122,16 @@ done
 
 A full local run (`people-index run`) also needs an Elasticsearch at `PI_ES_URL`.
 
+## Using it in your product
+
+[docs/INTEGRATING.md](docs/INTEGRATING.md) is the guide for running people-index inside your
+own product: what you provide (feeds, an S3-compatible store with conditional writes,
+Elasticsearch 9), deploying from the production overlay or the image alone, the settings that
+matter, querying the alias with a read-only API key, upgrades and limits. Its
+[compatibility policy](docs/INTEGRATING.md#compatibility-policy) says what a release may change:
+the feed contract, the index mapping, the settings and the command line follow semantic
+versioning, and before 1.0 a minor release may break them, with release notes.
+
 ## Design in brief
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the contract: data, stages, storage layout,
@@ -230,8 +240,9 @@ What has not been done or measured yet, plainly:
   reconciliation, NetworkPolicy enforcement and a distributed run on k3d have not been
   exercised. The distributed run itself is tested only on Docker Compose (CI's end-to-end on
   `main`, a small generated data set on one runner).
-- **One coordinator per run** is assumed (the Kubernetes Job and compose guarantee it); there
-  is no coordinator lease.
+- **One coordinator per run** is assumed (the Kubernetes Job and compose guarantee it). The
+  coordinator's run lease on the alias (on a store with conditional writes) excludes other run
+  ids, not a second coordinator for the same id.
 - **Leases depend on clocks**: expiry is wall-clock time plus a skew allowance (5 s). Large
   clock drift between workers causes early takeovers; the commit protocol keeps the result
   correct, but work is repeated.
@@ -240,7 +251,7 @@ What has not been done or measured yet, plainly:
 - **The shuffle copies organization bodies**: `join` emits one joined row per
   (person, organization) reference, each with the organization's record, so the `joined`
   data set grows with popular organizations (see [ADR 0002](docs/adr/0002-partitioned-hash-join.md)).
-- **No dashboards** for the pipeline metrics yet; alert rules cover Elasticsearch.
+- **No dashboards** for the pipeline metrics yet; alert rules cover Elasticsearch and the pipeline.
 - **Losing the object store** loses the run's intermediate state; the run starts over.
 
 ## License

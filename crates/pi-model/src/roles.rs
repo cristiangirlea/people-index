@@ -1,4 +1,5 @@
-//! The one part of a person record the join reads: `roles[].organization_id`.
+//! The one part of a person record the join reads: `roles[].organization_id`, or whatever the
+//! feed schema calls the references and their organization id ([`FeedSchema`]).
 //!
 //! Extraction (which decides what is malformed) and the document builder (which writes the
 //! output) both go through [`PersonFields::parse`], so a record that passed extraction can
@@ -14,6 +15,7 @@ use serde_json::value::RawValue;
 use crate::error::{MalformedKind, MalformedRecord};
 use crate::id::OptionalId;
 use crate::raw::{RawObject, is_null};
+use crate::schema::FeedSchema;
 
 /// One role, read one level deep, with its organization id.
 #[derive(Debug)]
@@ -31,14 +33,14 @@ pub(crate) struct PersonFields<'a> {
 }
 
 impl<'a> PersonFields<'a> {
-    /// Reads a person record's raw text.
-    pub fn parse(record: &'a str) -> Result<Self, MalformedRecord> {
+    /// Reads a person record's raw text, its references named as `schema` says.
+    pub fn parse(record: &'a str, schema: &FeedSchema) -> Result<Self, MalformedRecord> {
         let object = RawObject::parse(record)
             .map_err(|e| MalformedRecord::from_json(MalformedKind::Record, &e))?;
-        let roles = match object.get("roles") {
+        let roles = match object.get(schema.references()) {
             None => None,
             Some(raw) if is_null(raw) => None,
-            Some(raw) => Some(parse_roles(raw)?),
+            Some(raw) => Some(parse_roles(raw, schema)?),
         };
         Ok(Self { object, roles })
     }
@@ -53,9 +55,16 @@ impl<'a> PersonFields<'a> {
     }
 }
 
-fn parse_roles(raw: &RawValue) -> Result<Vec<Role<'_>>, MalformedRecord> {
+fn parse_roles<'a>(
+    raw: &'a RawValue,
+    schema: &FeedSchema,
+) -> Result<Vec<Role<'a>>, MalformedRecord> {
+    let list = schema.references();
     let items: Vec<&RawValue> = serde_json::from_str(raw.get()).map_err(|_| {
-        MalformedRecord::new(MalformedKind::Record, "`roles` is not an array or null")
+        MalformedRecord::new(
+            MalformedKind::Record,
+            format!("`{list}` is not an array or null"),
+        )
     })?;
     items
         .into_iter()
@@ -64,17 +73,17 @@ fn parse_roles(raw: &RawValue) -> Result<Vec<Role<'_>>, MalformedRecord> {
             let object = RawObject::parse(item.get()).map_err(|_| {
                 MalformedRecord::new(
                     MalformedKind::Record,
-                    format!("roles[{index}] is not an object"),
+                    format!("{list}[{index}] is not an object"),
                 )
             })?;
-            let organization_id = match object.get("organization_id") {
+            let organization_id = match object.get(schema.reference_id()) {
                 None => None,
                 Some(value) => {
                     serde_json::from_str::<OptionalId>(value.get())
                         .map_err(|e| {
                             MalformedRecord::new(
                                 MalformedKind::Record,
-                                format!("roles[{index}].organization_id: {e}"),
+                                format!("{list}[{index}].{}: {e}", schema.reference_id()),
                             )
                         })?
                         .0
@@ -117,7 +126,28 @@ mod tests {
     use super::*;
 
     fn ids(record: &str) -> Result<Vec<Option<u64>>, MalformedRecord> {
-        PersonFields::parse(record).map(|p| p.role_organization_ids())
+        PersonFields::parse(record, FeedSchema::builtin()).map(|p| p.role_organization_ids())
+    }
+
+    #[test]
+    fn a_schema_renames_the_references_and_their_id() {
+        let schema = FeedSchema::from_json(
+            r#"{"person": {"references": "jobs", "reference_id": "org",
+                "fields": [{"name": "jobs", "kind": "object_array"}]}}"#,
+        )
+        .unwrap();
+        let parse =
+            |record| PersonFields::parse(record, &schema).map(|p| p.role_organization_ids());
+        assert_eq!(
+            parse(r#"{"roles":7,"jobs":[{"org":"3","organization_id":4},{}]}"#).unwrap(),
+            [Some(3), None]
+        );
+        let err = parse(r#"{"jobs":[{"org":-1}]}"#).unwrap_err();
+        assert!(err.reason().starts_with("jobs[0].org: "), "{err}");
+        let err = parse(r#"{"jobs":{}}"#).unwrap_err();
+        assert_eq!(err.reason(), "`jobs` is not an array or null");
+        let err = parse(r#"{"jobs":[1]}"#).unwrap_err();
+        assert_eq!(err.reason(), "jobs[0] is not an object");
     }
 
     #[test]

@@ -1,0 +1,139 @@
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'kube_job_labels{namespace="people-index",job_name="run",label_app_kubernetes_io_name="people-index",label_app_kubernetes_io_component="coordinator",instance="a"}'
+        values: '1+0x1620'
+      - series: 'kube_job_labels{namespace="people-index",job_name="run",label_app_kubernetes_io_name="people-index",label_app_kubernetes_io_component="coordinator",instance="b"}'
+        values: '1+0x1620'
+      - series: 'kube_job_status_failed{namespace="people-index",job_name="run"}'
+        values: '1+0x1620'
+      - series: 'kube_job_failed{namespace="people-index",job_name="run",condition="true"}'
+        values: '0+0x239 1+0x1380'
+      - series: 'kube_job_status_active{namespace="people-index",job_name="run"}'
+        values: '1+0x119 0+0x60 1+0x1440'
+      - series: 'kube_job_status_start_time{namespace="people-index",job_name="run"}'
+        values: '0+0x1620'
+      - series: 'elasticsearch_indices_settings_creation_timestamp_seconds{index="one"}'
+        values: '0+0x1620'
+      - series: 'elasticsearch_indices_aliases{index="one",alias="persons"}'
+        values: '1+0x1620'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: PeopleIndexJobFailed
+        exp_alerts: []
+      - eval_time: 2h30m
+        alertname: PeopleIndexJobFailed
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: PeopleIndexJobFailed
+        exp_alerts:
+          - exp_labels: {namespace: people-index, job_name: run, condition: 'true', label_app_kubernetes_io_component: coordinator, severity: critical}
+            exp_annotations: {summary: 'Pipeline Job people-index/run failed.'}
+      - eval_time: 2h
+        alertname: PeopleIndexJobStalled
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: PeopleIndexJobStalled
+        exp_alerts:
+          - exp_labels: {namespace: people-index, job_name: run, severity: warning}
+            exp_annotations: {summary: 'Pipeline Job people-index/run has been active for over 3 hours.'}
+      - eval_time: 25h
+        alertname: PeopleIndexAliasOld
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: PeopleIndexAliasOld
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: 'The index behind the persons alias was created over 26 hours ago.'}
+      - eval_time: 27h
+        alertname: PeopleIndexAliasMissing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PeopleIndexJobLabelsMissing
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'kube_job_labels{namespace="people-index",job_name="other"}'
+        values: '1+0x250'
+      - series: 'kube_job_labels{namespace="people-index",job_name="pi-run-20261028t020000z-abc123"}'
+        values: '1+0x250'
+      - series: 'kube_job_labels{namespace="kube-system",job_name="unrelated-cleanup"}'
+        values: '1+0x250'
+      - series: 'kube_job_status_start_time{namespace="people-index",job_name="other"}'
+        values: '0+0x250'
+      - series: 'kube_job_status_active{namespace="people-index",job_name="other"}'
+        values: '1+0x250'
+      - series: 'kube_job_failed{namespace="people-index",job_name="other",condition="true"}'
+        values: '1+0x250'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: PeopleIndexJobStalled
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: PeopleIndexJobFailed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PeopleIndexJobLabelsMissing
+        exp_alerts:
+          - exp_labels: {namespace: people-index, severity: warning}
+            exp_annotations: {summary: 'Job name labels are unavailable from kube-state-metrics in namespace people-index.'}
+  - interval: 1m
+    input_series:
+      - series: 'kube_job_labels{namespace="people-index",job_name="done",label_app_kubernetes_io_name="people-index",label_app_kubernetes_io_component="worker"}'
+        values: '1+0x250'
+      - series: 'kube_job_status_start_time{namespace="people-index",job_name="done"}'
+        values: '0+0x250'
+      - series: 'kube_job_status_active{namespace="people-index",job_name="done"}'
+        values: '0+0x250'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: PeopleIndexJobStalled
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'elasticsearch_indices_settings_creation_timestamp_seconds{index="old"}'
+        values: '0+0x1620'
+      - series: 'elasticsearch_indices_aliases{index="old",alias="persons"}'
+        values: '1+0x1620'
+      - series: 'elasticsearch_indices_settings_creation_timestamp_seconds{index="new"}'
+        values: '72000+0x1620'
+      - series: 'elasticsearch_indices_aliases{index="new",alias="persons"}'
+        values: '1+0x1620'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: PeopleIndexAliasOld
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'elasticsearch_indices_settings_creation_timestamp_seconds{index="old"}'
+        values: '0+0x1620'
+      - series: 'elasticsearch_indices_aliases{index="old",alias="other"}'
+        values: '1+0x1620'
+      - series: 'elasticsearch_indices_settings_creation_timestamp_seconds{index="new"}'
+        values: '72000+0x1620'
+      - series: 'elasticsearch_indices_aliases{index="new",alias="persons"}'
+        values: '1+0x1620'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: PeopleIndexAliasOld
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'elasticsearch_indices_aliases{index="one",alias="persons"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PeopleIndexAliasMissing
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: 'The persons alias has no index, or alias or creation timestamp metrics are unavailable.'}
+  - interval: 1m
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PeopleIndexAliasMissing
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: 'The persons alias has no index, or alias or creation timestamp metrics are unavailable.'}

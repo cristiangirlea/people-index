@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::counters;
+use crate::plan_file::SchemaPin;
 
 /// One stage of the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,10 +57,24 @@ impl StageSummary {
 }
 
 /// What `publish` did to the cluster.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublishSummary {
     /// The documents counted in the index.
     pub docs: u64,
+    #[serde(default)]
+    pub previous_docs: Option<u64>,
+    #[serde(default)]
+    pub resolved_roles: u64,
+    #[serde(default)]
+    pub unresolved_roles: u64,
+    #[serde(default)]
+    pub indexed_organizations: u64,
+    #[serde(default)]
+    pub min_share: f64,
+    #[serde(default)]
+    pub max_unresolved: f64,
+    #[serde(default)]
+    pub allow_empty_organizations: bool,
     /// The indexes the alias pointed at before.
     pub previous: Vec<String>,
     /// The ones deleted.
@@ -73,12 +88,19 @@ pub struct PublishSummary {
 pub struct Summary {
     /// The run.
     pub run_id: String,
+    /// The selected input delivery, absent in older summaries.
+    #[serde(default)]
+    pub delivery: Option<String>,
     /// The published alias.
     pub alias: String,
     /// The index it now points at.
     pub index: String,
     /// The partition count.
     pub partitions: u32,
+    /// The feed schema and mapping the run used, from its plan. Absent in older summaries,
+    /// whose runs used the built-in ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<SchemaPin>,
     /// When the plan was made.
     #[serde(with = "time::serde::rfc3339")]
     pub started_at: OffsetDateTime,
@@ -101,9 +123,20 @@ pub struct Summary {
     pub orphans_deleted: u64,
     /// Orphans that could not be removed (they are harmless; a later cleanup may retry).
     pub orphans_left: u64,
+    /// Retention cleanup failures; a later publish can retry.
+    #[serde(default)]
+    pub retention_failures: u64,
 }
 
 impl Summary {
+    /// Whether the run used the built-in feed schema and mapping.
+    #[must_use]
+    pub fn builtin_schema(&self) -> bool {
+        self.schema
+            .as_ref()
+            .is_none_or(|pin| *pin == SchemaPin::builtin())
+    }
+
     /// Documents per second over `wall_ms`, 0 for an instant run.
     #[must_use]
     pub fn rate(documents: u64, wall_ms: u64) -> f64 {
@@ -173,6 +206,29 @@ mod tests {
         assert_eq!(Summary::documents_of(&s), 7);
         let empty = StageSummary::from_commits(StageName::Assemble, &[]);
         assert_eq!((empty.wall_ms, empty.tasks), (0, 0));
+    }
+
+    #[test]
+    fn an_older_summary_without_a_pin_used_the_builtin_schema() {
+        let mut summary: Summary = serde_json::from_value(serde_json::json!({
+            "run_id": "r1", "alias": "persons", "index": "persons-r1", "partitions": 16,
+            "started_at": "2026-10-26T10:00:00Z", "finished_at": "2026-10-26T10:05:00Z",
+            "wall_ms": 1, "documents": 1, "persons_per_second": 1.0, "input_bytes": 1,
+            "stages": [], "publish": {"docs": 1, "previous": [], "deleted": [], "not_deleted": []},
+            "orphans_deleted": 0, "orphans_left": 0,
+        }))
+        .unwrap();
+        assert_eq!(summary.schema, None);
+        assert!(summary.builtin_schema());
+        summary.schema = Some(SchemaPin::builtin());
+        assert!(summary.builtin_schema());
+        let text = serde_json::to_string(&summary).unwrap();
+        assert!(text.contains("\"feed_schema_sha256\""), "{text}");
+        summary.schema = Some(SchemaPin {
+            mapping_sha256: "0".repeat(64),
+            ..SchemaPin::builtin()
+        });
+        assert!(!summary.builtin_schema());
     }
 
     #[test]

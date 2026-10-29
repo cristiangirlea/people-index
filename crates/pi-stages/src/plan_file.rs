@@ -1,16 +1,49 @@
 //! [`Plan`]: the content of `runs/<id>/plan.json`, fixed once per run.
 //!
 //! Everything every participant must agree on lives here: the input files and their order
-//! (which is feed order, and so decides last-wins), the partition count and the index name.
-//! It is written with create-if-absent, so a retried or duplicated `plan` task can never
-//! change it under stages that already read it.
+//! (which is feed order, and so decides last-wins), the partition count, the index name, and
+//! the digests of the feed schema and the index mapping ([`SchemaPin`]). It is written with
+//! create-if-absent, so a retried or duplicated `plan` task can never change it under stages
+//! that already read it.
 
 use anyhow::Context as _;
 use pi_coord::{RunContext, permanent};
-use pi_model::Partitioner;
+use pi_model::{FeedSchema, Partitioner};
 use pi_store::ObjectVersion;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::OffsetDateTime;
+
+use crate::config::StagesConfig;
+
+/// What a run reads and writes by name: the SHA-256 of the canonical JSON
+/// ([`pi_es::canonical_sha256`]) of the feed schema ([`FeedSchema::to_json`], every name
+/// spelled out) and of the index mapping. A resumed run, or a worker, with another schema or
+/// mapping would mix rows read by different names in one index, so every task refuses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaPin {
+    /// The feed schema's digest.
+    pub feed_schema_sha256: String,
+    /// The index mapping's digest.
+    pub mapping_sha256: String,
+}
+
+impl SchemaPin {
+    /// The digests of `schema` and `mapping`.
+    #[must_use]
+    pub fn of(schema: &FeedSchema, mapping: &Value) -> Self {
+        Self {
+            feed_schema_sha256: pi_es::canonical_sha256(&schema.to_json()),
+            mapping_sha256: pi_es::canonical_sha256(mapping),
+        }
+    }
+
+    /// The digests of the built-in schema and mapping: what a plan without a pin used.
+    #[must_use]
+    pub fn builtin() -> Self {
+        Self::of(FeedSchema::builtin(), &pi_es::mapping())
+    }
+}
 
 /// One input object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +64,9 @@ pub struct InputFile {
 pub struct Plan {
     /// The run.
     pub run_id: String,
+    /// The selected input delivery, absent in older plans.
+    #[serde(default)]
+    pub delivery: Option<String>,
     /// The partition count `P`, a power of two.
     pub partitions: u32,
     /// The alias `publish` moves.
@@ -43,6 +79,10 @@ pub struct Plan {
     pub persons: Vec<InputFile>,
     /// The sum of every input file's size.
     pub total_bytes: u64,
+    /// The feed schema and mapping the run uses. Absent in a plan written before they could
+    /// be configured, which used the built-in ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<SchemaPin>,
     /// When the plan was made.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -61,6 +101,56 @@ impl Plan {
             Feed::Organizations => &self.organizations,
             Feed::Persons => &self.persons,
         }
+    }
+
+    /// The schema and mapping the run uses (the built-in ones for a plan without a pin).
+    #[must_use]
+    pub fn schema_pin(&self) -> SchemaPin {
+        self.schema.clone().unwrap_or_else(SchemaPin::builtin)
+    }
+
+    /// Fails for good unless this process reads and writes with the feed schema and the
+    /// mapping the plan pins (`current`, from [`StagesConfig::schema_pin`]).
+    pub fn check_schema(&self, current: &SchemaPin) -> anyhow::Result<()> {
+        let planned = self.schema_pin();
+        let mut differ = Vec::new();
+        for (what, setting, planned, current) in [
+            (
+                "feed schema",
+                "PI_SCHEMA_FILE",
+                &planned.feed_schema_sha256,
+                &current.feed_schema_sha256,
+            ),
+            (
+                "index mapping",
+                "PI_MAPPING_FILE",
+                &planned.mapping_sha256,
+                &current.mapping_sha256,
+            ),
+        ] {
+            if planned != current {
+                differ.push(format!(
+                    "the {what} ({setting}) has sha256 {current}, the plan {planned}"
+                ));
+            }
+        }
+        if differ.is_empty() {
+            return Ok(());
+        }
+        Err(permanent(anyhow::anyhow!(
+            "run {} was planned with another feed schema or index mapping: {}; run it with the \
+             PI_SCHEMA_FILE and PI_MAPPING_FILE it started with (unset for the built-in ones)",
+            self.run_id,
+            differ.join("; ")
+        )))
+    }
+
+    /// Reads the run's plan and checks that `config` has the schema and mapping it pins
+    /// ([`Plan::check_schema`]). Every task starts here.
+    pub async fn load_for(ctx: &RunContext, config: &StagesConfig) -> anyhow::Result<Self> {
+        let plan = Self::load(ctx).await?;
+        plan.check_schema(&config.schema_pin())?;
+        Ok(plan)
     }
 
     /// Reads the run's plan. Missing means `plan` has not committed: a bug in the stage
@@ -138,6 +228,7 @@ mod tests {
     fn plan_json_round_trips() {
         let plan = Plan {
             run_id: "r1".into(),
+            delivery: None,
             partitions: 4,
             alias: "persons".into(),
             index: "persons-r1".into(),
@@ -151,12 +242,60 @@ mod tests {
             }],
             persons: vec![],
             total_bytes: 10,
+            schema: Some(SchemaPin::builtin()),
             created_at: OffsetDateTime::UNIX_EPOCH,
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert_eq!(serde_json::from_str::<Plan>(&json).unwrap(), plan);
         assert_eq!(plan.files(Feed::Organizations).len(), 1);
         assert!(plan.partitioner().is_ok());
+    }
+
+    #[test]
+    fn a_plan_refuses_another_schema_or_mapping_and_an_old_plan_means_the_builtin_ones() {
+        let old = r#"{"run_id":"r1","partitions":4,"alias":"persons","index":"persons-r1",
+            "organizations":[],"persons":[],"total_bytes":0,"created_at":"2026-10-01T00:00:00Z"}"#;
+        let old: Plan = serde_json::from_str(old).unwrap();
+        assert_eq!(old.schema, None);
+        assert_eq!(old.schema_pin(), SchemaPin::builtin());
+        old.check_schema(&StagesConfig::default().schema_pin())
+            .unwrap();
+
+        let schema = FeedSchema::from_json(r#"{"envelope": {"id": "key"}}"#).unwrap();
+        let custom = SchemaPin::of(&schema, &pi_es::mapping());
+        assert_eq!(custom.mapping_sha256, SchemaPin::builtin().mapping_sha256);
+        let err = old.check_schema(&custom).unwrap_err();
+        assert!(pi_coord::is_permanent(&err));
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("run r1 was planned with another feed schema"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the feed schema (PI_SCHEMA_FILE) has sha256"),
+            "{text}"
+        );
+        assert!(!text.contains("PI_MAPPING_FILE) has"), "{text}");
+
+        let pinned = Plan {
+            schema: Some(custom.clone()),
+            ..old.clone()
+        };
+        pinned.check_schema(&custom).unwrap();
+        let mapping = serde_json::json!({"dynamic": false, "properties": {}});
+        let err = pinned
+            .check_schema(&SchemaPin::of(&schema, &mapping))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("the index mapping (PI_MAPPING_FILE) has"));
+        assert!(pinned.check_schema(&SchemaPin::builtin()).is_err());
+        // Key order and whitespace do not change a digest.
+        let respelled: Value =
+            serde_json::from_str(&serde_json::to_string_pretty(&pi_es::mapping()).unwrap())
+                .unwrap();
+        assert_eq!(
+            SchemaPin::of(FeedSchema::builtin(), &respelled),
+            SchemaPin::builtin()
+        );
     }
 
     #[test]

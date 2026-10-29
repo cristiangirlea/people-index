@@ -63,6 +63,12 @@ pub fn validate_id(kind: &'static str, value: &str) -> Result<(), LayoutError> {
     Ok(())
 }
 
+/// Store-wide coordinator lease for an Elasticsearch alias.
+pub fn alias_lease(alias: &str) -> Result<String, LayoutError> {
+    validate_id("alias", alias)?;
+    Ok(format!("_run-leases/{alias}.json"))
+}
+
 /// The kinds of segment data the stages exchange, each partitioned by one key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dataset {
@@ -138,7 +144,8 @@ impl RunLayout {
     }
 
     /// Moves the inputs to another root: `""` when they live at the top of their own store
-    /// (`PI_INPUT_URL`), so `organizations/` and `persons/` are read from there.
+    /// (`PI_INPUT_URL`), or the delivery root (`raw/<delivery>` or `<delivery>` in a
+    /// separate input store), so `organizations/` and `persons/` are read from there.
     #[must_use]
     pub fn with_input_root(mut self, root: &str) -> Self {
         root.trim_matches('/').clone_into(&mut self.input_root);
@@ -177,6 +184,12 @@ impl RunLayout {
     #[must_use]
     pub fn raw_persons(&self) -> String {
         self.input_dir("persons")
+    }
+
+    /// A key under the selected input root.
+    #[must_use]
+    pub fn input_key(&self, name: &str) -> String {
+        self.input_dir(name)
     }
 
     fn input_dir(&self, feed: &str) -> String {
@@ -345,6 +358,9 @@ mod tests {
 
     #[test]
     fn every_path_matches_the_contract() {
+        assert_eq!(alias_lease("persons").unwrap(), "_run-leases/persons.json");
+        assert!(alias_lease("../x").is_err());
+        assert!(alias_lease("").is_err());
         let l = layout();
         let r = "runs/20261015T120000Z-ab12";
         assert_eq!(l.raw_organizations(), "raw/organizations");

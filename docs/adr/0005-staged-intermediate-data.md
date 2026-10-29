@@ -43,8 +43,8 @@ Re-encoding as JSON lines was not chosen: larger, and every reader would parse a
   extract, `P` for the rest); workers can join or leave between and during stages. The
   CPU-heavy stages run while Elasticsearch is idle; only `load` puts pressure on it.
 - **Extra I/O and storage.** The data is written several times (persons, edges, joined, docs)
-  and read back; a published run's segments stay under `runs/<id>/` until deleted (by an
-  object-store lifecycle rule or by hand), since publish removes only orphans.
+  and read back; publish removes a run's segments once `PI_RETAIN_RUNS` newer published
+  runs exist (#63).
 - **Barriers cost latency.** A slow task holds back the next stage; the remedy is more, smaller
   partitions.
 - **The format is versioned by its magic.** Readers reject other magics, truncation, bad

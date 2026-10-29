@@ -243,6 +243,11 @@ pub struct Faults {
     /// While set, every update-if-match is refused and the object left alone: a store whose
     /// conditional check never accepts the version it handed out.
     pub refused_updates: Arc<AtomicBool>,
+    /// Simulate a winning update whose response to the loser is a precondition failure.
+    pub race_updates: Arc<AtomicUsize>,
+    /// A landed conditional write whose retry reports a precondition failure.
+    pub lost_create_responses: Arc<AtomicUsize>,
+    pub lost_update_responses: Arc<AtomicUsize>,
     /// Puts seen so far, faulted or not.
     pub puts: Arc<AtomicUsize>,
 }
@@ -322,6 +327,40 @@ impl ObjectStore for FlakyStore {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),
                 source: "injected refusal".into(),
+            });
+        }
+        if matches!(opts.mode, PutMode::Update(_)) && take_one(&self.faults.race_updates) {
+            let bytes: Vec<u8> = payload
+                .clone()
+                .into_iter()
+                .flat_map(|chunk| chunk.to_vec())
+                .collect();
+            let mut lease: pi_coord::Lease = serde_json::from_slice(&bytes).unwrap();
+            "another-holder".clone_into(&mut lease.holder);
+            self.inner
+                .put_opts(location, serde_json::to_vec(&lease).unwrap().into(), opts)
+                .await?;
+            return Err(object_store::Error::Precondition {
+                path: location.to_string(),
+                source: "injected race".into(),
+            });
+        }
+        if (matches!(opts.mode, PutMode::Create) && take_one(&self.faults.lost_create_responses))
+            || (matches!(opts.mode, PutMode::Update(_))
+                && take_one(&self.faults.lost_update_responses))
+        {
+            let create = matches!(opts.mode, PutMode::Create);
+            self.inner.put_opts(location, payload, opts).await?;
+            return Err(if create {
+                object_store::Error::AlreadyExists {
+                    path: location.to_string(),
+                    source: "injected lost response".into(),
+                }
+            } else {
+                object_store::Error::Precondition {
+                    path: location.to_string(),
+                    source: "injected lost response".into(),
+                }
             });
         }
         let lose_response = take_one(&self.faults.lost_responses);

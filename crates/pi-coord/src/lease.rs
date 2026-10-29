@@ -339,6 +339,23 @@ impl LeaseManager {
 
     /// Claims the alias lease, allowing a replacement coordinator for the same run.
     pub async fn claim_run(&self, alias: &str, run_id: &str) -> StoreResult<Option<LeaseGuard>> {
+        match self.claim_run_inner(alias, run_id, false).await? {
+            RunLease::Held(guard) => Ok(Some(guard)),
+            RunLease::Busy | RunLease::Shared => Ok(None),
+        }
+    }
+
+    /// Claims a free or expired alias lease, or shares a live lease for the same run.
+    pub async fn claim_stage_run(&self, alias: &str, run_id: &str) -> StoreResult<RunLease> {
+        self.claim_run_inner(alias, run_id, true).await
+    }
+
+    async fn claim_run_inner(
+        &self,
+        alias: &str,
+        run_id: &str,
+        share: bool,
+    ) -> StoreResult<RunLease> {
         let key = pi_store::alias_lease(alias)?;
         let holder = Uuid::now_v7().simple().to_string();
         for _ in 0..2 {
@@ -354,7 +371,7 @@ impl LeaseManager {
             if let CreateOutcome::Created(version) =
                 self.store.put_json_create_if_absent(&key, &fresh).await?
             {
-                return Ok(Some(self.guard(key, fresh, version, false)));
+                return Ok(RunLease::Held(self.guard(key, fresh, version, false)));
             }
             let Some(existing) = self.store.get_opt(&key).await? else {
                 continue;
@@ -364,20 +381,33 @@ impl LeaseManager {
                     key: key.clone(),
                     source: e,
                 })?;
-            if old.worker != run_id && !old.is_expired(now, self.config.clock_skew) {
-                return Ok(None);
+            if old.holder == holder {
+                return Ok(RunLease::Held(self.guard(
+                    key,
+                    old,
+                    existing.version,
+                    false,
+                )));
+            }
+            if !old.is_expired(now, self.config.clock_skew) {
+                if old.worker != run_id {
+                    return Ok(RunLease::Busy);
+                }
+                if share {
+                    return Ok(RunLease::Shared);
+                }
             }
             return match self
                 .store
                 .put_json_update_if_match(&key, &fresh, &existing.version)
                 .await
             {
-                Ok(version) => Ok(Some(self.guard(key, fresh, version, true))),
-                Err(StoreError::PreconditionFailed { .. }) => Ok(None),
+                Ok(version) => Ok(RunLease::Held(self.guard(key, fresh, version, true))),
+                Err(StoreError::PreconditionFailed { .. }) => continue,
                 Err(e) => Err(e),
             };
         }
-        Ok(None)
+        Ok(RunLease::Busy)
     }
 
     fn guard(
@@ -407,6 +437,17 @@ impl LeaseManager {
             took_over,
         }
     }
+}
+
+/// Result of a stage alias lease claim.
+#[derive(Debug)]
+pub enum RunLease {
+    /// This process owns and renews the lease.
+    Held(LeaseGuard),
+    /// A live holder for the same run retains ownership.
+    Shared,
+    /// Another run holds the lease, or a concurrent claim won.
+    Busy,
 }
 
 /// A held lease. It renews itself in the background until [`LeaseGuard::release`] (or drop,
@@ -663,6 +704,27 @@ mod run_lease_tests {
             manager.claim_run("bad", "one").await,
             Err(StoreError::Json { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_stage_claims_have_one_holder() {
+        let store = Store::memory();
+        let manager = LeaseManager::new(
+            store,
+            RunLayout::new("one").unwrap(),
+            "one",
+            LeaseConfig::new(Duration::from_secs(60)),
+        );
+        let (a, b) = tokio::join!(
+            manager.claim_stage_run("persons", "one"),
+            manager.claim_stage_run("persons", "two")
+        );
+        match (a.unwrap(), b.unwrap()) {
+            (RunLease::Held(guard), RunLease::Busy) | (RunLease::Busy, RunLease::Held(guard)) => {
+                guard.release().await.unwrap();
+            }
+            other => panic!("unexpected claims: {other:?}"),
+        }
     }
 
     #[tokio::test]

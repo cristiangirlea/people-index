@@ -359,6 +359,9 @@ pub struct StageArgs {
     /// The task id (e.g. part-00003, file-00000, run); every task of the stage when omitted.
     #[arg(long)]
     pub task: Option<String>,
+    /// Dangerous: bypass the alias run lock for recovery.
+    #[arg(long)]
+    pub ignore_run_lock: bool,
     #[command(flatten)]
     pub store: StoreArgs,
     #[command(flatten)]

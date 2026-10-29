@@ -118,6 +118,7 @@ grep -q 'IMAGE' "$tmp/out" || fail "render error not printed"
 # shellcheck source=/dev/null
 source "$src/scripts/check-job-images.sh"
 for label in deploy/k8s/overlays/local 'jobs/run overlays/local' 'schedule overlays/local'; do
+  # shellcheck disable=SC2034 # check_ref and report_unpinned read the array.
   (unpinned=(); check_ref "$label" people-index:local; report_unpinned) || fail "local label rejected: $label"
 done
 echo "test-check-pins-resolve: ok"

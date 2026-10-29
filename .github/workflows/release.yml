@@ -99,7 +99,10 @@ jobs:
             echo "Version $IMAGE:$VERSION already exists" >&2
             exit 1
           fi
-          if [[ "$output" != *"not found"* ]]; then
+          # A version never published answers "not found", or "denied" (403) before the
+          # package exists; either way nothing is there to overwrite, and a token that
+          # cannot read the package cannot push to it either.
+          if [[ "$output" != *"not found"* && "$output" != *"denied"* && "$output" != *"403"* ]]; then
             echo "$output" >&2
             exit 1
           fi

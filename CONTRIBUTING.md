@@ -8,7 +8,7 @@ CI uses Rust 1.99.1; the minimum supported Rust version in `Cargo.toml` is 1.90.
 make check
 ```
 
-Besides Rust, `make check` needs Docker, `kubectl` (or `kustomize`) for `scripts/check-deploy.sh`, and network access. The deployment check downloads kubeconform v0.8.0 if it is not installed, plus the Kubernetes, k3d and CRD schemas and the ECK files. `cargo-deny` is optional; `make check` runs it when installed. See [AGENTS.md](AGENTS.md#commands-ci-runs) for the full list.
+Besides Rust, `make check` needs Docker, `kubectl` (or `kustomize`) for `scripts/check-deploy.sh`, Python 3.11 or newer with PyYAML (`python3-yaml`), and network access. The deployment check downloads kubeconform v0.8.0 if it is not installed, plus the Kubernetes, k3d and CRD schemas and the ECK files. `cargo-deny` is optional; `make check` runs it when installed. See [AGENTS.md](AGENTS.md#commands-ci-runs) for the full list.
 
 Enable the repository hooks with:
 

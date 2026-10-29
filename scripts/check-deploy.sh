@@ -4,7 +4,7 @@
 #     deploy/k3d, the workflows' `docker run` lines, the ECK operator manifest (as pinned
 #     by deploy/k8s/eck/pin-operator.sh from deploy/k8s/eck/operator-image), deploy/k8s
 #     (rendered) and the Job templates is pinned as name:tag@sha256:<digest>
-#     (people-index:local and the Job templates' ${IMAGE} excepted), and the Dockerfile's rust
+#     (people-index:local excepted only in local deployments), and the Dockerfile's rust
 #     tag is CI's RUST_TOOLCHAIN;
 #   - an image in both compose and deploy/k8s/base is the same reference in both, and the
 #     Elasticsearch resource's image tag is its spec.version;
@@ -129,28 +129,8 @@ find_kubeconform() {
   echo "$bin"
 }
 
-# Image pinning. A reference passes as name:tag@sha256:<64 hex>: the tag for people, the digest
-# for the bytes. The tag part cannot hold a `/`, so registry:port/name without a tag fails.
-pinned_ref='^[^[:space:]@]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$'
-unpinned=()
-check_ref() {
-  case "$2" in
-    # Built from this repository, never pulled; the Job templates' placeholder (jobs.vars).
-    people-index:local | "\${IMAGE}") return ;;
-  esac
-  [[ "$2" =~ $pinned_ref ]] || { unpinned+=("$1: $2"); return; }
-  # scripts/check-pins-resolve.sh collects every pinned reference this way.
-  [[ -z "${PINNED_REFS_OUT:-}" ]] || printf '%s\n' "$2" >>"$PINNED_REFS_OUT"
-}
-# The value of every `image:` key in YAML read from stdin, quotes dropped.
-yaml_images() {
-  sed -nE "s/^[[:space:]-]*image:[[:space:]]*[\"']?([^\"'[:space:]#]+).*/\1/p"
-}
-report_unpinned() {
-  ((${#unpinned[@]} == 0)) && return
-  printf 'check-deploy: not pinned as name:tag@sha256:<digest>: %s\n' "${unpinned[@]}" >&2
-  exit 1
-}
+# Shared pinning rules, also used by the rendered Job checks.
+source "$root/scripts/check-job-images.sh"
 
 kubeconform="$(find_kubeconform)"
 validate() {
@@ -361,32 +341,41 @@ resources:
 components:
   - ../components/schedule
 EOF
+  # Production schedules need the image patch described in OPERATIONS.md. Use the
+  # overlay Job image for this example patch, as operators do when enabling it.
+  if [[ "$dir" != overlays/local ]]; then
+    overlay="${dir##*/}"
+    schedule_image="$(bash "$root/scripts/check-job-images.sh" "$work/k8s" "$overlay" schedule)"
+    cat >>"$work/k8s/schedule-wrapper/kustomization.yaml" <<EOF
+patches:
+  - target:
+      kind: CronJob
+      name: pi-schedule
+    patch: |-
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/containers/0/image
+        value: $schedule_image
+EOF
+  fi
   step "kustomize $dir with schedule"
   kustomize_build "$work/k8s/schedule-wrapper" >"$work/scheduled.yaml" || fail "schedule does not render for $dir"
   validate <"$work/scheduled.yaml" || fail "schedule does not validate for $dir"
   while read -r ref; do check_ref "schedule $dir" "$ref"; done < <(yaml_images <"$work/scheduled.yaml")
   report_unpinned
   if [[ "$dir" == overlays/local ]]; then
-    RUN_ID=check JOB_ID=check bash "$work/k8s/jobs/render.sh" run --overlay local >"$work/run.yaml"
+    env -u IMAGE RUN_ID=check JOB_ID=check bash "$work/k8s/jobs/render.sh" run --overlay local >"$work/run.yaml"
     "$python" "$root/scripts/check-schedule-pod.py" "$work/run.yaml" "$work/scheduled.yaml" || fail "schedule pod differs from the coordinator"
   fi
 done
 
-# 4. The Job templates name only pinned images (their ${IMAGE} comes from jobs.vars), and render
-#    for every overlay and validate.
+# 4. Render each Job with its overlay defaults, then check the actual images.
 job_kinds=(run datagen verify)
-for kind in "${job_kinds[@]}"; do
-  while read -r ref; do
-    check_ref "deploy/k8s/jobs/$kind.yaml" "$ref"
-  done < <(yaml_images <"$work/k8s/jobs/$kind.yaml")
-done
-report_unpinned
 for vars in "$work"/k8s/overlays/*/jobs.vars; do
   overlay="$(basename "$(dirname "$vars")")"
   for kind in "${job_kinds[@]}"; do
     step "jobs/$kind for $overlay"
-    RUN_ID=check JOB_ID=check bash "$work/k8s/jobs/render.sh" "$kind" --overlay "$overlay" 2>/dev/null |
-      validate || fail "jobs/$kind does not render or validate for $overlay"
+    bash "$root/scripts/check-job-images.sh" "$work/k8s" "$overlay" "$kind" >"$work/job.yaml"
+    validate <"$work/job.yaml" || fail "jobs/$kind does not validate for $overlay"
   done
 done
 
@@ -405,6 +394,7 @@ step "deploy/k3d/cluster.yaml"
 # 6. Shell scripts parse; shellcheck when available.
 scripts=(
   "$root/scripts/check-deploy.sh"
+  "$root/scripts/check-job-images.sh"
   "$root/deploy/k8s/gen-secrets.sh"
   "$root/deploy/k8s/eck/fetch.sh"
   "$root/deploy/k8s/eck/pin-operator.sh"

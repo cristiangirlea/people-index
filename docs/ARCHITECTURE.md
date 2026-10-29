@@ -574,7 +574,9 @@ sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
   comparing two indexes, not a defence against crafted collisions.
 - `people-index stage <name> --run-id R [--task T]`: one task (or every task) of one stage,
   through the local executor, for debugging. It rewrites `stages/<stage>.json` with the tasks it
-  ran, so never point it at a run that workers are following.
+  ran, so never point it at a run that workers are following. It follows the stage lease protocol
+  described under "Scheduled runs and coordinator lease". `--ignore-run-lock` permits dangerous
+  recovery overrides. Local stores warn and proceed without a lock.
 
 `run`, `worker` and `stage` exit 143 on SIGTERM or Ctrl-C (a second signal exits at once). A
 command line that does not parse (an unknown flag, a malformed value) exits 2; a setting refused
@@ -624,3 +626,14 @@ a late Job within startingDeadlineSeconds can lose to a manual run started in th
 on exit. A different run is refused while the lease is live; the same run may resume and an
 expired lease can be taken over. Loss of the lease stops the coordinator. The lock requires a store supporting conditional updates; local runs have no lock. Publish orders stamped ids; hand-picked unstamped ids are not
 ordered.
+
+A hand-run `stage` claims and renews the alias lease through execution when free or expired.
+It shares a live same-run lease, but refuses to rewrite the current stage spec when the run is
+Running and the spec is missing or assigns tasks to workers. This is checked on every sharing
+poll; a coordinator reaching the stage between polls can still race it for up to one interval.
+A sharing stage retries lease, state and stage spec read failures on polls and stops if they persist for about a TTL. A shared stage polls at the
+renewal interval and adopts a released or expired lease. A same-run coordinator taking the lease
+is a handover: the stage returns to sharing. It stops if a different run holds the lease.
+A live different run is refused. `--ignore-run-lock` overrides the refusal and worker-spec
+check, but still claims a free lease and monitors a shared lease; overriding a busy lease allows
+concurrent writes and publication. Stores without conditional updates proceed without a lock.

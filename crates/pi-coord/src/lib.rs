@@ -41,7 +41,7 @@ pub use error::{
 };
 pub use executor::{Executor, StageReport};
 pub use failure::RunFailure;
-pub use lease::{Lease, LeaseCache, LeaseConfig, LeaseGuard, LeaseManager};
+pub use lease::{Lease, LeaseCache, LeaseConfig, LeaseGuard, LeaseManager, RunLease};
 pub use local::LocalExecutor;
 pub use registry::StageRegistry;
 pub use retry::RetryPolicy;

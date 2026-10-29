@@ -622,9 +622,9 @@ The keystore lives in each container, so a recreated container needs the keys ag
    (`kubectl --context <context> -n people-index patch cronjob pi-schedule -p '{"spec":{"suspend":true}}'`)
    and keep it suspended until the cause of the rollback is fixed: the next run reads the same
    feed (`raw/` or the configured `PI_DELIVERY`) and would publish it again.
-2. Let a running run finish, or stop it. A run that publishes during the restore moves the
-   alias, and its cleanup deletes any `persons-*` index that no alias points at and whose run
-   is older: the restored index, until step 4 below puts the alias on it. To stop a run on
+2. Stop any hand-run `stage` commands. Let a running run finish, or stop it. A run that publishes
+   during the restore moves the alias, and its cleanup deletes any `persons-*` index that no
+   alias points at and whose run is older: the restored index, until step 4 below puts the alias on it. To stop a run on
    Kubernetes, delete its Jobs (`kubectl --context <context> -n people-index delete job
    pi-run-<run_id> pi-worker-<run_id>`, or the scheduled run's `pi-schedule-<n>`): a killed
    coordinator pod is restarted by its Job and resumes. On compose,
@@ -832,7 +832,19 @@ coordinator is refused before it creates run state, stop its separately started 
 may resume, taking over its lease; do not deliberately start two coordinators for that id.
 A crashed coordinator's lease expires after `PI_LEASE_TTL` plus clock skew. If it is still
 live, stop the holder and wait for expiry; only remove `_run-leases/<alias>.json` from the
-store after ensuring no coordinator is running. The run lock needs conditional updates (S3 or memory); local filesystem runs proceed without it. Hand-picked run ids without
+store after ensuring no coordinator or stage command is running. Stage commands claim a free
+lease or share a live same-run lease, adopting it if released or expired. A same-run coordinator
+taking it is a handover, and the stage returns to sharing; a different run taking it stops the
+stage. A stage sharing a run is refused when the coordinator is on that stage and its spec is
+missing or assigns tasks to workers, because rewriting the spec could stall those workers. This
+check runs on every sharing poll; a coordinator reaching the stage between polls can still race it
+for up to one interval. While sharing, lease, state and stage spec read failures on polls are retried;
+the stage stops if failures persist for about a lease TTL. A hand-run
+stage holding the lease makes a scheduled coordinator fail with "a run is already in progress".
+For recovery, `stage --ignore-run-lock` overrides the refusal, but still claims a free lease
+and watches a shared one. This is dangerous because another run can write or publish concurrently.
+Verify that no conflicting run is active before using it. The run lock needs conditional updates
+(S3 or memory); local filesystem runs warn and proceed without it. Hand-picked run ids without
 the UTC stamp are not ordered by publish.
 
 Start a scheduled-style run by hand using a current UTC minute in its Job name:

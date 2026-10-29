@@ -231,6 +231,18 @@ async fn mount_cluster(server: &MockServer, index: &str, documents: u64, bulk: B
         .expect(1)
         .mount(server)
         .await;
+    let mut mapping = mapping_file();
+    mapping["_meta"] = json!({"people_index": {"run_id": "renamed"}});
+    Mock::given(method("GET"))
+        .and(path(format!("/{index}/_mapping")))
+        .respond_with(ok(json!({index: {"mappings": mapping}})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/{index}/_settings")))
+        .respond_with(ok(json!({index: {"settings": {"index": {}}}})))
+        .mount(server)
+        .await;
     Mock::given(method("HEAD"))
         .and(path(format!("/{index}")))
         .respond_with(ResponseTemplate::new(200))

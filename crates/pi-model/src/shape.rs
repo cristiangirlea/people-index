@@ -127,6 +127,8 @@ pub struct FieldShape {
     pub kind: JsonKind,
     /// Smallest applicable keyword limit, resolved from the mapping.
     pub keyword_limit: Option<usize>,
+    /// Date formats for which extraction can identify certain ignored values.
+    pub date_format: Option<crate::es_date::DateFormat>,
 }
 
 impl FieldShape {
@@ -137,6 +139,7 @@ impl FieldShape {
             name: name.into(),
             kind,
             keyword_limit: None,
+            date_format: None,
         }
     }
 }
@@ -146,6 +149,7 @@ const fn field(name: &'static str, kind: JsonKind) -> FieldShape {
         name: Cow::Borrowed(name),
         kind,
         keyword_limit: None,
+        date_format: None,
     }
 }
 
@@ -241,8 +245,14 @@ pub(crate) fn check_fields(
             let mut ignored = |at: &[usize], found| {
                 stats.ignore(|| format!("{prefix}{}{}", shape.name, indices(at)), found);
             };
-            check_value(value, shape.kind, shape.keyword_limit, &mut ignored)
-                .map_err(|(at, found)| mismatch(&prefix, shape, &at, found))?;
+            check_value(
+                value,
+                shape.kind,
+                shape.keyword_limit,
+                shape.date_format,
+                &mut ignored,
+            )
+            .map_err(|(at, found)| mismatch(&prefix, shape, &at, found))?;
         }
     }
     Ok(())
@@ -258,6 +268,7 @@ fn check_value(
     value: &RawValue,
     kind: JsonKind,
     limit: Option<usize>,
+    date_format: Option<crate::es_date::DateFormat>,
     ignored: &mut OnIgnored<'_>,
 ) -> Result<(), Mismatch> {
     if is_null(value) {
@@ -278,7 +289,9 @@ fn check_value(
     };
     match kind {
         JsonKind::Number | JsonKind::Boolean if parses(text, kind) => {
-            if over_limit(text) {
+            if date_format.is_some_and(|format| crate::es_date::certainly_ignored(text, format)) {
+                ignored(&[], "an invalid date");
+            } else if over_limit(text) {
                 ignored(&[], "a value above ignore_above");
             }
             Ok(())
@@ -288,6 +301,10 @@ fn check_value(
             walk_scalars(text, &mut Vec::new(), &mut |scalar, at| {
                 if let Some(found) = skipped(scalar, kind) {
                     ignored(at, found);
+                } else if date_format
+                    .is_some_and(|format| crate::es_date::certainly_ignored(scalar, format))
+                {
+                    ignored(at, "an invalid date");
                 } else if over_limit(scalar) {
                     ignored(at, "a value above ignore_above");
                 }
@@ -295,7 +312,11 @@ fn check_value(
         }
         JsonKind::String | JsonKind::StringArray => {
             walk_scalars(text, &mut Vec::new(), &mut |scalar, at| {
-                if over_limit(scalar) {
+                if date_format
+                    .is_some_and(|format| crate::es_date::certainly_ignored(scalar, format))
+                {
+                    ignored(at, "an invalid date");
+                } else if over_limit(scalar) {
                     ignored(at, "a value above ignore_above");
                 }
             })
@@ -452,16 +473,19 @@ mod tests {
                 name: "country".into(),
                 kind: JsonKind::String,
                 keyword_limit: Some(8191),
+                date_format: None,
             },
             FieldShape {
                 name: "skills".into(),
                 kind: JsonKind::StringArray,
                 keyword_limit: Some(512),
+                date_format: None,
             },
             FieldShape {
                 name: "first_name".into(),
                 kind: JsonKind::String,
                 keyword_limit: Some(512),
+                date_format: None,
             },
         ];
         for (count, expected) in [(4095, 0), (4096, 1)] {
@@ -479,16 +503,19 @@ mod tests {
                 name: "skills".into(),
                 kind: JsonKind::StringArray,
                 keyword_limit: Some(512),
+                date_format: None,
             },
             FieldShape {
                 name: "id".into(),
                 kind: JsonKind::Number,
                 keyword_limit: Some(3),
+                date_format: None,
             },
             FieldShape {
                 name: "followers".into(),
                 kind: JsonKind::LenientLong,
                 keyword_limit: Some(3),
+                date_format: None,
             },
         ];
         for (n, expected) in [(512, 0), (513, 1)] {

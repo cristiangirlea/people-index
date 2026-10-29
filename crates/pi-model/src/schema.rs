@@ -105,9 +105,9 @@ impl FeedSchema {
         file.resolve()
     }
 
-    /// Resolve keyword limits once for extraction, leaving the schema's serialized form unchanged.
+    /// Resolve keyword limits and known date formats once for extraction, leaving the schema's serialized form unchanged.
     #[must_use]
-    pub fn with_keyword_limits(&self, mapping: &Value) -> Self {
+    pub fn with_index_limits(&self, mapping: &Value) -> Self {
         fn field_at<'a>(mapping: &'a Value, path: &str) -> &'a Value {
             path.split('.')
                 .fold(mapping, |node, part| &node["properties"][part])
@@ -128,6 +128,22 @@ impl FeedSchema {
                 .chain(own)
                 .min()
         }
+        fn date(node: &Value) -> Option<crate::DateFormat> {
+            let own = node["type"] == "date"
+                && node["format"] == "strict_date_optional_time||strict_year_month||strict_year";
+            if own
+                || node["fields"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|m| m.values())
+                    .any(|field| date(field).is_some())
+            {
+                Some(crate::DateFormat::Partial)
+            } else {
+                None
+            }
+        }
+
         fn apply(fields: &mut Cow<'static, [FieldShape]>, mapping: &Value, prefix: &str) {
             for shape in fields.to_mut() {
                 let path = format!("{prefix}{}", shape.name);
@@ -137,6 +153,7 @@ impl FeedSchema {
                     Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
                     _ => Vec::new(),
                 };
+                shape.date_format = date(node);
                 shape.keyword_limit = targets
                     .into_iter()
                     .filter_map(|p| limit(field_at(mapping, p)))
@@ -156,7 +173,7 @@ impl FeedSchema {
     }
 
     /// The schema as a complete schema file (every key present), the canonical form the plan
-    /// pins by its digest. Resolved keyword limits are omitted and must be resolved again from the mapping.
+    /// pins by its digest. Resolved index limits are omitted and must be resolved again from the mapping.
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({

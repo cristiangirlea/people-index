@@ -311,7 +311,7 @@ mod tests {
         let mut mapping = (*cfg.mapping).clone();
         mapping["properties"]["full_name"] =
             serde_json::json!({"type":"keyword", "ignore_above": 200});
-        let schema = cfg.schema.with_keyword_limits(&mapping);
+        let schema = cfg.schema.with_index_limits(&mapping);
         let limit = |name: &str| {
             schema
                 .person_fields()
@@ -350,14 +350,14 @@ mod tests {
         mapping["properties"]["first_name"]["copy_to"] =
             serde_json::json!(["full_name", "country"]);
         mapping["properties"]["country"]["ignore_above"] = serde_json::json!(100);
-        let array_schema = cfg.schema.with_keyword_limits(&mapping);
+        let array_schema = cfg.schema.with_index_limits(&mapping);
         assert_eq!(
             field_limit(array_schema.person_fields(), "first_name"),
             Some(100)
         );
         mapping["properties"]["id"]["fields"] =
             serde_json::json!({"keyword": {"type": "keyword", "ignore_above": 3}});
-        let number_schema = cfg.schema.with_keyword_limits(&mapping);
+        let number_schema = cfg.schema.with_index_limits(&mapping);
         assert_eq!(field_limit(number_schema.person_fields(), "id"), Some(3));
         let line = br#"{"id": 1, "record": {"id": 1234}}"#;
         let (_, stats) =
@@ -369,7 +369,7 @@ mod tests {
         )
         .unwrap();
         mapping["properties"]["jobs"] = mapping["properties"]["roles"].clone();
-        let renamed = renamed.with_keyword_limits(&mapping);
+        let renamed = renamed.with_index_limits(&mapping);
         assert_eq!(field_limit(renamed.reference_fields(), "title"), Some(1024));
         assert_eq!(schema.to_json(), cfg.schema.to_json());
     }

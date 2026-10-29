@@ -296,6 +296,47 @@ mod tests {
     }
 
     #[test]
+    fn mapped_dates_count_once_per_input_value() {
+        let mapping: serde_json::Value =
+            serde_json::from_str(include_str!("../../pi-es/src/mapping.json")).unwrap();
+        let schema = FeedSchema::builtin().with_index_limits(&mapping);
+        let line = br#"{"id":1,"record":{"roles":[{"start_date":["2020-02-30",null,"2020-02-29","",1609459200000],"end_date":"2019-02-29"}]}}"#;
+        let (_, stats) = parse_person_line_with(&schema, line, Seq::default(), true).unwrap();
+        assert_eq!(stats.ignored_by_index, 4);
+        assert_eq!(stats.first_ignored.unwrap().field, "roles[0].start_date[0]");
+        let mut default_mapping = mapping;
+        default_mapping["properties"]["roles"]["properties"]["start_date"]
+            .as_object_mut()
+            .unwrap()
+            .remove("format");
+        let schema = FeedSchema::builtin().with_index_limits(&default_mapping);
+        let (_, stats) = parse_person_line_with(&schema, line, Seq::default(), true).unwrap();
+        assert_eq!(stats.ignored_by_index, 1);
+        default_mapping["properties"]["roles"]["properties"]["start_date"]["format"] =
+            "yyyy".into();
+        let schema = FeedSchema::builtin().with_index_limits(&default_mapping);
+        let (_, stats) = parse_person_line_with(&schema, line, Seq::default(), true).unwrap();
+        assert_eq!(stats.ignored_by_index, 1);
+    }
+
+    #[test]
+    fn date_multifields_count_the_union_across_kinds() {
+        let mut mapping: serde_json::Value =
+            serde_json::from_str(include_str!("../../pi-es/src/mapping.json")).unwrap();
+        let date = serde_json::json!({"type":"date", "format":"strict_date_optional_time||strict_year_month||strict_year"});
+        for field in ["first_name", "id", "connections"] {
+            mapping["properties"][field]["fields"]["date"] = date.clone();
+        }
+        // Unknown own format must not hide a known subfield.
+        mapping["properties"]["roles"]["properties"]["start_date"]["format"] = "yyyy".into();
+        mapping["properties"]["roles"]["properties"]["start_date"]["fields"]["date"] = date;
+        let schema = FeedSchema::builtin().with_index_limits(&mapping);
+        let line = br#"{"id":1,"record":{"first_name":["bad","2020"],"id":"007","connections":[12345,"bad"],"roles":[{"start_date":"bad"}]}}"#;
+        let (_, stats) = parse_person_line_with(&schema, line, Seq::default(), true).unwrap();
+        assert_eq!(stats.ignored_by_index, 5);
+    }
+
+    #[test]
     fn lines_count_the_values_the_index_skips() {
         let line = br#"{"id":8,"record":{"followers":"n/a","connections":["x",3],
             "open_to_work":"yes","roles":[{"organization_id":2}]}}"#;

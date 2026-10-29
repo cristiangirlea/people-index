@@ -319,9 +319,10 @@ being resumed.
 - `values_ignored_by_index` (extract stages, in `summary.json` and
   `pi_task_counter_total{counter="values_ignored_by_index"}`) counts the values of kept records
   that Elasticsearch skips under `ignore_malformed` (`"n/a"` in `followers`, `"yes"` in
-  `open_to_work`), or above a keyword's `ignore_above` (a 600-character `skills` element), following the rules Elasticsearch 9.5.5 was observed to apply (they and the
-  one known divergence are in [ARCHITECTURE.md](ARCHITECTURE.md#the-data)): the malformed
-  values are not indexed and the field is listed in the document's `_ignored`; the record stays
+  `open_to_work`), or above a keyword's `ignore_above` (a 600-character `skills` element).
+  It counts each input value once if any applicable field ignores it, including known date
+  formats and multi-fields. See [ARCHITECTURE.md](ARCHITECTURE.md#the-data) for the rules and
+  known divergences. The value remains in `_source`; the record stays
   searchable by its other fields. An `exists` query on `_ignored` finds those documents; it
   counts documents, while the counter counts values per extracted line (before person
   deduplication, an organization's value once however many persons embed it), so the two

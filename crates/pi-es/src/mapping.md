@@ -156,6 +156,28 @@ included: `check_mapping` refuses the mapping at startup otherwise. `roles.start
 `yyyy-MM` and `yyyy` (a JSON number such as `2020` is read as text, so as a year), so range
 queries work on partial dates.
 
+## Date observations and the extraction counter
+
+The built-in format is `strict_date_optional_time||strict_year_month||strict_year`.
+A probe against Elasticsearch 9.5.5 gave the following results; the complete probe is pinned
+in the model tests as raw JSON values.
+
+| Values | Indexed | Ignored |
+|---|---|---|
+| Calendar | `2020`, `2020-05`, `0000-02-29`, `-0004-02-29` | `+2020`, `2020-1`, `1900-02-29`, `2020-04-31` |
+| Time | `2020-01-01T`, `2020-01-01T12:34:56,123Z` | lowercase `t` or `z`, hour 24, second 60, ten fractional digits |
+| Zone | `2020-01-01T12Z`, `2020-01-01T12+02`, `2020-01-01T12:00UTC`, `2020-01-01T12:00:00UTC`, `2020-01-01T12:00:00GMT+02:00`, `2020-01-01T12:00:00Europe/Paris`; also `+0200`, `+02:00:00`, `+18:00` after a time | `2020-01-01TZ`, `2020-01-01T+02:00`, `2020-01-01T12:00:00Nowhere/City`, `2020-01-01T12:00:00 UTC`, `2020-01-01T12:00:00z`; also `+2`, `+19:00`, `Z[UTC]` after a time |
+| Scalars | integer `2020`, escaped digit in a year, null | `2020.0`, `1e3`, booleans, whitespace, non-ASCII digits |
+
+Extraction decodes JSON strings and checks the fixed-width year, month and calendar day,
+optional time and zone, including leap years and offsets through 18:00. Letter-led zone names of
+two or more characters are uncounted because the zone registry is not predicted: for example,
+`Nowhere/City` is ignored by Elasticsearch but not counted. Escaped strings that decode to
+non-ASCII or exceed the 64-byte decoding buffer are also uncounted. The default format
+`strict_date_optional_time||epoch_millis` and custom formats are uncounted: the probe shows
+the default accepts epoch values and its complete grammar is not established. A value is
+counted once if any applicable field ignores it, including date multi-fields; null is not counted.
+
 ## `roles` and `organizations` are `object`, not `nested`
 
 A `nested` field indexes every array element as a hidden Lucene document. With dozens of roles

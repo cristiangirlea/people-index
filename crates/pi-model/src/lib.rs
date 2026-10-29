@@ -12,6 +12,7 @@ mod builder;
 mod dedup;
 mod envelope;
 mod error;
+mod es_date;
 mod es_number;
 mod extract;
 mod id;
@@ -38,6 +39,7 @@ pub use builder::{
 pub use dedup::LastWins;
 pub use envelope::{Envelope, parse_envelope, parse_envelope_with_names};
 pub use error::{MalformedKind, MalformedRecord};
+pub use es_date::DateFormat;
 pub use extract::{
     log_field_name, parse_org_line, parse_org_line_with, parse_person_line, parse_person_line_with,
 };

@@ -147,6 +147,13 @@ byte. Such a record is kept, not malformed, and counted
 in the extract counter `records_with_repeated_keys` (per extracted line, like
 `values_ignored_by_index`).
 
+Date fields contribute to `values_ignored_by_index` for the built-in format
+`strict_date_optional_time||strict_year_month||strict_year`, including multi-fields. The
+Elasticsearch default and custom formats are uncounted. A scalar counts once if any applicable
+field ignores it, including a date multi-field, even if another field indexes it. Null is not
+counted; array elements count separately. The observed grammar is in
+[mapping.md](../crates/pi-es/src/mapping.md#date-observations-and-the-extraction-counter).
+
 Keyword values skipped by `ignore_above` are counted in `values_ignored_by_index` per
 input value, once even when multiple keyword fields ignore it. Each array element counts
 separately. Extraction resolves the smallest applicable limit from the mapping, including

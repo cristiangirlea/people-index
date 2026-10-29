@@ -7,6 +7,10 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Changed
+
+- Pin the production example release image by digest and check rendered Job images.
+
 ## [0.1.0] - 2026-10-29
 
 ### Added

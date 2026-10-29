@@ -4,6 +4,7 @@
 # and are all named, wherever they sort; a reference is tried three times and passes when a try
 # succeeds; duplicates are asked once; an empty list fails; the default path takes the
 # references check-deploy.sh writes to PINNED_REFS_OUT and fails when check-deploy.sh fails.
+# Also tests the shared rendered Job and schedule image checks on copied deployment files.
 set -euo pipefail
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
@@ -87,4 +88,36 @@ reset
 FAKE_DEPLOY_FAIL=1 bash "$tmp/repo/scripts/check-pins-resolve.sh" >"$tmp/out" 2>&1 &&
   fail "a failing check-deploy.sh must fail the check"
 [[ ! -s "$FAKE_LOG" ]] || fail "references were asked after check-deploy.sh failed"
+# Exercise the same script check-deploy calls, against copied deployment files.
+cp -R "$src/deploy/k8s" "$tmp/k8s"
+export PINNED_REFS_OUT="$tmp/collected"
+: >"$PINNED_REFS_OUT"
+job_check() { bash "$src/scripts/check-job-images.sh" "$tmp/k8s" "$1" "$2" >"$tmp/out" 2>&1; }
+set_image() { sed -i "s|^IMAGE=.*|IMAGE=$2|" "$tmp/k8s/overlays/$1/jobs.vars"; }
+expected_image="$(sed -n 's/^IMAGE=//p' "$tmp/k8s/overlays/production-example/jobs.vars")"
+for kind in run datagen verify schedule; do
+  job_check production-example "$kind" || fail "pinned $kind rejected: $(cat "$tmp/out")"
+done
+grep -qxF "$expected_image" "$PINNED_REFS_OUT" || fail "release image was not collected"
+set_image production-example "${expected_image%@*}"
+for kind in run datagen verify schedule; do
+  job_check production-example "$kind" && fail "bare tag accepted for $kind"
+  grep -q 'not pinned' "$tmp/out" || fail "missing pin failure for $kind: $(cat "$tmp/out")"
+done
+for kind in run datagen verify schedule; do
+  set_image production-example people-index:local
+  job_check production-example "$kind" && fail "local image accepted in production $kind"
+  set_image local people-index:local
+  job_check local "$kind" || fail "local image rejected in $kind: $(cat "$tmp/out")"
+done
+set_image production-example 'invalid image'
+job_check production-example schedule && fail "invalid image accepted"
+grep -q 'jobs/run does not render for production-example' "$tmp/out" || fail "render failure not named"
+grep -q 'IMAGE' "$tmp/out" || fail "render error not printed"
+# Check the labels used by the overlay, Job and schedule callers.
+# shellcheck source=/dev/null
+source "$src/scripts/check-job-images.sh"
+for label in deploy/k8s/overlays/local 'jobs/run overlays/local' 'schedule overlays/local'; do
+  (unpinned=(); check_ref "$label" people-index:local; report_unpinned) || fail "local label rejected: $label"
+done
 echo "test-check-pins-resolve: ok"

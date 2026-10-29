@@ -293,6 +293,24 @@ async fn prepare_and_publish_against_a_mock_cluster(corrupt: bool) {
         )
         .mount(&server)
         .await;
+    let mut effective_mapping = pi_es::mapping();
+    effective_mapping["_meta"] = json!({"people_index": {"run_id": "20261028-120000"}});
+    Mock::given(method("GET"))
+        .and(path(format!("/{index}/_mapping")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({index.clone(): {"mappings": effective_mapping}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/{index}/_settings")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({index.clone(): {"settings": {"index": {}}}})),
+        )
+        .mount(&server)
+        .await;
     Mock::given(method("PUT"))
         .and(path(format!("/{index}/_settings")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))

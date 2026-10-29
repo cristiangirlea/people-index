@@ -35,8 +35,8 @@ impl Stage for PrepareIndexStage {
         Ok(vec![TaskSpec::single(StageName::PrepareIndex)])
     }
 
-    /// Idempotent: an index left by an earlier attempt of this run is taken as it is (it was
-    /// created with the same settings, and `load` resends every document by `_id`).
+    /// Idempotent: an index left by an earlier attempt is checked again before `load`
+    /// resends every document by `_id`.
     async fn run(
         &self,
         ctx: &RunContext,
@@ -54,12 +54,17 @@ impl Stage for PrepareIndexStage {
             .es
             .shards
             .unwrap_or_else(|| IndexSpec::default_shards(data_nodes));
-        let spec = IndexSpec::new(shards, self.config.es.codec)
+        let mut spec = IndexSpec::new(shards, self.config.es.codec)
             .with_mapping((*self.config.mapping).clone());
+        spec.mapping_source.clone_from(&self.config.mapping_source);
         let outcome = admin
             .create_index(&plan.index, &spec, &ctx.run_id)
             .await
             .map_err(|e| es_error(e, &format!("creating index {}", plan.index)))?;
+        admin
+            .check_index(&plan.index, &spec, &ctx.run_id)
+            .await
+            .map_err(|e| es_error(e, &format!("checking index {}", plan.index)))?;
         let created = matches!(outcome, CreateOutcome::Created);
         tracing::info!(index = %plan.index, shards, data_nodes, created, "index ready for loading");
         let mut report = TaskReport::default();
@@ -137,12 +142,24 @@ mod tests {
             .expect(2)
             .mount(&server)
             .await;
+        let mut mapping = pi_es::mapping();
+        mapping["_meta"] = json!({"people_index": {"run_id": "R1"}});
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1": {"settings": {"index": {}}}})),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/persons-r1/_mapping"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({"persons-r1": {"mappings": {"_meta": {"people_index": {"run_id": "R1"}}}}}),
-            ))
-            .expect(2)
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1": {"mappings": mapping}})),
+            )
+            .expect(4)
             .mount(&server)
             .await;
         let stage = PrepareIndexStage::new(
@@ -195,5 +212,70 @@ mod tests {
                 );
             }
         }
+    }
+    #[tokio::test]
+    async fn reused_index_is_checked_again_and_bad_analysis_is_permanent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_nodes/settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"nodes": {"n": {"roles": ["data"]}}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/persons-r1"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(json!({"error": {"type": "resource_already_exists_exception"}})),
+            )
+            .mount(&server)
+            .await;
+        let mut mapping = pi_es::mapping();
+        mapping["_meta"] = json!({"people_index": {"run_id": "r1"}});
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_mapping"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1": {"mappings": mapping}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/persons-r1/_settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"persons-r1": {"settings": {"index": {"analysis": {"analyzer": {"default": {"tokenizer": "keyword"}}}}}}}))).expect(1).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::local(dir.path()).unwrap();
+        let ctx = RunContext::new("r1", store.clone()).unwrap();
+        let plan = Plan {
+            run_id: "r1".into(),
+            partitions: 1,
+            alias: "persons".into(),
+            index: "persons-r1".into(),
+            organizations: vec![],
+            persons: vec![],
+            total_bytes: 0,
+            schema: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            delivery: None,
+        };
+        store
+            .put_json_create_if_absent(&ctx.layout.plan(), &plan)
+            .await
+            .unwrap();
+        let stage = PrepareIndexStage::new(
+            Arc::new(StagesConfig::default()),
+            EsClient::new(&EsConfig::new(server.uri())).unwrap(),
+        );
+        let err = stage
+            .run(
+                &ctx,
+                &TaskSpec::single(StageName::PrepareIndex),
+                &AttemptId::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(pi_coord::is_permanent(&err));
+        assert!(format!("{err:#}").contains("index.analysis.analyzer"));
     }
 }

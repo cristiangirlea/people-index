@@ -134,6 +134,8 @@ pub struct StagesConfig {
     /// The `mappings` body `prepare-index` creates the index with (`PI_MAPPING_FILE`; the
     /// built-in mapping by default). [`StagesConfig::validate`] checks it against `schema`.
     pub mapping: Arc<Value>,
+    /// Description of the configured mapping source for diagnostics.
+    pub mapping_source: String,
     /// The Elasticsearch stages.
     pub es: EsStageConfig,
 }
@@ -157,6 +159,7 @@ impl Default for StagesConfig {
             input_store: None,
             schema: Arc::clone(&BUILTIN_SCHEMA),
             mapping: Arc::clone(&BUILTIN_MAPPING),
+            mapping_source: "built-in mapping".into(),
             es: EsStageConfig::default(),
         }
     }

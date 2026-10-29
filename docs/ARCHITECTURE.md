@@ -299,6 +299,13 @@ once the previous one has committed every task:
   default `2 × bulk_max_bytes`): each takes its body length from the budget and gives it back
   once it is in a bulk request buffer, and one larger than the whole budget passes alone. A
   load task's memory is about `(senders_per_worker + 1) × bulk_max_bytes + load_buffer_bytes`.
+- Before loading, `prepare-index` reads the new or reused index's settings and mapping. It
+  permanently refuses analysis definitions, similarity settings, explicit index-level mapping
+  coerce, ignore_malformed or ignore_above, source mode other than `stored`, pipelines other
+  than `_none`, and index mode other than `standard`.
+  Every effective mapping key and value must match the startup mapping with run ownership;
+  names under `properties` and `fields` must also match in both directions. Equivalent
+  Elasticsearch response forms and omitted mapping defaults are accepted.
 - `prepare-index` creates `<alias>-<run_id>` (lowercased) with `number_of_replicas: 0`,
   `refresh_interval: -1`, `translog.durability: async`, the codec, and `shards` primaries
   (default: 2 per data node, read from `_nodes`). Its mapping `_meta.people_index.run_id`

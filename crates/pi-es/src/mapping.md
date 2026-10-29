@@ -43,9 +43,26 @@ successfully (157 one-byte tokens for the ASCII input), but is not on the delibe
 allow-list. `keyword` and `pattern` (`\W+`) failed indexing with HTTP 400; `fingerprint`
 emitted nothing for a 40,000-character word (safe for that input, but still refused). A
 `search_analyzer` of `keyword` did not fail indexing, but a match query with a 40,000-character
-value failed with HTTP 400. The mapping file contains no index settings: the check validates
-names only. Settings and index templates can redefine analyzer names (see issue #100); do not
-override these built-ins or the default analyzer. The check cannot inspect template settings.
+value failed with HTTP 400. The startup check validates names; prepare-index also reads the effective index settings and
+mapping, refusing analysis definitions or mapping changes introduced by templates.
+
+A 9.5.5 single-node probe created an index with the built-in mapping and run metadata.
+GET `_mapping` returned `dynamic` as the string `"false"`, omitted `type: object` on
+objects with properties, and returned scalar `copy_to` as a one-element array; the rest
+matched. A matching index template defining a default keyword-tokenizer analyzer and an
+extra keyword field put both in the created index: GET `_settings` exposed the analyzer
+and GET `_mapping` exposed the field. The read-back check normalizes those observed mapping
+forms and compares the entire mapping including run metadata.
+
+A 9.5.5 single-node probe with a basic licence applied templates to `test-1` with this
+mapping. Index-level `index.mapping.ignore_above: 10` appeared in GET `_settings`, not
+GET `_mapping`; a longer `profile_url` remained in `_source` and was absent from `_ignored`.
+With `index.mapping.source.mode: synthetic`, creation and indexing succeeded, but GET
+`_settings` reported `STORED` and the URL remained in `_source`: basic did not activate
+synthetic source. With `disabled`, creation and indexing succeeded, GET `_settings` reported
+`disabled`, and GET the document returned no `_source`. Neither source mode appeared in GET
+`_mapping`. The effective settings check refuses the index-level limit and source modes other
+than stored, including when a template supplies them.
 
 ## Keyword for codes and enumerations
 

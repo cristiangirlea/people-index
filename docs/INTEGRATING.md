@@ -86,8 +86,11 @@ production example (262144 for compose). On a single host, Docker Compose runs t
 
 **The image.** Built from the `Dockerfile` (`make image` builds `people-index:local`): a
 distroless image running as uid 65532 with `people-index` as its entrypoint and metrics on 9464.
-Push it to your own registry and refer to it by digest. Signed release images are planned (#68);
-no release has been tagged yet. Building from source needs Rust 1.90 or later.
+Push it to your own registry and refer to it by digest. Each release also publishes
+`ghcr.io/cristiangirlea/people-index:X.Y.Z` for linux/amd64 and linux/arm64, scanned, with SBOM
+and provenance attestations, and signed with cosign; refer to it by digest and verify it as
+[OPERATIONS.md, Releasing](OPERATIONS.md#releasing) shows. Building from source needs Rust 1.90
+or later.
 
 ## Deploying into your own cluster
 

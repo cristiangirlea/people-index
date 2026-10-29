@@ -3,7 +3,8 @@
 # guards against a tag that changes, not against a registry deleting the pinned manifest, which
 # some projects do when they re-push a tag; a deploy then fails to pull. check-deploy.sh lists
 # every pinned reference (Dockerfile, compose, k3d, CI's docker run lines, ECK, every rendered
-# kustomization and Job template); this asks the registry for each digest.
+# kustomization and rendered Job); this asks the registry for each digest. The GHCR package
+# must be public for anonymous resolution; update the jobs.vars pin after each release.
 #
 #   check-pins-resolve.sh            the references check-deploy.sh finds
 #   check-pins-resolve.sh <file>     the references in <file>, one per line

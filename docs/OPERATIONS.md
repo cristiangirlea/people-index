@@ -522,6 +522,8 @@ logs uploaded on failure. `make check` runs the same Rust, deploy, scrub and fil
 3. Create and push the `vX.Y.Z` tag at that commit. The release workflow checks that the tag
    matches the workspace version and the changelog section exists. A manual workflow dispatch
    builds and scans both platforms without pushing an image or creating a release.
+4. After the tag run, update `deploy/k8s/overlays/production-example/jobs.vars` to the new
+   digest-pinned image reference through a pull request.
 
 The tag run scans fixable HIGH and CRITICAL vulnerabilities on linux/amd64 and linux/arm64,
 then publishes `ghcr.io/cristiangirlea/people-index:X.Y.Z` with SBOM and maximum provenance
@@ -533,7 +535,8 @@ digest passes both scans and is signed. The release notes include the digest-pin
 
 After the first release, GHCR creates the package private. In GitHub, open the package settings
 and change its visibility to public; verify the package page shows Public and an unauthenticated
-pull of the pinned reference succeeds.
+pull of the pinned reference succeeds. The weekly anonymous pin-resolution check also requires
+the GHCR package to be public.
 
 Verify the digest with cosign (replace the digest and tag with the release values):
 
@@ -876,6 +879,8 @@ The schedule component defaults to 1 GiB and a 7200 second deadline. For the pro
 example, patch the CronJob to match its task sizing and 43200 second deadline. For example,
 add this strategic merge patch to the overlay after enabling the component:
 
+Use the `IMAGE` value from `deploy/k8s/overlays/production-example/jobs.vars` in this patch.
+
 ```yaml
 patches:
   - target:
@@ -894,7 +899,7 @@ patches:
               spec:
                 containers:
                   - name: people-index
-                    image: ghcr.io/cristiangirlea/people-index:0.1.0@sha256:<digest>
+                    image: ghcr.io/cristiangirlea/people-index:<tag>@sha256:<digest>
                     imagePullPolicy: IfNotPresent
                     resources:
                       requests:

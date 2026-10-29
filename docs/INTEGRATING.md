@@ -84,7 +84,8 @@ kube-state-metrics. Elasticsearch nodes need `vm.max_map_count` of at least 1048
 production example (262144 for compose). On a single host, Docker Compose runs the same shape
 ([OPERATIONS.md, Compose](OPERATIONS.md#compose)).
 
-**The image.** Built from the `Dockerfile` (`make image` builds `people-index:local`): a
+**The image.** The production example pins the image in `deploy/k8s/overlays/production-example/jobs.vars` (`IMAGE`).
+Built from the `Dockerfile` (`make image` builds `people-index:local`): a
 distroless image running as uid 65532 with `people-index` as its entrypoint and metrics on 9464.
 Push it to your own registry and refer to it by digest. Each release also publishes
 `ghcr.io/cristiangirlea/people-index:X.Y.Z` for linux/amd64 and linux/arm64, scanned, with SBOM

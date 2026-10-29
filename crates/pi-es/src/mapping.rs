@@ -42,6 +42,7 @@ pub fn parse_mapping(text: &str) -> Result<Value, EsError> {
 ///   in the schema's tables with a JSON kind its type accepts (`kind_fits`), and every table
 ///   entry is mapped; every `long`, `integer` and `date` field has `ignore_malformed: true`;
 /// - every keyword with an index or doc values, including multi-fields, has `ignore_above` at most 8191;
+/// - text analyzers, including multi-fields, are absent or on the safe built-in allow-list;
 /// - every multi-field takes what its field lets through (`multi_field_fits`), and every
 ///   `copy_to` target is a `text` or `keyword` field;
 /// - the fields disabled in the mapping (`enabled: false`) are exactly the schema's disabled
@@ -75,6 +76,7 @@ fn mapping_problems(mapping: &Value, schema: &FeedSchema) -> Vec<String> {
         );
     }
     keyword_problems(mapping, "", &mut problems);
+    analyzer_problems(mapping, "", &mut problems);
     let table = shape_table(schema);
     let disabled: BTreeSet<String> = schema
         .person_disabled()
@@ -187,6 +189,39 @@ fn keyword_problems(node: &Value, path: &str, problems: &mut Vec<String>) {
                     format!("{path}.{name}")
                 };
                 keyword_problems(child, &child_path, problems);
+            }
+        }
+    }
+}
+
+// Check text fields and multi-fields, including those under unindexed parents.
+fn analyzer_problems(node: &Value, path: &str, problems: &mut Vec<String>) {
+    if node["enabled"] == Value::Bool(false) {
+        return;
+    }
+    if node_type(node) == Some("text") {
+        for key in ["analyzer", "search_analyzer", "search_quote_analyzer"] {
+            if let Some(value) = node.get(key)
+                && !matches!(
+                    value.as_str(),
+                    Some("standard" | "simple" | "whitespace" | "english")
+                )
+            {
+                problems.push(format!(
+                        "{path}: {key} must be one of standard, simple, whitespace or english; other analyzers can emit immense terms that fail indexing or queries"
+                    ));
+            }
+        }
+    }
+    for key in ["properties", "fields"] {
+        if let Some(children) = node.get(key).and_then(Value::as_object) {
+            for (name, child) in children {
+                let child_path = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                analyzer_problems(child, &child_path, problems);
             }
         }
     }
@@ -780,6 +815,68 @@ mod tests {
         m["properties"]["country"] =
             json!({"type": "keyword", "index": false, "doc_values": false});
         m["properties"]["memberships"]["properties"] = json!({"hidden": {"type": "keyword"}});
+        check_mapping(&m, schema).unwrap();
+    }
+
+    #[test]
+    fn text_analyzers_are_restricted_on_fields_and_multi_fields() {
+        let schema = FeedSchema::builtin();
+        for key in ["analyzer", "search_analyzer", "search_quote_analyzer"] {
+            for value in [
+                json!("keyword"),
+                json!("my_pattern"),
+                json!(null),
+                json!(42),
+                json!("french"),
+            ] {
+                for path in [0, 1, 2] {
+                    let error = problems_after(schema, |m| {
+                        let node = match path {
+                            0 => &mut m["properties"]["first_name"],
+                            1 => &mut m["properties"]["roles"]["properties"]["title"],
+                            _ => {
+                                m["properties"]["country"]["fields"] =
+                                    json!({"words": {"type": "text"}});
+                                &mut m["properties"]["country"]["fields"]["words"]
+                            }
+                        };
+                        node[key] = value.clone();
+                    });
+                    let name = ["first_name", "roles.title", "country.words"][path];
+                    assert!(
+                        error.contains(&format!("{name}: {key} must be one of")),
+                        "{error}"
+                    );
+                    assert!(error.contains("immense terms"), "{error}");
+                }
+            }
+            for name in ["standard", "simple", "whitespace", "english"] {
+                let mut m = mapping();
+                m["properties"]["first_name"][key] = json!(name);
+                check_mapping(&m, schema).unwrap();
+            }
+        }
+        let mut m = mapping();
+        m["properties"]["summary"]["index"] = json!(false);
+        m["properties"]["summary"]["analyzer"] = json!("keyword");
+        assert!(
+            check_mapping(&m, schema)
+                .unwrap_err()
+                .to_string()
+                .contains("summary: analyzer")
+        );
+        m = mapping();
+        m["properties"]["summary"]["fields"] =
+            json!({"words": {"type": "text", "analyzer": "keyword"}});
+        assert!(
+            check_mapping(&m, schema)
+                .unwrap_err()
+                .to_string()
+                .contains("summary.words: analyzer")
+        );
+        m = mapping();
+        m["properties"]["memberships"]["properties"] =
+            json!({"hidden": {"type": "text", "analyzer": "keyword"}});
         check_mapping(&m, schema).unwrap();
     }
 

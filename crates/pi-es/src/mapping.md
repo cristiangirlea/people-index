@@ -26,6 +26,27 @@ Making a new field searchable is a mapping change and a new run, which is how it
   value from failing anything: it is simply not indexed as a keyword. The data generator must
   pick expected titles and names shorter than that, or those counts cannot match.
 
+## Text analyzer limits
+
+`check_mapping` allows only `standard`, `simple`, `whitespace`, and `english` when
+`analyzer`, `search_analyzer`, or `search_quote_analyzer` is specified on a `text` field
+or text multi-field, including on an unindexed parent. Omitting them uses the default. Other
+names (including custom analyzers and `keyword`) are refused because a single immense term
+can fail indexing or queries. Fields inside disabled objects are not parsed and are exempt.
+
+On a single-node Elasticsearch 9.5.5 container, `_analyze` on 40,000 ASCII `a` characters
+produced 157 tokens of at most 255 bytes for `standard`, `simple`, `whitespace`, and
+`english`; indexing each succeeded. Further probes found that these analyzers cap tokens at
+255 characters for ASCII, CJK, U+023A and four-byte input. Multibyte tokens reached about
+765 bytes (CJK and U+023A), far below the 32,766-byte term limit. `french` also indexed
+successfully (157 one-byte tokens for the ASCII input), but is not on the deliberately small
+allow-list. `keyword` and `pattern` (`\W+`) failed indexing with HTTP 400; `fingerprint`
+emitted nothing for a 40,000-character word (safe for that input, but still refused). A
+`search_analyzer` of `keyword` did not fail indexing, but a match query with a 40,000-character
+value failed with HTTP 400. The mapping file contains no index settings: the check validates
+names only. Settings and index templates can redefine analyzer names (see issue #100); do not
+override these built-ins or the default analyzer. The check cannot inspect template settings.
+
 ## Keyword for codes and enumerations
 
 `country`, `region`, `city`, `industry`, `skills`, `employment_type`, `organization_domain`,

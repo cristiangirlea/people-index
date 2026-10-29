@@ -100,7 +100,9 @@ this document, `roles` and `organization_id` stand for `person.references` and
   `date` field must have `ignore_malformed: true`, whatever its kind (an id above `i64::MAX`, a
   value past `i32` or text no date format reads would otherwise fail the document and the
   load); every `keyword` with an index or doc values, including multi-fields, needs an integer `ignore_above`
-  at most 8191 (keywords with `index: false` and `doc_values: false`, and fields inside disabled objects, are exempt); the `enabled: false`
+  at most 8191 (keywords with `index: false` and `doc_values: false`, and fields inside disabled objects, are exempt); text fields and text multi-fields may specify only `standard`, `simple`, `whitespace` or
+  `english` for `analyzer`, `search_analyzer` and `search_quote_analyzer` (or omit them),
+  so an analyzer cannot emit immense terms; the `enabled: false`
   fields must be exactly the `disabled` lists; the builder's three
   fields must be mapped as `object`, `long` with `ignore_malformed: true`, and `boolean`. Types
   without a rule (`nested`, `float`, ...) are refused. Multi-fields (`fields`) must take what

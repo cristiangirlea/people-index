@@ -1036,6 +1036,11 @@ when they disagree; the error lists every problem with its mapping path and both
   (`nested`, `float`, `wildcard`, ...) is refused;
 - every keyword with an index or doc values, including multi-fields, has integer `ignore_above` at most 8191;
   keywords with `index: false` and `doc_values: false`, and fields inside disabled objects, are exempt;
+- text fields and text multi-fields may omit `analyzer`, `search_analyzer`, and
+  `search_quote_analyzer`, or set each to `standard`, `simple`, `whitespace`, or `english`;
+  other names can emit immense terms that fail indexing or queries, and are refused even on unindexed text;
+  fields inside disabled objects are exempt. Do not use index templates to override these built-in
+  analyzers or the default analyzer: the mapping check cannot inspect index settings;
 - every multi-field (under `"fields"`) takes what its field lets through: `text` and `keyword`
   always, `long`, `integer`, `date` and `boolean` with `ignore_malformed: true`, anything else
   only if it fits the field's kind;

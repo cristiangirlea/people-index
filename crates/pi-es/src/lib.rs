@@ -27,6 +27,7 @@ mod retry;
 mod runs;
 mod settings;
 mod shards;
+mod templates;
 mod verifier;
 
 pub use admin::{CreateOutcome, IndexAdmin};
@@ -44,6 +45,7 @@ pub use reqwest::Method;
 pub use retry::RetryPolicy;
 pub use settings::{Codec, IndexSpec, ServingSettings};
 pub use shards::{ShardCounts, require_complete};
+pub use templates::builtin_template_for_prefix;
 pub use verifier::{AliasCheck, Check, Published, Verifier, VerifyReport};
 
 /// Extracts the sortable UTC stamp from a run index.

@@ -205,7 +205,7 @@ differently (`PI_EXECUTOR=distributed`, smaller or larger task memory).
 | `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the built-in ones | feeds with other field names |
 | `PI_ES_URL`, `PI_ES_CA_CERT` | `http://localhost:9200`, unset | the cluster and the CA to trust |
 | `PI_ES_USERNAME` + `PI_ES_PASSWORD`, or `PI_ES_API_KEY` | unset | the pipeline's identity (one or the other) |
-| `PI_ALIAS` | `persons` | the alias your application queries; the run's index is `<alias>-<run_id>` |
+| `PI_ALIAS` | `persons` | the queried alias; indexes are `<alias>-<run_id>`; a lowercase safe store segment of at most 126 bytes, not starting with `.`, whose run indexes do not match built-in ES 9.5.5 templates ([settings](OPERATIONS.md#alias-setting)) |
 | `PI_EXECUTOR`, `PI_CONCURRENCY` | `local`, CPUs | one process or coordinator plus workers; tasks per process |
 | `PI_TASK_MEMORY_BYTES`, `PI_BUFFER_BYTES`, `PI_SEGMENT_TARGET_BYTES` | 512 MiB, 256 MiB, 64 MiB | memory per task ([Sizing](OPERATIONS.md#sizing)) |
 | `PI_SENDERS_PER_WORKER`, `PI_BULK_MAX_BYTES` | 2, 8 MiB | bulk pressure on the cluster |

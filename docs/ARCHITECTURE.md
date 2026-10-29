@@ -538,7 +538,7 @@ sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_ES_USERNAME`, `PI_ES_PASSWORD` or `PI_ES_API_KEY` | auth | unset |
 | `PI_ES_CA_CERT` | PEM file to trust | unset |
 | `PI_ES_REQUEST_TIMEOUT`, `PI_ES_GZIP` | one request's timeout, gzip bulk bodies | `120s`, false |
-| `PI_ALIAS` | the published alias | `persons` |
+| `PI_ALIAS` | published alias; safe lowercase store segment, not starting with `.`, at most 126 bytes, with no run-index collision with a built-in Elasticsearch 9.5.5 template | `persons` |
 | `PI_RUN_ID` | run id (`run`, `worker`, `stage`) | generated; `worker` follows the newest run |
 | `PI_RUN_ID_FROM_JOB_NAME` | derive the run id for `run` or `worker` from a CronJob Job name; mutually exclusive with `PI_RUN_ID` | unset |
 | `PI_EXECUTOR` | `local` or `distributed` | `local` |

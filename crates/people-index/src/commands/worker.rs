@@ -14,6 +14,12 @@ use crate::settings::{Stores, concurrency, coordination, retry_policy, stages_co
 /// before the coordinator).
 pub async fn run(args: WorkerArgs, cancel: CancellationToken) -> anyhow::Result<WorkerReport> {
     let stores = Stores::open(&args.store)?;
+    let registry = Arc::new(pi_stages::build_registry(stages_config(
+        &args.pipeline,
+        &args.es,
+        &args.exec,
+        &stores,
+    )?)?);
     let run_id = match (args.run_id.clone(), args.run_id_from_job_name.as_deref()) {
         (_, Some(name)) => crate::run_id::from_job_name(name)?,
         (Some(id), None) => id,
@@ -22,12 +28,6 @@ pub async fn run(args: WorkerArgs, cancel: CancellationToken) -> anyhow::Result<
         }
     };
     let ctx = stores.context(&run_id, cancel)?;
-    let registry = Arc::new(pi_stages::build_registry(stages_config(
-        &args.pipeline,
-        &args.es,
-        &args.exec,
-        &stores,
-    )?)?);
     let coord = coordination(&args.exec);
     tracing::info!(run = %run_id, worker = %pi_coord::Coordination::worker_id(coord.as_ref()), "worker starting");
     Worker::new(coord, registry)
@@ -60,5 +60,37 @@ async fn wait_for_run(
             () = cancel.cancelled() => return Err(anyhow::Error::new(Cancelled)),
             () = tokio::time::sleep(poll) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn invalid_alias_fails_before_waiting_for_a_run() {
+        let cli = Cli::try_parse_from([
+            "people-index",
+            "worker",
+            "--store-url",
+            "memory://",
+            "--alias",
+            "logs",
+        ])
+        .unwrap();
+        let Command::Worker(args) = cli.command else {
+            panic!("expected worker")
+        };
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), run(args, CancellationToken::new()))
+                .await
+                .unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("PI_ALIAS") && error.contains("logs"),
+            "{error}"
+        );
     }
 }

@@ -7,6 +7,10 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Added
+
+- A security policy (`SECURITY.md`) for reporting vulnerabilities privately.
+
 ### Changed
 
 - Pin the production example release image by digest and check rendered Job images.

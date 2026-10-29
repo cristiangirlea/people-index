@@ -188,3 +188,88 @@ person linked to organization Y": per-field questions that a flattened `object` 
 The one thing `object` cannot answer is a correlated question about a single role ("title X
 *at* organization Y in the same role"). If that becomes a requirement, the fix is a `nested`
 copy of only the fields it needs (`roles.title`, `roles.organization_id`), not of whole roles.
+
+## Built-in index templates (Elasticsearch 9.5.5)
+
+A single-node 9.5.5 container returned these from `GET _index_template`.
+An absent priority is shown as unset. `*` is a wildcard.
+
+| Template | Index patterns | Priority |
+|---|---|---:|
+| `.deprecation-indexing-template` | `.logs-deprecation.*` | 1000 |
+| `.deprecation-indexing-template-9` | `.logs-elasticsearch.deprecation-*` | 1000 |
+| `.fleet-fileds-fromhost-data` | `.fleet-fileds-fromhost-data-*` | 200 |
+| `.fleet-fileds-fromhost-meta` | `.fleet-fileds-fromhost-meta-*` | 200 |
+| `.fleet-fileds-tohost-data` | `.fleet-fileds-tohost-data-*` | 200 |
+| `.fleet-fileds-tohost-meta` | `.fleet-fileds-tohost-meta-*` | 200 |
+| `.kibana-reporting` | `.kibana-reporting*` | 100 |
+| `.ml-anomalies-` | `.ml-anomalies-*`, `.reindexed-v7-ml-anomalies-*`, `.reindexed-v8-ml-anomalies-*` | 2147483647 |
+| `.ml-notifications-000002` | `.ml-notifications-*` | 2147483647 |
+| `.ml-state` | `.ml-state*`, `.reindexed-v7-ml-state*`, `.reindexed-v8-ml-state*` | 2147483647 |
+| `.ml-stats` | `.ml-stats-*` | 2147483647 |
+| `.monitoring-beats-mb` | `.monitoring-beats-8-*` | unset |
+| `.monitoring-ent-search-mb` | `.monitoring-ent-search-8-*` | unset |
+| `.monitoring-es-mb` | `.monitoring-es-8-*` | unset |
+| `.monitoring-kibana-mb` | `.monitoring-kibana-8-*` | unset |
+| `.monitoring-logstash-mb` | `.monitoring-logstash-8-*` | unset |
+| `.slm-history-7` | `.slm-history-7*` | 2147483647 |
+| `.watch-history-18` | `.watcher-history-18*` | 2147483647 |
+| `agentless` | `agentless-*-*` | 100 |
+| `behavioral_analytics-events-default` | `behavioral_analytics-events-*` | 100 |
+| `elastic-connectors` | `.elastic-connectors-v1` | 100 |
+| `elastic-connectors-sync-jobs` | `.elastic-connectors-sync-jobs-v1` | 100 |
+| `ilm-history-7` | `ilm-history-7*` | 2147483647 |
+| `logs` | `logs-*-*` | 100 |
+| `logs-apm.app@template` | `logs-apm.app.*-*` | 210 |
+| `logs-apm.error@template` | `logs-apm.error-*` | 210 |
+| `logs-elasticsearch.querylog@template` | `logs-elasticsearch.querylog-*` | 240 |
+| `logs-otel@template` | `logs-*.otel-*` | 120 |
+| `metrics` | `metrics-*-*` | 100 |
+| `metrics-apm.app@template` | `metrics-apm.app.*-*` | 210 |
+| `metrics-apm.internal@template` | `metrics-apm.internal-*` | 210 |
+| `metrics-apm.service_destination.10m@template` | `metrics-apm.service_destination.10m-*` | 210 |
+| `metrics-apm.service_destination.1m@template` | `metrics-apm.service_destination.1m-*` | 210 |
+| `metrics-apm.service_destination.60m@template` | `metrics-apm.service_destination.60m-*` | 210 |
+| `metrics-apm.service_summary.10m@template` | `metrics-apm.service_summary.10m-*` | 210 |
+| `metrics-apm.service_summary.1m@template` | `metrics-apm.service_summary.1m-*` | 210 |
+| `metrics-apm.service_summary.60m@template` | `metrics-apm.service_summary.60m-*` | 210 |
+| `metrics-apm.service_transaction.10m@template` | `metrics-apm.service_transaction.10m-*` | 210 |
+| `metrics-apm.service_transaction.1m@template` | `metrics-apm.service_transaction.1m-*` | 210 |
+| `metrics-apm.service_transaction.60m@template` | `metrics-apm.service_transaction.60m-*` | 210 |
+| `metrics-apm.transaction.10m@template` | `metrics-apm.transaction.10m-*` | 210 |
+| `metrics-apm.transaction.1m@template` | `metrics-apm.transaction.1m-*` | 210 |
+| `metrics-apm.transaction.60m@template` | `metrics-apm.transaction.60m-*` | 210 |
+| `metrics-otel@template` | `metrics-*.otel-*` | 120 |
+| `metrics-prometheus@template` | `metrics-*.prometheus-*` | 140 |
+| `metrics-service_destination.10m.otel@template` | `metrics-service_destination.10m.otel-*` | 131 |
+| `metrics-service_destination.1m.otel@template` | `metrics-service_destination.1m.otel-*` | 131 |
+| `metrics-service_destination.60m.otel@template` | `metrics-service_destination.60m.otel-*` | 131 |
+| `metrics-service_summary.10m.otel@template` | `metrics-service_summary.10m.otel-*` | 130 |
+| `metrics-service_summary.1m.otel@template` | `metrics-service_summary.1m.otel-*` | 130 |
+| `metrics-service_summary.60m.otel@template` | `metrics-service_summary.60m.otel-*` | 130 |
+| `metrics-service_transaction.10m.otel@template` | `metrics-service_transaction.10m.otel-*` | 130 |
+| `metrics-service_transaction.1m.otel@template` | `metrics-service_transaction.1m.otel-*` | 130 |
+| `metrics-service_transaction.60m.otel@template` | `metrics-service_transaction.60m.otel-*` | 130 |
+| `metrics-transaction.10m.otel@template` | `metrics-transaction.10m.otel-*` | 130 |
+| `metrics-transaction.1m.otel@template` | `metrics-transaction.1m.otel-*` | 130 |
+| `metrics-transaction.60m.otel@template` | `metrics-transaction.60m.otel-*` | 130 |
+| `search-acl-filter` | `.search-acl-filter-*` | 110 |
+| `synthetics` | `synthetics-*-*` | 100 |
+| `traces-apm.rum@template` | `traces-apm.rum-*` | 210 |
+| `traces-apm.sampled@template` | `traces-apm.sampled-*` | 210 |
+| `traces-apm@template` | `traces-apm-*` | 210 |
+| `traces-otel@template` | `traces-*.otel-*` | 120 |
+
+A direct `PUT /logs-20261029t020000z-abc123` returned HTTP 400: template
+`logs` creates data streams only. `PUT /persons-20261029t020000z-abc123`
+created a regular index with default settings (one shard, one replica, `data_content`
+tier); `GET /_data_stream` returned no streams. Startup rejects aliases whose run
+indexes can match these patterns. Other cluster templates and later ES versions require
+operator review; the effective configuration check remains necessary.
+
+The same 9.5.5 probe with `GET _template` returned the legacy patterns
+`.monitoring-es-7-*`, `.monitoring-kibana-7-*`, `.monitoring-logstash-7-*`,
+`.monitoring-beats-7-*`, and `.monitoring-alerts-7`. An index named
+`.monitoring-es-7-<run_id>` was created with the monitoring mapping. Startup refuses
+dot-prefixed aliases: Elasticsearch 9.5.5 deprecates names beginning with a dot and
+says they will not be allowed in a future version.

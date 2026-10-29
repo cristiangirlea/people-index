@@ -254,6 +254,9 @@ What has not been done or measured yet, plainly:
 - **No dashboards** for the pipeline metrics yet; alert rules cover Elasticsearch and the pipeline.
 - **Losing the object store** loses the run's intermediate state; the run starts over.
 
-## License
+## Project documents
 
-MIT, as declared in `Cargo.toml`.
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+
+MIT; see [LICENSE](LICENSE).

@@ -396,3 +396,414 @@ async fn existing_index_mapping_read_retries_busy_answer() {
         "{outcome:?}"
     );
 }
+
+#[tokio::test]
+async fn effective_index_validation_rejects_template_changes() {
+    for component in [
+        "analyzer",
+        "normalizer",
+        "tokenizer",
+        "char_filter",
+        "filter",
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/persons-r1/_settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"persons-r1": {"settings": {"index": {"analysis": {component: {"default": {"type": "keyword"}}}}}}})))
+            .mount(&server).await;
+        let err = IndexAdmin::new(client(&server))
+            .check_index("persons-r1", &IndexSpec::new(1, Codec::Default), "r1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EsError::Config(_)));
+        assert!(
+            err.to_string()
+                .contains(&format!("index.analysis.{component}"))
+        );
+    }
+    for extra in [false, true] {
+        let server = MockServer::start().await;
+        let spec = IndexSpec::new(1, Codec::Default);
+        let mut mapping = spec.mapping.clone();
+        mapping["_meta"] = json!({"people_index": {"run_id": "r1"}});
+        // The forms observed in the Elasticsearch response are semantically equivalent.
+        mapping["dynamic"] = json!("false");
+        mapping["properties"]["roles"]
+            .as_object_mut()
+            .unwrap()
+            .remove("type");
+        mapping["properties"]["organizations"]
+            .as_object_mut()
+            .unwrap()
+            .remove("type");
+        mapping["properties"]["first_name"]["copy_to"] = json!(["full_name"]);
+        mapping["properties"]["last_name"]["copy_to"] = json!(["full_name"]);
+        if extra {
+            mapping["properties"]["injected"] = json!({"type": "keyword"});
+        }
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1": {"settings": {"index": {}}}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_mapping"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1": {"mappings": mapping}})),
+            )
+            .mount(&server)
+            .await;
+        let result = IndexAdmin::new(client(&server))
+            .check_index("persons-r1", &spec, "r1")
+            .await;
+        assert_eq!(result.is_err(), extra, "{result:?}");
+    }
+}
+
+#[tokio::test]
+async fn mapping_defaults_metadata_and_differences() {
+    let mut spec = IndexSpec::new(1, Codec::Default);
+    spec.mapping["_meta"] = json!({"owner": "operator", "people_index": {"old": true}});
+    spec.mapping["properties"]["first_name"]["index"] = json!(true);
+    spec.mapping["properties"]["first_name"]["fields"]["keyword"]["doc_values"] = json!(true);
+    spec.mapping["properties"]["roles"]["dynamic"] = json!(false);
+    let mut actual = spec.mapping.clone();
+    actual["_meta"]["people_index"] = json!({"run_id":"r1"});
+    actual["properties"]["first_name"]
+        .as_object_mut()
+        .unwrap()
+        .remove("index");
+    actual["properties"]["first_name"]["fields"]["keyword"]
+        .as_object_mut()
+        .unwrap()
+        .remove("doc_values");
+    actual["properties"]["roles"]["dynamic"] = json!("false");
+    actual["properties"]["roles"]
+        .as_object_mut()
+        .unwrap()
+        .remove("type");
+    for (change, expected) in [
+        ("none", ""),
+        ("type", "properties.first_name.type"),
+        ("dynamic_templates", "dynamic_templates"),
+        ("runtime", "runtime"),
+        ("_source", "_source"),
+        ("owner", "_meta.people_index.run_id"),
+        ("field", "properties.injected"),
+        ("ignore_above", "properties.country.ignore_above"),
+        ("analyzer", "properties.headline.analyzer"),
+        ("copy_to", "properties.first_name.copy_to"),
+    ] {
+        let server = MockServer::start().await;
+        let mut returned = actual.clone();
+        match change {
+            "type" => returned["properties"]["first_name"]["type"] = json!("keyword"),
+            "owner" => returned["_meta"]["people_index"]["run_id"] = json!("other"),
+            "field" => returned["properties"]["injected"] = json!({"type":"keyword"}),
+            "ignore_above" => returned["properties"]["country"]["ignore_above"] = json!(10),
+            "analyzer" => returned["properties"]["headline"]["analyzer"] = json!("keyword"),
+            "copy_to" => {
+                returned["properties"]["first_name"]["copy_to"] = json!(["full_name", "headline"]);
+            }
+            "none" => (),
+            _ => returned[change] = json!({"added": true}),
+        }
+        Mock::given(method("PUT"))
+            .and(path("/persons-r1"))
+            .and(body_json({
+                let mut body = spec.create_body();
+                body["mappings"]["_meta"]["people_index"] = json!({"run_id":"r1"});
+                body
+            }))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"acknowledged":true,"shards_acknowledged":true})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1":{"settings":{"index":{}}}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_mapping"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1":{"mappings":returned}})),
+            )
+            .mount(&server)
+            .await;
+        let admin = IndexAdmin::new(client(&server));
+        assert_eq!(
+            admin.create_index("persons-r1", &spec, "r1").await.unwrap(),
+            CreateOutcome::Created
+        );
+        let result = admin.check_index("persons-r1", &spec, "r1").await;
+        if change == "none" {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            let err = result.unwrap_err();
+            assert!(matches!(err, EsError::Config(_)));
+            assert!(err.to_string().contains(expected), "{err}");
+            assert!(err.to_string().contains("persons-*"));
+        }
+    }
+}
+
+fn omitted_default_cases() -> Vec<(&'static str, serde_json::Value, serde_json::Value)> {
+    vec![
+        (
+            "index",
+            json!({"type":"keyword", "index":true}),
+            json!({"type":"keyword"}),
+        ),
+        (
+            "doc_values",
+            json!({"type":"keyword", "doc_values":true}),
+            json!({"type":"keyword"}),
+        ),
+        (
+            "store",
+            json!({"type":"keyword", "store":false}),
+            json!({"type":"keyword"}),
+        ),
+        (
+            "text norms",
+            json!({"type":"text", "norms":true}),
+            json!({"type":"text"}),
+        ),
+        (
+            "keyword norms",
+            json!({"type":"keyword", "norms":false}),
+            json!({"type":"keyword"}),
+        ),
+        (
+            "eager_global_ordinals",
+            json!({"type":"keyword", "eager_global_ordinals":false}),
+            json!({"type":"keyword"}),
+        ),
+        (
+            "text index_options",
+            json!({"type":"text", "index_options":"positions"}),
+            json!({"type":"text"}),
+        ),
+        (
+            "keyword index_options",
+            json!({"type":"keyword", "index_options":"docs"}),
+            json!({"type":"keyword"}),
+        ),
+        (
+            "split_queries_on_whitespace",
+            json!({"type":"keyword", "split_queries_on_whitespace":false}),
+            json!({"type":"keyword"}),
+        ),
+        (
+            "fielddata",
+            json!({"type":"text", "fielddata":false}),
+            json!({"type":"text"}),
+        ),
+        (
+            "position_increment_gap",
+            json!({"type":"text", "position_increment_gap":100}),
+            json!({"type":"text"}),
+        ),
+        (
+            "term_vector",
+            json!({"type":"text", "term_vector":"no"}),
+            json!({"type":"text"}),
+        ),
+        (
+            "enabled",
+            json!({"type":"object", "enabled":true, "properties":{"child":{"type":"keyword"}}}),
+            json!({"properties":{"child":{"type":"keyword"}}}),
+        ),
+        (
+            "locale",
+            json!({"type":"date", "locale":"ROOT"}),
+            json!({"type":"date"}),
+        ),
+        (
+            "date format",
+            json!({"type":"date", "format":"strict_date_optional_time||epoch_millis"}),
+            json!({"type":"date"}),
+        ),
+        (
+            "disabled object type",
+            json!({"enabled":false}),
+            json!({"type":"object", "enabled":false}),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn omitted_mapping_defaults_are_accepted() {
+    for (name, expected, actual) in omitted_default_cases() {
+        let server = MockServer::start().await;
+        let mut spec = IndexSpec::new(1, Codec::Default);
+        spec.mapping = json!({"properties":{"test":expected}});
+        let returned =
+            json!({"properties":{"test":actual}, "_meta":{"people_index":{"run_id":"r1"}}});
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1":{"settings":{"index":{}}}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_mapping"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1":{"mappings":returned}})),
+            )
+            .mount(&server)
+            .await;
+        let result = IndexAdmin::new(client(&server))
+            .check_index("persons-r1", &spec, "r1")
+            .await;
+        assert!(result.is_ok(), "{name}: {result:?}");
+    }
+}
+
+#[tokio::test]
+async fn mapping_refusal_names_configured_source_even_for_builtin_content() {
+    let server = MockServer::start().await;
+    let mut actual = pi_es::mapping();
+    actual["_meta"] = json!({"people_index":{"run_id":"r1"}});
+    actual["properties"]["injected"] = json!({"type":"keyword"});
+    Mock::given(method("GET"))
+        .and(path("/persons-r1/_settings"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"persons-r1":{"settings":{"index":{}}}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/persons-r1/_mapping"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"persons-r1":{"mappings":actual}})),
+        )
+        .mount(&server)
+        .await;
+    for source in ["built-in mapping", "PI_MAPPING_FILE mapping.json"] {
+        let mut spec = IndexSpec::new(1, Codec::Default);
+        spec.mapping_source = source.into();
+        let err = IndexAdmin::new(client(&server))
+            .check_index("persons-r1", &spec, "r1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(&format!("differs from {source}:")),
+            "{err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dangerous_settings_and_malformed_response() {
+    for (key, value) in [
+        ("default_pipeline", json!("pipeline")),
+        ("final_pipeline", json!("pipeline")),
+        ("mode", json!("time_series")),
+        ("mapping.coerce", json!("false")),
+        ("mapping.ignore_malformed", json!("true")),
+        ("mapping.ignore_above", json!("10")),
+        ("mapping.source.mode", json!("synthetic")),
+        ("mapping.source.mode", json!("disabled")),
+        ("similarity.custom.type", json!("BM25")),
+        ("analysis.analyzer.default.type", json!("keyword")),
+    ] {
+        for flat in [false, true] {
+            let server = MockServer::start().await;
+            let mut settings = json!({"index":{}});
+            if flat {
+                settings = json!({format!("index.{key}"): value});
+            } else {
+                let mut current = &mut settings["index"];
+                let parts: Vec<_> = key.split('.').collect();
+                for part in &parts[..parts.len() - 1] {
+                    current[*part] = json!({});
+                    current = &mut current[*part];
+                }
+                current[parts[parts.len() - 1]] = value.clone();
+            }
+            Mock::given(method("GET"))
+                .and(path("/persons-r1/_settings"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"persons-r1":{"settings":settings}})),
+                )
+                .mount(&server)
+                .await;
+            let err = IndexAdmin::new(client(&server))
+                .check_index("persons-r1", &IndexSpec::new(1, Codec::Default), "r1")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, EsError::Config(_)), "{err}");
+            assert!(err.to_string().contains(&format!("index.{key}")), "{err}");
+        }
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/persons-r1/_settings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"persons-r1":{"settings":{"index":{"analysis":{"analyzer":{"default":{"type":"keyword"}},"filter":{"custom":{"type":"stop"}}},"mapping":{"ignore_above":"10","source":{"mode":"disabled"}}}}}})))
+        .mount(&server).await;
+    let err = IndexAdmin::new(client(&server))
+        .check_index("persons-r1", &IndexSpec::new(1, Codec::Default), "r1")
+        .await
+        .unwrap_err()
+        .to_string();
+    for key in [
+        "index.analysis.analyzer.default.type",
+        "index.analysis.filter.custom.type",
+        "index.mapping.ignore_above",
+        "index.mapping.source.mode",
+    ] {
+        assert!(err.contains(key), "{err}");
+    }
+    for mode in ["stored", "STORED"] {
+        let server = MockServer::start().await;
+        let spec = IndexSpec::new(1, Codec::Default);
+        let mut mapping = spec.mapping.clone();
+        mapping["_meta"] = json!({"people_index":{"run_id":"r1"}});
+        Mock::given(method("GET")).and(path("/persons-r1/_settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"persons-r1":{"settings":{"index":{"default_pipeline":"_none","final_pipeline":"_none","mode":"standard","mapping":{"source":{"mode":mode}}}}}})))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/persons-r1/_mapping"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"persons-r1":{"mappings":mapping}})),
+            )
+            .mount(&server)
+            .await;
+        assert!(
+            IndexAdmin::new(client(&server))
+                .check_index("persons-r1", &spec, "r1")
+                .await
+                .is_ok()
+        );
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/persons-r1/_settings"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"persons-r1":{"settings":{"index":false}}})),
+        )
+        .mount(&server)
+        .await;
+    let err = IndexAdmin::new(client(&server))
+        .check_index("persons-r1", &IndexSpec::new(1, Codec::Default), "r1")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EsError::Decode { .. }));
+}

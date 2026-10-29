@@ -59,6 +59,8 @@ pub struct IndexSpec {
     /// The `mappings` body: the built-in [`crate::mapping::mapping`] unless
     /// [`IndexSpec::with_mapping`] gives another.
     pub mapping: Value,
+    /// Description of the configured mapping source.
+    pub mapping_source: String,
 }
 
 impl IndexSpec {
@@ -68,6 +70,7 @@ impl IndexSpec {
             shards,
             codec,
             mapping: mapping(),
+            mapping_source: "built-in mapping".into(),
         }
     }
 

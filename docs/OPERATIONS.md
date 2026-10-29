@@ -1080,8 +1080,7 @@ when they disagree; the error lists every problem with its mapping path and both
 - text fields and text multi-fields may omit `analyzer`, `search_analyzer`, and
   `search_quote_analyzer`, or set each to `standard`, `simple`, `whitespace`, or `english`;
   other names can emit immense terms that fail indexing or queries, and are refused even on unindexed text;
-  fields inside disabled objects are exempt. Do not use index templates to override these built-in
-  analyzers or the default analyzer: the mapping check cannot inspect index settings;
+  fields inside disabled objects are exempt;
 - every multi-field (under `"fields"`) takes what its field lets through: `text` and `keyword`
   always, `long`, `integer`, `date` and `boolean` with `ignore_malformed: true`, anything else
   only if it fits the field's kind;
@@ -1089,6 +1088,11 @@ when they disagree; the error lists every problem with its mapping path and both
 - the fields with `"enabled": false` are exactly the schema's `disabled` lists;
 - `organizations` is an `object`, `unresolved_organization_ids` a `long` with
   `ignore_malformed: true` and `<references>.organization_resolved` a `boolean`.
+
+Index templates matching `<alias>-*` must comply with the effective settings and mapping rules
+in [ARCHITECTURE.md](ARCHITECTURE.md#stages). If `prepare-index` refuses the index, change
+or remove the offending template, delete the created index, and start a new run. A run is
+pinned to its mapping SHA, so it cannot resume with a changed `PI_MAPPING_FILE`.
 
 ### Running with them
 

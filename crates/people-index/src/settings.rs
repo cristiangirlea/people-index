@@ -205,6 +205,10 @@ pub fn stages_config(
     }
     if let Some(mapping) = index_mapping(pipeline)? {
         config.mapping = Arc::new(mapping);
+        config.mapping_source = format!(
+            "PI_MAPPING_FILE {}",
+            pipeline.mapping_file.as_deref().unwrap_or_default()
+        );
     }
     pi_es::check_mapping(&config.mapping, &config.schema).map_err(|e| {
         let source = |value: Option<&str>| {
@@ -446,7 +450,17 @@ mod tests {
             let cfg = config(extra).unwrap();
             assert!(cfg.schema.is_builtin());
             assert_eq!(*cfg.mapping, pi_es::mapping());
+            assert_eq!(cfg.mapping_source, "built-in mapping");
         }
+
+        let builtin_file = path("builtin.json");
+        std::fs::write(&builtin_file, pi_es::mapping().to_string()).unwrap();
+        let cfg = config(&["--mapping-file", &builtin_file]).unwrap();
+        assert_eq!(*cfg.mapping, pi_es::mapping());
+        assert_eq!(
+            cfg.mapping_source,
+            format!("PI_MAPPING_FILE {builtin_file}")
+        );
 
         let (schema_file, mapping_file, bad) =
             (path("schema.json"), path("mapping.json"), path("bad.json"));

@@ -30,6 +30,7 @@ scripts/test-check-schedule.sh # schedule pod comparison regression tests
 scripts/test-check-s3-endpoints.sh # the S3 endpoint rule of check-deploy, on rendered documents
 scripts/scrub-check.sh
 scripts/test-scrub-check.sh   # the scrub check and hooks, in a throwaway repo and worktree
+scripts/test-release-notes.sh  # release tag and changelog extraction
 scripts/test-check-republish.sh  # the compose republish check, against stub curl and aws
 scripts/test-restore-drill.sh  # the compose restore drill's cleanup, against stub docker and curl
 scripts/test-check-pins-resolve.sh  # the pinned-image resolve check, against a stub docker

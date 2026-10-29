@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Validates the deployment without a cluster:
 #   - every image in the Dockerfile (its `# syntax=` frontend included), deploy/compose,
-#     deploy/k3d, the CI workflow's `docker run` lines, the ECK operator manifest (as pinned
+#     deploy/k3d, the workflows' `docker run` lines, the ECK operator manifest (as pinned
 #     by deploy/k8s/eck/pin-operator.sh from deploy/k8s/eck/operator-image), deploy/k8s
 #     (rendered) and the Job templates is pinned as name:tag@sha256:<digest>
 #     (people-index:local and the Job templates' ${IMAGE} excepted), and the Dockerfile's rust
@@ -189,10 +189,12 @@ while read -r ref; do
   check_ref deploy/k3d/cluster.yaml "$ref"
 done < <(sed -nE 's/^image:[[:space:]]*([^[:space:]#]+).*/\1/p' "$root/deploy/k3d/cluster.yaml")
 # In `docker run` lines, every word that looks like name:tag or name@digest.
-while read -r ref; do
-  check_ref .github/workflows/ci.yml "$ref"
-done < <(sed -nE 's/^[[:space:]]*(run:[[:space:]]*)?docker run( .*)/\2/p' "$root/.github/workflows/ci.yml" |
-  grep -oE '[[:space:]][a-z0-9][a-z0-9._/-]*[:@][^[:space:]]*' | sed -E 's/^[[:space:]]+//')
+for workflow in "$root"/.github/workflows/*.yml; do
+  while read -r ref; do
+    check_ref ".github/workflows/${workflow##*/}" "$ref"
+  done < <(sed -nE 's/^[[:space:]]*(run:[[:space:]]*)?docker run( .*)/\2/p' "$workflow" |
+    grep -oE '[[:space:]][a-z0-9][a-z0-9._/-]*[:@][^[:space:]]*' | sed -E 's/^[[:space:]]+//')
+done
 report_unpinned
 docker_rust="$(sed -nE 's/^FROM rust:([0-9][0-9.]*)-.*/\1/p' "$root/Dockerfile")"
 ci_rust="$(sed -nE 's/^[[:space:]]*RUST_TOOLCHAIN:[[:space:]]*"?([0-9][0-9.]*)"?.*/\1/p' \

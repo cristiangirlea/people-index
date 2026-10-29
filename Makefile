@@ -104,6 +104,7 @@ check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub, file mo
 	bash scripts/check-deploy.sh
 	bash scripts/scrub-check.sh
 	bash scripts/test-scrub-check.sh
+	bash scripts/test-release-notes.sh
 	bash scripts/test-check-republish.sh
 	bash scripts/test-restore-drill.sh
 	bash scripts/test-check-pins-resolve.sh

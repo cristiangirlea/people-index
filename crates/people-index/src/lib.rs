@@ -22,10 +22,23 @@ use serde_json::json;
 use crate::cli::{Cli, Command};
 
 /// Parses the command line, runs the subcommand and returns the process exit code: 0 on
-/// success, 1 on failure (or failed checks), 143 after a shutdown signal.
+/// success, 1 on failure (or failed checks, or a setting refused after parsing), 2 when the
+/// command line does not parse (clap exits) or a scheduled worker fails, 143 after a shutdown
+/// signal (`run`, `worker` and `stage`).
 #[must_use]
 pub fn run_cli() -> ExitCode {
-    let cli = Cli::parse();
+    let mut argv: Vec<_> = std::env::args_os().collect();
+    let scheduled_worker = match rewrite_scheduled(
+        &mut argv,
+        std::env::var("JOB_COMPLETION_INDEX").ok().as_deref(),
+    ) {
+        Ok(worker) => worker,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cli = Cli::parse_from(argv);
     telemetry::init_logging(cli.log_format);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -37,7 +50,31 @@ pub fn run_cli() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(dispatch(cli.command))
+    let code = runtime.block_on(dispatch(cli.command));
+    scheduled_exit_code(scheduled_worker, code)
+}
+
+fn scheduled_exit_code(scheduled_worker: bool, code: ExitCode) -> ExitCode {
+    if scheduled_worker && code == ExitCode::FAILURE {
+        ExitCode::from(2)
+    } else {
+        code
+    }
+}
+
+fn rewrite_scheduled(argv: &mut [std::ffi::OsString], index: Option<&str>) -> anyhow::Result<bool> {
+    if argv.get(1).is_some_and(|arg| arg == "scheduled") {
+        let index = index.and_then(|s| s.parse::<u32>().ok()).ok_or_else(|| {
+            anyhow::anyhow!("JOB_COMPLETION_INDEX must be a non-negative integer")
+        })?;
+        argv[1] = if index == 0 {
+            "run".into()
+        } else {
+            "worker".into()
+        };
+        return Ok(index != 0);
+    }
+    Ok(false)
 }
 
 async fn dispatch(command: Command) -> ExitCode {
@@ -159,4 +196,39 @@ fn print_json(value: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
     );
+}
+
+#[cfg(test)]
+mod scheduled_tests {
+    use super::*;
+    #[test]
+    fn scheduled_exit_codes() {
+        assert_eq!(
+            scheduled_exit_code(true, ExitCode::FAILURE),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            scheduled_exit_code(false, ExitCode::FAILURE),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            scheduled_exit_code(true, ExitCode::from(shutdown::EXIT_SIGNALLED)),
+            ExitCode::from(143)
+        );
+    }
+    #[test]
+    fn rewrites_indexed_jobs() {
+        for (index, expected, worker) in [
+            ("0", "run", false),
+            ("1", "worker", true),
+            ("00", "run", false),
+        ] {
+            let mut args = vec!["pi".into(), "scheduled".into()];
+            assert_eq!(rewrite_scheduled(&mut args, Some(index)).unwrap(), worker);
+            assert_eq!(args[1], expected);
+        }
+        for index in [None, Some("bad")] {
+            assert!(rewrite_scheduled(&mut ["pi".into(), "scheduled".into()], index).is_err());
+        }
+    }
 }

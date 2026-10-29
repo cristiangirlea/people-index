@@ -82,6 +82,10 @@ pub enum EsError {
         actual: u64,
     },
 
+    /// A configured publish bound failed.
+    #[error("publish refused: {0}")]
+    PublishRefused(String),
+
     /// The cluster did not reach the wanted health in time.
     #[error("{target}: health {last} after waiting, wanted {wanted}")]
     HealthTimeout {
@@ -101,6 +105,16 @@ pub enum EsError {
         alias: String,
         index: String,
         serving: String,
+    },
+
+    /// An existing index has a different or missing owner.
+    #[error(
+        "index {index} {}; this run is {run_id}", OwnershipDescription(.owner.as_deref())
+    )]
+    IndexOwnership {
+        index: String,
+        owner: Option<String>,
+        run_id: String,
     },
 
     /// The expectations file could not be read or parsed.
@@ -154,6 +168,19 @@ impl fmt::Display for ItemFailure {
             "id {} status {} {}: {}",
             self.id, self.status, self.kind, self.reason
         )
+    }
+}
+
+struct OwnershipDescription<'a>(Option<&'a str>);
+
+impl fmt::Display for OwnershipDescription<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(owner) => write!(f, "belongs to run {owner}"),
+            None => f.write_str(
+                "has no owning run recorded (created before ownership was recorded, or by hand)",
+            ),
+        }
     }
 }
 

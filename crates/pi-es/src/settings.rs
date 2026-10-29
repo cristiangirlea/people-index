@@ -56,8 +56,11 @@ pub struct IndexSpec {
     /// [`IndexSpec::default_shards`]).
     pub shards: u32,
     pub codec: Codec,
-    /// The `mappings` body; [`crate::mapping::mapping`] unless a test says otherwise.
+    /// The `mappings` body: the built-in [`crate::mapping::mapping`] unless
+    /// [`IndexSpec::with_mapping`] gives another.
     pub mapping: Value,
+    /// Description of the configured mapping source.
+    pub mapping_source: String,
 }
 
 impl IndexSpec {
@@ -67,7 +70,15 @@ impl IndexSpec {
             shards,
             codec,
             mapping: mapping(),
+            mapping_source: "built-in mapping".into(),
         }
+    }
+
+    /// The spec with `mapping` as its `mappings` body.
+    #[must_use]
+    pub fn with_mapping(mut self, mapping: Value) -> Self {
+        self.mapping = mapping;
+        self
     }
 
     /// Two primaries per data node: every node takes part in the load, and a later node added

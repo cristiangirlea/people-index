@@ -1,4 +1,4 @@
-# Alerts on the Elasticsearch side of a load. Thresholds follow Elasticsearch's own defaults:
+# Alerts for Elasticsearch and pipeline Jobs and alias freshness. Elasticsearch thresholds follow its defaults:
 # at the 85% low disk watermark it stops allocating shards to a node, and a heap above 90% for
 # long means GC pressure.
 apiVersion: monitoring.coreos.com/v1
@@ -60,3 +60,47 @@ spec:
             severity: warning
           annotations:
             summary: "No successful snapshot in repository {{ $labels.repository }} for two days."
+    - name: people-index.pipeline
+      rules:
+        - alert: PeopleIndexJobFailed
+          expr: |
+            (kube_job_failed{condition="true"} == 1) * on(namespace, job_name) group_left(label_app_kubernetes_io_component)
+              max by (namespace, job_name, label_app_kubernetes_io_component) (kube_job_labels{label_app_kubernetes_io_name="people-index", label_app_kubernetes_io_component=~"coordinator|worker"})
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pipeline Job {{ $labels.namespace }}/{{ $labels.job_name }} failed."
+        - alert: PeopleIndexJobStalled
+          expr: |
+            (time() - kube_job_status_start_time > 3 * 3600)
+              and on(namespace, job_name) (kube_job_status_active > 0)
+              * on(namespace, job_name) group_left(label_app_kubernetes_io_component)
+                max by (namespace, job_name, label_app_kubernetes_io_component) (kube_job_labels{label_app_kubernetes_io_name="people-index", label_app_kubernetes_io_component=~"coordinator|worker"})
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pipeline Job {{ $labels.namespace }}/{{ $labels.job_name }} has been active for over 3 hours."
+        - alert: PeopleIndexAliasOld
+          expr: |
+            time() - max(elasticsearch_indices_settings_creation_timestamp_seconds * on(index) group_left()
+              elasticsearch_indices_aliases{alias="persons"}) > 26 * 3600
+          labels:
+            severity: warning
+          annotations:
+            summary: The index behind the persons alias was created over 26 hours ago.
+        - alert: PeopleIndexAliasMissing
+          expr: absent(elasticsearch_indices_settings_creation_timestamp_seconds * on(index) group_left() elasticsearch_indices_aliases{alias="persons"})
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: The persons alias has no index, or alias or creation timestamp metrics are unavailable.
+        - alert: PeopleIndexJobLabelsMissing
+          expr: |
+            count by (namespace) (kube_job_labels{job_name=~"pi-.+"})
+              unless on(namespace) count by (namespace) (kube_job_labels{job_name=~"pi-.+", label_app_kubernetes_io_name!=""})
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Job name labels are unavailable from kube-state-metrics in namespace {{ $labels.namespace }}."

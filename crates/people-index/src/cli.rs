@@ -63,6 +63,9 @@ pub struct StoreArgs {
     /// Input prefix holding organizations/ and persons/, when not <store>/raw.
     #[arg(long, env = "PI_INPUT_URL")]
     pub input_url: Option<String>,
+    /// Delivery sub-prefix beneath the input root.
+    #[arg(long, env = "PI_DELIVERY")]
+    pub delivery: Option<String>,
     /// S3-compatible endpoint (MinIO). Credentials come from AWS_* variables.
     #[arg(long, env = "PI_S3_ENDPOINT")]
     pub s3_endpoint: Option<String>,
@@ -100,6 +103,9 @@ pub struct PipelineArgs {
     /// The published alias; the run's index is <alias>-<run_id>.
     #[arg(long, env = "PI_ALIAS", default_value = "persons")]
     pub alias: String,
+    /// Require a supplier completion marker before planning.
+    #[arg(long, env = "PI_REQUIRE_COMPLETE_MARKER", default_value_t = false)]
+    pub require_complete_marker: bool,
     /// Input bytes per partition.
     #[arg(long, env = "PI_PARTITION_TARGET_BYTES", value_parser = parse_byte_size, default_value = "256MiB")]
     pub partition_target_bytes: u64,
@@ -149,9 +155,29 @@ pub struct PipelineArgs {
     /// Cluster health publish waits for: green or yellow.
     #[arg(long, env = "PI_PUBLISH_HEALTH", default_value = "green")]
     pub publish_health: String,
+    /// Published runs whose segments are retained (0 disables cleanup).
+    #[arg(long, env = "PI_RETAIN_RUNS", default_value_t = 3)]
+    pub retain_runs: usize,
+    /// Minimum share of the previous document count (0 disables).
+    #[arg(long, env = "PI_PUBLISH_MIN_SHARE", default_value_t = 0.9)]
+    pub publish_min_share: f64,
+    /// Maximum unresolved role organization share (1 disables).
+    #[arg(long, env = "PI_PUBLISH_MAX_UNRESOLVED", default_value_t = 0.25)]
+    pub publish_max_unresolved: f64,
+    /// Allow a run with no indexed organizations.
+    #[arg(long, env = "PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS", default_value_t = false, action = clap::ArgAction::Set)]
+    pub publish_allow_empty_organizations: bool,
     /// How long publish waits for that health.
     #[arg(long, env = "PI_HEALTH_TIMEOUT", value_parser = parse_duration, default_value = "30m")]
     pub health_timeout: Duration,
+    /// A JSON file naming the feeds' envelope keys, the person's references and the checked
+    /// fields (docs/OPERATIONS.md, Feed schema). Unset or empty: the built-in schema.
+    #[arg(long, env = "PI_SCHEMA_FILE")]
+    pub schema_file: Option<String>,
+    /// A JSON file with the index mapping (the mappings body of a create-index request).
+    /// Unset or empty: the built-in mapping.
+    #[arg(long, env = "PI_MAPPING_FILE")]
+    pub mapping_file: Option<String>,
 }
 
 /// How tasks are executed in this process.
@@ -207,6 +233,9 @@ pub struct RunArgs {
     /// The run id; an existing one is resumed (default: generated).
     #[arg(long, env = "PI_RUN_ID")]
     pub run_id: Option<String>,
+    /// Derive the run id from a CronJob Job name.
+    #[arg(long, env = "PI_RUN_ID_FROM_JOB_NAME", conflicts_with = "run_id")]
+    pub run_id_from_job_name: Option<String>,
     /// Who runs the tasks.
     #[arg(long, env = "PI_EXECUTOR", value_enum, default_value_t = ExecutorKind::Local)]
     pub executor: ExecutorKind,
@@ -231,6 +260,9 @@ pub struct WorkerArgs {
     /// The run to work on (default: the newest run, waited for if there is none yet).
     #[arg(long, env = "PI_RUN_ID")]
     pub run_id: Option<String>,
+    /// Derive the run id from a CronJob Job name.
+    #[arg(long, env = "PI_RUN_ID_FROM_JOB_NAME", conflicts_with = "run_id")]
+    pub run_id_from_job_name: Option<String>,
     /// Exit after this long without work (default: never).
     #[arg(long, env = "PI_WORKER_IDLE_TIMEOUT", value_parser = parse_duration)]
     pub idle_timeout: Option<Duration>,
@@ -327,6 +359,9 @@ pub struct StageArgs {
     /// The task id (e.g. part-00003, file-00000, run); every task of the stage when omitted.
     #[arg(long)]
     pub task: Option<String>,
+    /// Dangerous: bypass the alias run lock for recovery.
+    #[arg(long)]
+    pub ignore_run_lock: bool,
     #[command(flatten)]
     pub store: StoreArgs,
     #[command(flatten)]

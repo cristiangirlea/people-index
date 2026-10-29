@@ -32,7 +32,7 @@ impl IgnoredLog {
             field = %first.field,
             found = first.found,
             values = stats.ignored_by_index,
-            "kept a record with values the index will skip (ignore_malformed)"
+            "kept a record with values the index will skip (ignore_malformed or ignore_above)"
         );
         true
     }

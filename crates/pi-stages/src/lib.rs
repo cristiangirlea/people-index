@@ -61,7 +61,7 @@ pub use join::JoinStage;
 pub use load::LoadStage;
 pub use metered::Metered;
 pub use plan::PlanStage;
-pub use plan_file::{Feed, InputFile, Plan, index_name};
+pub use plan_file::{Feed, InputFile, Plan, SchemaPin, index_name};
 pub use prepare_index::PrepareIndexStage;
 pub use publish::{PublishRecord, PublishStage, delete_orphans};
 pub use registry::build_registry;

@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_coord::{AttemptId, RunContext, Stage, StageName, TaskReport, TaskSpec};
-use pi_model::{LineStats, MalformedRecord, OrgRow, Partitioner, Seq, parse_org_line};
+use pi_model::{
+    FeedSchema, LineStats, MalformedRecord, OrgRow, Partitioner, Seq, parse_org_line_with,
+};
 use pi_store::Dataset;
 
 use crate::channel::Outbox;
@@ -27,11 +29,16 @@ impl ExtractOrgsStage {
     /// The stage with the given settings.
     #[must_use]
     pub fn new(config: Arc<StagesConfig>) -> Self {
-        Self { config }
+        let mut resolved = Arc::unwrap_or_clone(config);
+        resolved.schema = Arc::new(resolved.schema.with_index_limits(&resolved.mapping));
+        Self {
+            config: Arc::new(resolved),
+        }
     }
 }
 
 struct OrgSink {
+    schema: Arc<FeedSchema>,
     partitioner: Partitioner,
     orgs: PartitionedWriter<OrgRow>,
 }
@@ -46,6 +53,7 @@ impl OrgSink {
             &ctx.attempt,
         );
         Box::new(Self {
+            schema: Arc::clone(&ctx.schema),
             partitioner: ctx.partitioner,
             orgs: PartitionedWriter::new(
                 ctx.partitioner.count(),
@@ -63,8 +71,9 @@ impl LineSink for OrgSink {
         &mut self,
         line: &[u8],
         seq: Seq,
+        collect_names: bool,
     ) -> anyhow::Result<Result<LineStats, MalformedRecord>> {
-        let (row, stats) = match parse_org_line(line, seq) {
+        let (row, stats) = match parse_org_line_with(&self.schema, line, seq, collect_names) {
             Ok(parsed) => parsed,
             Err(m) => return Ok(Err(m)),
         };

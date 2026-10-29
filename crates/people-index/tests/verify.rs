@@ -4,7 +4,7 @@
 use clap::Parser as _;
 use people_index::cli::{Cli, Command, VerifyArgs};
 use people_index::commands::verify;
-use pi_stages::index_name;
+use pi_stages::{SchemaPin, index_name};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{body_json, method, path};
@@ -34,9 +34,21 @@ fn args(store: &TempDir, server: &MockServer, extra: &[&str]) -> VerifyArgs {
 /// Writes `runs/<run_id>/summary.json` as `publish` does: `alias`, its lowercased index
 /// name, `docs` documents.
 fn write_summary(store: &TempDir, run_id: &str, alias: &str, docs: u64) {
+    write_summary_with(store, run_id, alias, docs, None);
+}
+
+/// As [`write_summary`], with the feed schema and mapping pin `schema` (absent when `None`, as
+/// in a summary written before the pin existed).
+fn write_summary_with(
+    store: &TempDir,
+    run_id: &str,
+    alias: &str,
+    docs: u64,
+    schema: Option<&SchemaPin>,
+) {
     let dir = store.path().join("runs").join(run_id);
     std::fs::create_dir_all(&dir).expect("run dir");
-    let summary = json!({
+    let mut summary = json!({
         "run_id": run_id,
         "alias": alias,
         "index": index_name(alias, run_id),
@@ -52,6 +64,9 @@ fn write_summary(store: &TempDir, run_id: &str, alias: &str, docs: u64) {
         "orphans_deleted": 0,
         "orphans_left": 0,
     });
+    if let Some(pin) = schema {
+        summary["schema"] = serde_json::to_value(pin).expect("pin");
+    }
     std::fs::write(dir.join("summary.json"), summary.to_string()).expect("summary");
 }
 
@@ -171,6 +186,43 @@ async fn summary_mode_checks_the_run_the_alias_points_at() {
 }
 
 #[tokio::test]
+async fn summary_mode_runs_the_name_samples_only_for_the_builtin_schema() {
+    let custom = SchemaPin::of(
+        &pi_model::FeedSchema::from_json(r#"{"envelope": {"id": "key"}}"#).expect("schema"),
+        &pi_es::mapping(),
+    );
+    for (pin, want) in [
+        (None, &["count", "sample:ids", "sample:full_name"][..]),
+        (
+            Some(SchemaPin::builtin()),
+            &["count", "sample:ids", "sample:full_name"][..],
+        ),
+        (Some(custom), &["count", "sample:ids"][..]),
+    ] {
+        let store = TempDir::new().expect("tempdir");
+        write_summary_with(&store, "r1", "persons", 50, pin.as_ref());
+        let server = MockServer::start().await;
+        mount_alias(&server, "persons-r1").await;
+        mount_cluster(&server, "persons-r1", 50, 20).await;
+        let outcome = verify::run(args(
+            &store,
+            &server,
+            &["--source", "summary", "--run-id", "r1"],
+        ))
+        .await
+        .expect("verified");
+        assert!(outcome.report.passed(), "{:?}", outcome.report);
+        let names: Vec<&str> = outcome
+            .report
+            .checks
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, want, "{pin:?}");
+    }
+}
+
+#[tokio::test]
 async fn summary_mode_fails_for_a_run_the_alias_moved_away_from() {
     let store = TempDir::new().expect("tempdir");
     write_summary(&store, "r1", "persons", 50);
@@ -272,4 +324,27 @@ async fn expected_mode_reads_expected_json_as_before() {
     assert!(outcome.report.passed(), "{:?}", outcome.report);
     assert_eq!(outcome.report.alias, None);
     assert_eq!(outcome.report.checks.len(), 2);
+}
+
+#[tokio::test]
+async fn expected_mode_reads_selected_delivery() {
+    let store = TempDir::new().unwrap();
+    let raw = store.path().join("raw/batch");
+    std::fs::create_dir_all(&raw).unwrap();
+    std::fs::write(
+        raw.join("expected.json"),
+        json!({
+            "persons": 50, "organizations": 10,
+            "malformed": {"persons": 0, "organizations": 0},
+            "persons_with_unresolved": 20, "role_title_counts": {}, "organization_name_counts": {}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = MockServer::start().await;
+    mount_cluster(&server, "persons", 50, 20).await;
+    let outcome = verify::run(args(&store, &server, &["--delivery", "batch"]))
+        .await
+        .unwrap();
+    assert!(outcome.report.passed());
 }

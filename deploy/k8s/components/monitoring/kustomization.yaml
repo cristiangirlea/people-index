@@ -1,5 +1,6 @@
 # Metrics and alerts. Needs the prometheus-operator CRDs (ServiceMonitor, PodMonitor,
-# PrometheusRule), e.g. from kube-prometheus-stack, before it is applied.
+# PrometheusRule), e.g. from kube-prometheus-stack, before it is applied. Prometheus must
+# scrape kube-state-metrics with --metric-labels-allowlist=jobs=[app.kubernetes.io/name,app.kubernetes.io/component].
 #
 # - elasticsearch-exporter: cluster, node, index, shard and snapshot metrics, logged in as the
 #   file-realm user `exporter` (role people-index-monitor: monitor, monitor_snapshot, and
@@ -7,7 +8,7 @@
 #   generates `es-exporter-credentials` (see overlays/production-example).
 # - ServiceMonitors for the exporter and the object store, a PodMonitor for every pipeline
 #   pod's :9464 endpoint (coordinator, workers, datagen).
-# - A PrometheusRule with the Elasticsearch alerts that matter during a load.
+# - A PrometheusRule with Elasticsearch and pipeline alerts.
 # - A NetworkPolicy that admits scrapes from the `monitoring` namespace only. If Prometheus
 #   runs elsewhere, patch its namespaceSelector. If your Prometheus selects monitors by a label
 #   (kube-prometheus-stack: `release: <name>`), add it with a `labels:` entry in the overlay.

@@ -98,6 +98,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: install PyYAML
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
       - name: install kubeconform (checksum verified)
         run: |
           curl -fsSL -o /tmp/kubeconform.tar.gz \
@@ -131,9 +133,13 @@ jobs:
         run: docker run --rm -i hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d hadolint --failure-threshold warning - < Dockerfile
       - name: scrub-check finds its list from any worktree
         run: bash scripts/test-scrub-check.sh
+      - name: the release notes script passes and fails as it should
+        run: bash scripts/test-release-notes.sh
       # jq --version first: on the runner the summary cases must run, not skip.
       - name: the compose republish check passes and fails as it should
         run: jq --version && bash scripts/test-check-republish.sh
+      - name: the restore drill cleans up after every refusal and failure
+        run: bash scripts/test-restore-drill.sh
       - name: the pinned-image resolve check passes and fails as it should
         run: bash scripts/test-check-pins-resolve.sh
       - name: hooks and scripts are stored as 100755
@@ -141,6 +147,13 @@ jobs:
         run: |
           bash scripts/test-check-modes.sh
           bash scripts/check-modes.sh
+      - name: identity configuration rejects invalid inputs
+        run: bash scripts/test-identity-config.sh
+      - name: schedule pod comparison catches differences
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml && bash scripts/test-check-schedule.sh
+      # PyYAML from the step above.
+      - name: the S3 endpoint check passes and fails as it should
+        run: bash scripts/test-check-s3-endpoints.sh
       - name: the S3 check passes and fails as it should
         run: bash scripts/test-check-s3.sh
 
@@ -193,6 +206,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: install PyYAML
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
       - name: install kubeconform (checksum verified)
         run: |
           curl -fsSL -o /tmp/kubeconform.tar.gz \
@@ -234,7 +249,7 @@ jobs:
           load: true
           tags: people-index:local
           cache-from: type=gha,scope=image
-      - name: datagen, two runs, verify, republish checks
+      - name: datagen, two runs, restore drill, verify, republish checks
         run: make compose-e2e
       - name: collect logs
         if: failure()

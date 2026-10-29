@@ -3,11 +3,11 @@
 #   certs        one-shot: CA + node certificates (elasticsearch-certutil), the CA for clients
 #   es01..es03   Elasticsearch 9.5.5, three master+data nodes, TLS on HTTP and transport,
 #                one zone attribute each (zone-a/b/c) with allocation awareness, as on k3d
-#   es-users     one-shot: waits for the formed cluster, creates role people-index-writer and
-#                user pipeline (the pipeline never uses the elastic superuser)
+#   es-users     one-shot: waits for the formed cluster, creates the writer and reader roles and
+#                users pipeline and reader (the pipeline never uses the elastic superuser)
 #   s3           SeaweedFS S3 gateway on s3:8333 (conditional writes verified by s3-init)
-#   s3-init      one-shot: creates bucket people-index and proves the store returns 412 for a
-#                create-if-absent on an existing key and for a stale If-Match
+#   s3-init      one-shot: creates the pipeline and snapshot buckets, verifies isolation and
+#                proves conditional writes return 412 for existing keys and stale etags
 #   datagen      profile datagen: writes both feeds to s3://people-index/raw/
 #   coordinator  people-index run (PI_EXECUTOR=distributed)
 #   worker       people-index worker, `--scale worker=N`
@@ -29,6 +29,8 @@ x-logging: &logging
     max-file: "3"
 
 x-es-env: &es-env
+  # A different PI_ALIAS needs the matching pattern; interpolation supplies it here.
+  action.auto_create_index: "-${PI_ALIAS:-persons}-*,+*"
   cluster.name: people-index
   cluster.initial_master_nodes: es01,es02,es03
   node.roles: master,data,ingest
@@ -44,6 +46,14 @@ x-es-env: &es-env
   xpack.security.transport.ssl.enabled: "true"
   xpack.security.transport.ssl.certificate_authorities: certs/ca/ca.crt
   xpack.security.transport.ssl.verification_mode: certificate
+  # The snapshot bucket's S3 client on every node, as deploy/k8s/components/snapshots sets it
+  # (with the scheme in the endpoint: ES 9 deprecates the `protocol` setting). These are static
+  # node settings; the keys are secure settings that only the keystore holds. Compose puts
+  # none there: the restore drill (scripts/restore-drill.sh) adds them for its run and removes
+  # them again (docs/OPERATIONS.md, Rollback and restore).
+  s3.client.default.endpoint: http://s3:8333
+  s3.client.default.path_style_access: "true"
+  s3.client.default.region: us-east-1
 
 x-es-node: &es-node
   image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
@@ -69,6 +79,9 @@ x-es-node: &es-node
     retries: 120
     start_period: 20s
 
+x-pipeline-bucket: &pipeline-bucket people-index
+x-snapshot-bucket: &snapshot-bucket people-index-snapshots
+
 x-pipeline-env: &pipeline-env
   PI_STORE_URL: s3://people-index/
   PI_S3_ENDPOINT: http://s3:8333
@@ -93,6 +106,10 @@ x-pipeline-env: &pipeline-env
   # The binary's defaults; `make compose-e2e` overrides them for the run that must fail.
   PI_INDEX_REPLICAS: ${PI_INDEX_REPLICAS:-1}
   PI_HEALTH_TIMEOUT: ${PI_HEALTH_TIMEOUT:-30m}
+  PI_RETAIN_RUNS: ${PI_RETAIN_RUNS:-3}
+  PI_PUBLISH_MIN_SHARE: ${PI_PUBLISH_MIN_SHARE:-0.9}
+  PI_PUBLISH_MAX_UNRESOLVED: ${PI_PUBLISH_MAX_UNRESOLVED:-0.25}
+  PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS: ${PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS:-false}
   PI_TASK_ATTEMPTS: ${PI_TASK_ATTEMPTS:-3}
   # Per-task memory (docs/OPERATIONS.md, Sizing): about 384 MiB + 128 MiB + 8 x 32 MiB +
   # 32 MiB = 800 MiB, within WORKER_MEMORY / WORKER_CONCURRENCY (2g / 2) and the 1g
@@ -102,6 +119,11 @@ x-pipeline-env: &pipeline-env
   PI_SEGMENT_TARGET_BYTES: ${PI_SEGMENT_TARGET_BYTES:-32MiB}
   PI_METRICS_ADDR: 0.0.0.0:9464
   PI_LOG_FORMAT: ${PI_LOG_FORMAT:-json}
+  # Feed schema and index mapping files (docs/OPERATIONS.md, Feed schema). Empty means the
+  # built-in ones. Paths inside the containers: mount the files first (an example is in that
+  # section), the same for the coordinator and every worker.
+  PI_SCHEMA_FILE: ${PI_SCHEMA_FILE:-}
+  PI_MAPPING_FILE: ${PI_MAPPING_FILE:-}
   RUST_LOG: ${RUST_LOG:-info}
 
 x-pipeline: &pipeline
@@ -193,6 +215,7 @@ services:
       ES_NODES: "3"
       ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-elastic-dev-password}
       PIPELINE_ES_PASSWORD: ${PIPELINE_ES_PASSWORD:-pipeline-dev-password}
+      READER_ES_PASSWORD: ${READER_ES_PASSWORD:-reader-dev-password}
       PI_ALIAS: ${PI_ALIAS:-persons}
     volumes:
       - ./scripts:/scripts:ro
@@ -202,17 +225,22 @@ services:
   s3:
     image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
     hostname: s3
-    # One process runs master, volume, filer and the S3 gateway; the image's entrypoint adds
-    # -dir=/data and drops to the seaweed user. AWS_* in the environment become the admin
-    # identity, so the gateway and the pipeline share one secret.
-    command: ["server", "-s3", "-s3.port=8333", "-ip.bind=0.0.0.0", "-metricsPort=9327"]
+    # Build an ephemeral gateway config with separate bucket-scoped identities.
+    user: "1000:1000"
+    tmpfs: ["/config:uid=1000,gid=1000,mode=0700"]
+    entrypoint: ["/bin/sh", "-c", "sh /scripts/identity-config.sh && exec /entrypoint.sh server -s3 -s3.config=/config/s3.json -s3.port=8333 -ip.bind=0.0.0.0 -metricsPort=9327"]
     environment:
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-people-index-dev}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
+      PIPELINE_BUCKET: *pipeline-bucket
+      SNAPSHOT_BUCKET: *snapshot-bucket
+      PIPELINE_KEY: ${S3_ACCESS_KEY_ID:-people-index-dev}
+      PIPELINE_SECRET: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
+      SNAPSHOT_KEY: ${SNAPSHOT_S3_ACCESS_KEY_ID:-snapshots-dev}
+      SNAPSHOT_SECRET: ${SNAPSHOT_S3_SECRET_ACCESS_KEY:-snapshots-dev-secret}
     ports:
       - "127.0.0.1:${S3_PORT:-8333}:8333"
     volumes:
       - s3-data:/data
+      - ./../k8s/base/s3/identity-config.sh:/scripts/identity-config.sh:ro
     restart: unless-stopped
     logging: *logging
     healthcheck:
@@ -229,7 +257,10 @@ services:
       s3: { condition: service_healthy }
     environment:
       S3_ENDPOINT: http://s3:8333
-      S3_BUCKET: people-index
+      S3_BUCKET: *pipeline-bucket
+      SNAPSHOT_BUCKET: *snapshot-bucket
+      SNAPSHOT_KEY: ${SNAPSHOT_S3_ACCESS_KEY_ID:-snapshots-dev}
+      SNAPSHOT_SECRET: ${SNAPSHOT_S3_SECRET_ACCESS_KEY:-snapshots-dev-secret}
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-people-index-dev}
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-people-index-dev-secret}
       AWS_REGION: us-east-1

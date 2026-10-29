@@ -2,13 +2,20 @@
 //!
 //! Settings every participant must agree on (the partition count, the index name, the alias)
 //! are fixed once by `plan` and read back from `plan.json`; everything here may differ between
-//! processes without changing the result, only its speed and memory.
+//! processes, except the feed schema and the index mapping, which `plan.json` pins by digest
+//! and every task checks ([`crate::Plan::load_for`]); publish bounds control whether a
+//! completed run may replace the alias.
 
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use pi_es::{BulkConfig, Codec, EsConfig, HealthStatus};
+use pi_model::FeedSchema;
 use pi_segment::SegmentConfig;
 use pi_store::Store;
+use serde_json::Value;
+
+use crate::plan_file::SchemaPin;
 
 /// Default `partition_target_bytes`: input bytes per partition (`PI_PARTITION_TARGET_BYTES`).
 pub const DEFAULT_PARTITION_TARGET_BYTES: u64 = 256 << 20;
@@ -32,6 +39,11 @@ pub const DEFAULT_LOAD_BUFFER_BULKS: usize = 2;
 /// Room left in a bulk request for the action line next to the largest document.
 const BULK_ACTION_ROOM: usize = 4 << 10;
 
+/// The built-in schema and mapping, shared by every default configuration.
+static BUILTIN_SCHEMA: LazyLock<Arc<FeedSchema>> =
+    LazyLock::new(|| Arc::new(FeedSchema::default()));
+static BUILTIN_MAPPING: LazyLock<Arc<Value>> = LazyLock::new(|| Arc::new(pi_es::mapping()));
+
 /// Everything the Elasticsearch stages (`prepare-index`, `load`, `publish`) need.
 #[derive(Debug, Clone)]
 pub struct EsStageConfig {
@@ -49,6 +61,13 @@ pub struct EsStageConfig {
     pub wait_for: HealthStatus,
     /// How long `publish` waits for that health.
     pub health_timeout: Duration,
+    /// Number of published runs whose segments are retained; zero disables cleanup.
+    pub retain_runs: usize,
+    /// Clock skew allowance for retention lease checks.
+    pub lease_clock_skew: Duration,
+    pub publish_min_share: f64,
+    pub publish_max_unresolved: f64,
+    pub publish_allow_empty_organizations: bool,
 }
 
 impl Default for EsStageConfig {
@@ -61,6 +80,11 @@ impl Default for EsStageConfig {
             codec: Codec::BestCompression,
             wait_for: HealthStatus::Green,
             health_timeout: Duration::from_secs(30 * 60),
+            retain_runs: 3,
+            lease_clock_skew: pi_coord::LeaseConfig::new(Duration::from_secs(60)).clock_skew,
+            publish_min_share: 0.9,
+            publish_max_unresolved: 0.25,
+            publish_allow_empty_organizations: false,
         }
     }
 }
@@ -70,6 +94,10 @@ impl Default for EsStageConfig {
 pub struct StagesConfig {
     /// The alias `publish` moves; the index is `<alias>-<run_id>` (`PI_ALIAS`).
     pub alias: String,
+    /// Selected delivery, recorded in the plan.
+    pub delivery: Option<String>,
+    /// Require the supplier completion marker.
+    pub require_complete_marker: bool,
     /// Input bytes per partition (`PI_PARTITION_TARGET_BYTES`).
     pub partition_target_bytes: u64,
     /// The fewest partitions (`PI_MIN_PARTITIONS`), rounded up to a power of two.
@@ -98,8 +126,16 @@ pub struct StagesConfig {
     /// document larger than the buffer still passes, alone.
     pub load_buffer_bytes: Option<usize>,
     /// Where the inputs live when not under `raw/` in the run's store (`PI_INPUT_URL`). The
-    /// run layout must then be built with `with_input_root("")`.
+    /// run layout uses `with_input_root("")`, or the delivery name when one is selected.
     pub input_store: Option<Store>,
+    /// The names the extract stages and the document builder read (`PI_SCHEMA_FILE`; the
+    /// built-in schema by default).
+    pub schema: Arc<FeedSchema>,
+    /// The `mappings` body `prepare-index` creates the index with (`PI_MAPPING_FILE`; the
+    /// built-in mapping by default). [`StagesConfig::validate`] checks it against `schema`.
+    pub mapping: Arc<Value>,
+    /// Description of the configured mapping source for diagnostics.
+    pub mapping_source: String,
     /// The Elasticsearch stages.
     pub es: EsStageConfig,
 }
@@ -108,6 +144,8 @@ impl Default for StagesConfig {
     fn default() -> Self {
         Self {
             alias: "persons".to_owned(),
+            delivery: None,
+            require_complete_marker: false,
             partition_target_bytes: DEFAULT_PARTITION_TARGET_BYTES,
             min_partitions: DEFAULT_MIN_PARTITIONS,
             max_malformed: DEFAULT_MAX_MALFORMED,
@@ -119,6 +157,9 @@ impl Default for StagesConfig {
             max_document_bytes: pi_model::DEFAULT_MAX_DOCUMENT_BYTES,
             load_buffer_bytes: None,
             input_store: None,
+            schema: Arc::clone(&BUILTIN_SCHEMA),
+            mapping: Arc::clone(&BUILTIN_MAPPING),
+            mapping_source: "built-in mapping".into(),
             es: EsStageConfig::default(),
         }
     }
@@ -158,7 +199,22 @@ impl StagesConfig {
             self.load_buffer_bytes != Some(0),
             "load_buffer_bytes must be positive"
         );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.es.publish_min_share),
+            "publish_min_share must be between 0 and 1"
+        );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.es.publish_max_unresolved),
+            "publish_max_unresolved must be between 0 and 1"
+        );
+        pi_es::check_mapping(&self.mapping, &self.schema)?;
         Ok(())
+    }
+
+    /// The digests of the feed schema and the mapping, which `plan.json` pins.
+    #[must_use]
+    pub fn schema_pin(&self) -> SchemaPin {
+        SchemaPin::of(&self.schema, &self.mapping)
     }
 
     /// The document size limit `assemble` applies: the configured one, but never more than
@@ -216,6 +272,109 @@ mod tests {
         cfg.validate().unwrap();
         cfg.load_buffer_bytes = Some(0);
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn publish_bounds_validate_endpoints_and_reject_invalid_values() {
+        for (value, valid) in [
+            (f64::NAN, false),
+            (-0.1, false),
+            (1.1, false),
+            (0.0, true),
+            (1.0, true),
+        ] {
+            for min in [true, false] {
+                let mut cfg = StagesConfig::default();
+                if min {
+                    cfg.es.publish_min_share = value;
+                } else {
+                    cfg.es.publish_max_unresolved = value;
+                }
+                assert_eq!(cfg.validate().is_ok(), valid);
+            }
+        }
+    }
+
+    #[test]
+    fn a_mapping_that_does_not_fit_the_schema_is_refused() {
+        let mut cfg = StagesConfig::default();
+        assert!(cfg.schema.is_builtin());
+        assert_eq!(cfg.schema_pin(), SchemaPin::builtin());
+        let mut mapping = pi_es::mapping();
+        mapping["properties"]["nickname"] = serde_json::json!({"type": "keyword"});
+        cfg.mapping = Arc::new(mapping);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("nickname (keyword) is mapped"), "{err}");
+        assert_ne!(cfg.schema_pin(), SchemaPin::builtin());
+    }
+
+    #[test]
+    fn keyword_limits_resolve_multifields_and_copy_targets() {
+        let cfg = StagesConfig::default();
+        let mut mapping = (*cfg.mapping).clone();
+        mapping["properties"]["full_name"] =
+            serde_json::json!({"type":"keyword", "ignore_above": 200});
+        let schema = cfg.schema.with_index_limits(&mapping);
+        let limit = |name: &str| {
+            schema
+                .person_fields()
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .keyword_limit
+        };
+        assert_eq!(limit("first_name"), Some(200));
+        assert_eq!(limit("skills"), Some(512));
+        let field_limit = |fields: &[pi_model::FieldShape], name: &str| {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .keyword_limit
+        };
+        assert_eq!(field_limit(schema.reference_fields(), "title"), Some(1024));
+        assert_eq!(
+            field_limit(schema.reference_fields(), "location"),
+            Some(8191)
+        );
+        assert_eq!(
+            field_limit(schema.organization_fields(), "name"),
+            Some(1024)
+        );
+        assert_eq!(
+            field_limit(schema.organization_fields(), "keywords"),
+            Some(512)
+        );
+        let line = serde_json::json!({"id": 1, "record": {"name": "x".repeat(1025)}}).to_string();
+        let (_, stats) =
+            pi_model::parse_org_line_with(&schema, line.as_bytes(), pi_model::Seq::default(), true)
+                .unwrap();
+        assert_eq!(stats.ignored_by_index, 1);
+        mapping["properties"]["first_name"]["copy_to"] =
+            serde_json::json!(["full_name", "country"]);
+        mapping["properties"]["country"]["ignore_above"] = serde_json::json!(100);
+        let array_schema = cfg.schema.with_index_limits(&mapping);
+        assert_eq!(
+            field_limit(array_schema.person_fields(), "first_name"),
+            Some(100)
+        );
+        mapping["properties"]["id"]["fields"] =
+            serde_json::json!({"keyword": {"type": "keyword", "ignore_above": 3}});
+        let number_schema = cfg.schema.with_index_limits(&mapping);
+        assert_eq!(field_limit(number_schema.person_fields(), "id"), Some(3));
+        let line = br#"{"id": 1, "record": {"id": 1234}}"#;
+        let (_, stats) =
+            pi_model::parse_person_line_with(&number_schema, line, pi_model::Seq::default(), true)
+                .unwrap();
+        assert_eq!(stats.ignored_by_index, 1);
+        let renamed = pi_model::FeedSchema::from_json(
+            r#"{"person":{"references":"jobs","fields":[{"name":"jobs","kind":"object_array"}]}}"#,
+        )
+        .unwrap();
+        mapping["properties"]["jobs"] = mapping["properties"]["roles"].clone();
+        let renamed = renamed.with_index_limits(&mapping);
+        assert_eq!(field_limit(renamed.reference_fields(), "title"), Some(1024));
+        assert_eq!(schema.to_json(), cfg.schema.to_json());
     }
 
     #[test]

@@ -321,6 +321,7 @@ fn published(docs: u64) -> Published {
     Published {
         index: "persons-r2".into(),
         docs,
+        builtin_names: true,
     }
 }
 
@@ -358,6 +359,26 @@ async fn verify_published_passes_when_the_alias_serves_the_run() {
         json!({"name": "count", "expected": 100, "actual": 100})
     );
     assert_eq!(printed["checks"][2]["at_least"], true);
+}
+
+#[tokio::test]
+async fn verify_published_leaves_out_the_name_samples_for_another_schema() {
+    let server = MockServer::start().await;
+    mount_alias(&server, &["persons-r2"]).await;
+    // No document matches the names: with the built-in names that would fail.
+    mount_published(&server, 100, 0).await;
+    let report = Verifier::new(IndexAdmin::new(client(&server)))
+        .verify_published(
+            "persons",
+            &Published {
+                builtin_names: false,
+                ..published(100)
+            },
+        )
+        .await
+        .expect("verified");
+    assert!(report.passed(), "{report:?}");
+    assert_eq!(check_names(&report), ["count", "sample:ids"]);
 }
 
 #[tokio::test]

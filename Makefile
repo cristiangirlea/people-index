@@ -104,10 +104,15 @@ check: ## Run what CI runs: fmt, clippy, tests, deploy manifests, scrub, file mo
 	bash scripts/check-deploy.sh
 	bash scripts/scrub-check.sh
 	bash scripts/test-scrub-check.sh
+	bash scripts/test-release-notes.sh
 	bash scripts/test-check-republish.sh
+	bash scripts/test-restore-drill.sh
 	bash scripts/test-check-pins-resolve.sh
 	bash scripts/test-check-modes.sh
 	bash scripts/check-modes.sh
+	bash scripts/test-identity-config.sh
+	bash scripts/test-check-schedule.sh
+	bash scripts/test-check-s3-endpoints.sh
 	bash scripts/test-check-s3.sh
 	bash scripts/check-s3.sh
 	@if command -v cargo-deny >/dev/null; then cargo deny check; else echo "cargo-deny not installed; skipped (CI runs it)"; fi
@@ -166,13 +171,16 @@ compose-run: ## Datagen, a full distributed run, then verify
 	$(MAKE) compose-verify
 
 .PHONY: compose-e2e
-compose-e2e: ## A run that fails in publish, compose-run, then a second run that replaces it, verify and the republish checks (CI's e2e)
+compose-e2e: ## A run that fails in publish, compose-run, the restore drill, a second run that replaces it, verify and the republish checks (CI's e2e)
 	@# The failed run loads its index and then cannot publish it: 3 replicas on 3 data nodes
 	@# never reach green. Its id is a minute older than RUN_ID, so the first good publish
 	@# deletes that index as an older run's. The second publish moves the alias off the first
 	@# run's index and deletes it. Both deletes run as the pipeline user: the calls the
 	@# people-index-writer role must allow. check-republish.sh then reads the cluster
 	@# (es-users image: curl, the CA) and the runs' summary.json (s3-init image: aws, jq).
+	@# The restore drill runs on the first run's index: snapshot, lose, restore, re-point the
+	@# alias, then verify the restored index against expected.json; the second publish then
+	@# replaces a restored index, as the next scheduled run does after a rollback.
 	@# MSYS_NO_PATHCONV keeps Git Bash on Windows from rewriting the container path
 	@# /scripts/... into a Windows path; elsewhere it means nothing. The summary verify checks
 	@# the alias against the summary.json of the run it serves (the second one, found from the
@@ -188,11 +196,18 @@ compose-e2e: ## A run that fails in publish, compose-run, then a second run that
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh left $(E2E_FAILED_ID)
 	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)
 	$(MAKE) compose-verify
+	$(MAKE) compose-restore-drill RUN_ID=$(RUN_ID)
+	$(MAKE) compose-verify
 	$(MAKE) compose-pipeline RUN_ID=$(RUN_ID)-2
 	$(MAKE) compose-verify
 	VERIFY_SOURCE=summary $(MAKE) compose-verify
+	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-reader.sh $(RUN_ID)-2
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash es-users /scripts/check-republish.sh es $(RUN_ID) $(RUN_ID)-2 $(E2E_FAILED_ID)
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint bash s3-init /scripts/check-republish.sh summary $(RUN_ID) $(RUN_ID)-2 $(E2E_FAILED_ID)
+
+.PHONY: compose-restore-drill
+compose-restore-drill: ## Snapshot the index the alias serves, lose it, restore it, re-point the alias (RUN_ID=<id> to assert which)
+	bash deploy/compose/scripts/restore-drill.sh $(if $(filter yes,$(RUN_ID_GIVEN)),$(RUN_ID))
 
 .PHONY: compose-scale
 compose-scale: ## Change the worker count of a running run: make compose-scale RUN_ID=<id> WORKERS=6

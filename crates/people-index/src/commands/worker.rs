@@ -14,14 +14,18 @@ use crate::settings::{Stores, concurrency, coordination, retry_policy, stages_co
 /// before the coordinator).
 pub async fn run(args: WorkerArgs, cancel: CancellationToken) -> anyhow::Result<WorkerReport> {
     let stores = Stores::open(&args.store)?;
-    let run_id = match args.run_id.clone() {
-        Some(id) => id,
-        None => wait_for_run(&stores.runs, args.poll_interval, args.idle_timeout, &cancel).await?,
+    let run_id = match (args.run_id.clone(), args.run_id_from_job_name.as_deref()) {
+        (_, Some(name)) => crate::run_id::from_job_name(name)?,
+        (Some(id), None) => id,
+        (None, None) => {
+            wait_for_run(&stores.runs, args.poll_interval, args.idle_timeout, &cancel).await?
+        }
     };
     let ctx = stores.context(&run_id, cancel)?;
     let registry = Arc::new(pi_stages::build_registry(stages_config(
         &args.pipeline,
         &args.es,
+        &args.exec,
         &stores,
     )?)?);
     let coord = coordination(&args.exec);

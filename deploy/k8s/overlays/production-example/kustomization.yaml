@@ -17,10 +17,38 @@
 #   vm.max_map_count >= 1048576, set in the node image or by node tuning, not by a privileged
 #   init container.
 #
+# Snapshot bucket: patch SNAPSHOT_BUCKET on Job snapshot-bootstrap for your external bucket.
+# Provision it separately with versioning and object lock in governance mode (docs/OPERATIONS.md, Snapshot storage), and
+# grant only its snapshot identity access; this example does not provision storage.
+#
 # Credentials: the env files in secrets/ (git-ignored) feed the generators below. In a real
 # cluster prefer an operator-managed source (External Secrets, Sealed Secrets) that creates the
 # same Secret names, and IAM roles for service accounts instead of S3 keys where the cloud
 # offers them.
+# Consumer access is not enabled here. To bring your own HTTP certificate, create a Secret
+# in this namespace with tls.crt, tls.key and ca.crt (the CA chain); its certificate must cover
+# `es-es-http` and `es-es-http.people-index.svc` (used by PI_ES_URL, the exporter and
+# snapshot bootstrap), plus the consumer hostname. The Secret needs ca.crt: jobs/run.yaml
+# and jobs/verify.yaml mount that item from es-es-http-certs-public. Prefer a private CA for
+# the ECK certificate, or keep ECK's certificate inside and terminate public TLS at the
+# ingress, re-encrypting to the backend while trusting ECK's CA. Add this patch after creating
+# the Secret:
+#   - target:
+#       group: elasticsearch.k8s.elastic.co
+#       version: v1
+#       kind: Elasticsearch
+#       name: es
+#     patch: |-
+#       - op: add
+#         path: /spec/http
+#         value:
+#           tls:
+#             certificate:
+#               secretName: es-http-certificate
+# Expose es-es-http:9200 through a suitably restricted Service or an ingress with TLS to the
+# backend. Configure DNS and certificates for the chosen hostname, and add a NetworkPolicy
+# admitting TCP 9200 from the consumer or ingress controller: the base policy defaults to deny.
+# Limit sources and require authentication; distribute the CA to clients.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Set here as well as in base: base's transformers do not reach what components add.
@@ -58,6 +86,9 @@ secretGenerator:
   - name: s3-credentials
     envs:
       - secrets/s3.env
+  - name: snapshot-s3-credentials
+    envs:
+      - secrets/snapshot-s3.env
 
 patches:
   # No in-cluster object store: remove it, its bucket Job and the policies that admit traffic
@@ -147,3 +178,7 @@ patches:
       kind: Elasticsearch
       name: es
     path: elasticsearch-patch.yaml
+  - target:
+      kind: Job
+      name: snapshot-bootstrap
+    path: snapshot-bucket-patch.yaml

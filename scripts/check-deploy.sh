@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Validates the deployment without a cluster:
 #   - every image in the Dockerfile (its `# syntax=` frontend included), deploy/compose,
-#     deploy/k3d, the CI workflow's `docker run` lines, the ECK operator manifest (as pinned
+#     deploy/k3d, the workflows' `docker run` lines, the ECK operator manifest (as pinned
 #     by deploy/k8s/eck/pin-operator.sh from deploy/k8s/eck/operator-image), deploy/k8s
 #     (rendered) and the Job templates is pinned as name:tag@sha256:<digest>
 #     (people-index:local and the Job templates' ${IMAGE} excepted), and the Dockerfile's rust
@@ -13,11 +13,16 @@
 #   - those ECK files (operator.yaml pinned), base and every overlay (rendered with kustomize)
 #     pass kubeconform -strict against the Kubernetes schemas and, for custom resources (ECK,
 #     prometheus-operator), the datreeio CRDs-catalog schemas at a pinned commit;
+#   - every rendered Elasticsearch S3 client endpoint carries its scheme (http:// or https://)
+#     and no s3.client.*.protocol is set, which Elasticsearch 9 deprecates (requires PyYAML);
+#   - the schedule component renders with every overlay, passes the same check, and matches
+#     the local coordinator pod security, environment names and storage (requires PyYAML);
 #   - the run, datagen and verify Job templates render for every overlay and pass the same
 #     check;
 #   - deploy/k3d/cluster.yaml passes k3d's own config schema;
 #   - the shell scripts parse (and pass shellcheck when it is installed);
-#   - deploy/compose/compose.yaml, when present, passes `docker compose config -q`.
+#   - deploy/compose/compose.yaml, when present, passes `docker compose config -q`;
+#   - Prometheus alert rules pass promtool tests in a pinned container (requires Docker).
 #
 # Overlays are rendered from a temporary copy in which missing credential env files are filled
 # from their *.env.example, so the check never needs (or writes) real secrets.
@@ -25,6 +30,9 @@
 # kubeconform v0.8.0 is used from PATH, or downloaded once to
 # ${XDG_CACHE_HOME:-$HOME/.cache}/people-index/ and checked against its pinned SHA-256.
 set -euo pipefail
+
+if command -v python3 >/dev/null 2>&1; then python=python3; else python=python; fi
+"$python" -c "import yaml" 2>/dev/null || { echo "check-deploy needs PyYAML (python3-yaml)" >&2; exit 1; }
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/people-index"
@@ -181,10 +189,12 @@ while read -r ref; do
   check_ref deploy/k3d/cluster.yaml "$ref"
 done < <(sed -nE 's/^image:[[:space:]]*([^[:space:]#]+).*/\1/p' "$root/deploy/k3d/cluster.yaml")
 # In `docker run` lines, every word that looks like name:tag or name@digest.
-while read -r ref; do
-  check_ref .github/workflows/ci.yml "$ref"
-done < <(sed -nE 's/^[[:space:]]*(run:[[:space:]]*)?docker run( .*)/\2/p' "$root/.github/workflows/ci.yml" |
-  grep -oE '[[:space:]][a-z0-9][a-z0-9._/-]*[:@][^[:space:]]*' | sed -E 's/^[[:space:]]+//')
+for workflow in "$root"/.github/workflows/*.yml; do
+  while read -r ref; do
+    check_ref ".github/workflows/${workflow##*/}" "$ref"
+  done < <(sed -nE 's/^[[:space:]]*(run:[[:space:]]*)?docker run( .*)/\2/p' "$workflow" |
+    grep -oE '[[:space:]][a-z0-9][a-z0-9._/-]*[:@][^[:space:]]*' | sed -E 's/^[[:space:]]+//')
+done
 report_unpinned
 docker_rust="$(sed -nE 's/^FROM rust:([0-9][0-9.]*)-.*/\1/p' "$root/Dockerfile")"
 ci_rust="$(sed -nE 's/^[[:space:]]*RUST_TOOLCHAIN:[[:space:]]*"?([0-9][0-9.]*)"?.*/\1/p' \
@@ -275,6 +285,30 @@ for dir in base "${overlays[@]}"; do
   step "kustomize $dir"
   kustomize_build "$work/k8s/$dir" >"$work/rendered.yaml" || fail "kustomize failed for deploy/k8s/$dir"
   validate <"$work/rendered.yaml" || fail "deploy/k8s/$dir does not validate"
+  # Kustomize emits nodeSets as a block sequence. Require the guard in each set of
+  # every Elasticsearch resource, including overlays that replace or add a node set.
+  awk '
+    function finish_set() { if (in_set && !guard) bad = 1; in_set = 0 }
+    function finish_resource() {
+      finish_set()
+      if (es && sets == 0) bad = 1
+    }
+    /^---/ { finish_resource(); es = 0; nodes = 0; sets = 0 }
+    /^kind: Elasticsearch$/ { es = 1; resources++ }
+    es && /^  nodeSets:$/ { nodes = 1; next }
+    es && nodes && /^  [^ -]/ { finish_set(); nodes = 0 }
+    es && nodes && /^  - / { finish_set(); in_set = 1; guard = 0; sets++ }
+    es && nodes && in_set && /^      action\.auto_create_index: / {
+      value = $0; sub(/^      action\.auto_create_index: /, "", value)
+      gsub(/["\047]/, "", value)
+      if (value == "-persons-*,+*") guard = 1
+    }
+    END { finish_resource(); if (!resources || bad) exit 1 }
+  ' "$work/rendered.yaml" ||
+    fail "deploy/k8s/$dir: every Elasticsearch node set must set action.auto_create_index to -persons-*,+*"
+  # Elasticsearch 9 deprecates s3.client.*.protocol: every S3 client endpoint carries its scheme.
+  "$python" "$root/scripts/check-s3-endpoints.py" "$work/rendered.yaml" ||
+    fail "deploy/k8s/$dir: S3 client settings must put the scheme in the endpoint, without protocol"
   while read -r ref; do
     check_ref "deploy/k8s/$dir" "$ref"
     # Dependabot bumps compose and the manifests in separate pull requests; keep them equal.
@@ -284,6 +318,25 @@ for dir in base "${overlays[@]}"; do
     fi
   done < <(yaml_images <"$work/rendered.yaml")
   report_unpinned
+  # Local overlays render the identity generator, both bucket initializers and bootstrap.
+  # Compare their actual rendered env values, so an overlay cannot silently split them.
+  if [[ "$dir" == overlays/local ]]; then
+    bucket_values="$(awk '
+      /^[[:space:]]*- name: (PIPELINE_BUCKET|SNAPSHOT_BUCKET|S3_BUCKET)$/ { name=$3; next }
+      name && /^[[:space:]]*value: / { print name, $2; name=""; next }
+      name && /^[[:space:]]*- name:/ { name="" }
+    ' "$work/rendered.yaml")"
+    pipeline="$(awk '$1 == "PIPELINE_BUCKET" {print $2}' <<<"$bucket_values")"
+    snapshots="$(awk '$1 == "SNAPSHOT_BUCKET" {print $2}' <<<"$bucket_values")"
+    initializers="$(awk '$1 == "S3_BUCKET" {print $2}' <<<"$bucket_values" | sort)"
+    [[ -n "$pipeline" && $(wc -l <<<"$snapshots") -eq 2 ]] || fail "local bucket environment is incomplete"
+    store_url="$(awk '$1 == "PI_STORE_URL:" {print $2}' "$work/rendered.yaml")"
+    [[ "$store_url" == "s3://$pipeline/"* ]] || fail "local pipeline store URL and bucket name disagree"
+    snapshot="$(head -n 1 <<<"$snapshots")"
+    [[ -n "$snapshot" && "$snapshots" == "$snapshot"$'\n'"$snapshot" && "$pipeline" != "$snapshot" &&
+       "$initializers" == "$(printf '%s\n%s\n' "$pipeline" "$snapshot" | sort)" ]] ||
+      fail "local identity, bucket-init and bootstrap bucket names disagree"
+  fi
   # ECK acts on spec.version, the pods run spec.image: the image tag must be that version.
   es_spec="$(awk '/^---/ { es = 0 } /^kind: Elasticsearch$/ { es = 1 }
     es && /^  (version|image):/ { print $1, $2 }' "$work/rendered.yaml")"
@@ -294,6 +347,28 @@ for dir in base "${overlays[@]}"; do
     es_tag="${es_tag##*:}"
     [[ "$es_tag" == "$es_version" ]] ||
       fail "deploy/k8s/$dir: Elasticsearch spec.version '$es_version' but spec.image '$es_image': make them equal"
+  fi
+done
+
+# Validate the optional schedule with each overlay without changing the checked-in overlays.
+for dir in "${overlays[@]}"; do
+  mkdir -p "$work/k8s/schedule-wrapper"
+  cat >"$work/k8s/schedule-wrapper/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../$dir
+components:
+  - ../components/schedule
+EOF
+  step "kustomize $dir with schedule"
+  kustomize_build "$work/k8s/schedule-wrapper" >"$work/scheduled.yaml" || fail "schedule does not render for $dir"
+  validate <"$work/scheduled.yaml" || fail "schedule does not validate for $dir"
+  while read -r ref; do check_ref "schedule $dir" "$ref"; done < <(yaml_images <"$work/scheduled.yaml")
+  report_unpinned
+  if [[ "$dir" == overlays/local ]]; then
+    RUN_ID=check JOB_ID=check bash "$work/k8s/jobs/render.sh" run --overlay local >"$work/run.yaml"
+    "$python" "$root/scripts/check-schedule-pod.py" "$work/run.yaml" "$work/scheduled.yaml" || fail "schedule pod differs from the coordinator"
   fi
 done
 
@@ -335,11 +410,12 @@ scripts=(
   "$root/deploy/k8s/eck/pin-operator.sh"
   "$root/deploy/k8s/jobs/render.sh"
   "$root/deploy/k8s/base/s3/bucket-init.sh"
+  "$root/deploy/k8s/base/s3/identity-config.sh"
   "$root/deploy/k8s/components/snapshots/bootstrap.sh"
 )
 for script in "${scripts[@]}"; do
   case "$script" in
-    */bucket-init.sh | */bootstrap.sh) sh -n "$script" ;;
+    */bucket-init.sh | */identity-config.sh | */bootstrap.sh) sh -n "$script" ;;
     *) bash -n "$script" ;;
   esac || fail "$script does not parse"
 done
@@ -350,12 +426,60 @@ else
   step "shell scripts parse (shellcheck not installed; skipped)"
 fi
 
+# Test the actual PrometheusRule groups with the same pinned Prometheus image as compose.
+step "Prometheus rule unit tests"
+mkdir -p "$work/promtool"
+printf 'groups:\n' >"$work/promtool/rules.yaml"
+sed '1,/^  groups:/d; s/^    /  /' "$root/deploy/k8s/components/monitoring/prometheusrule.yaml" >>"$work/promtool/rules.yaml"
+cp "$root/deploy/k8s/components/monitoring/tests/rules.test.yaml" "$work/promtool/"
+prometheus_image="$(yaml_images <"$root/deploy/compose/compose.yaml" | grep '^prom/prometheus:')"
+promtool_dir="$work/promtool"
+if command -v cygpath >/dev/null 2>&1; then promtool_dir="$(cygpath -m "$promtool_dir")"; fi
+MSYS_NO_PATHCONV=1 docker run --rm --entrypoint promtool -v "$promtool_dir:/tests" "$prometheus_image" test rules /tests/rules.test.yaml ||
+  fail "Prometheus rule unit tests failed"
+
 # 7. Compose, when it exists.
 compose="$root/deploy/compose/compose.yaml"
 if [[ -f "$compose" ]]; then
   command -v docker >/dev/null 2>&1 || fail "$compose exists but docker is not installed"
   step "docker compose config"
-  docker compose -f "$compose" config -q || fail "$compose does not validate"
+  python="$(command -v python3 || command -v python)" || fail "needs python3 or python for compose bucket checks"
+  docker compose -f "$compose" config --format json >"$work/compose.json" || fail "$compose does not validate"
+  "$python" - "$work/compose.json" <<'PY' || fail "compose bucket names disagree"
+import copy, json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    services = json.load(f)["services"]
+def agrees(services):
+    s3 = services["s3"]["environment"]
+    init = services["s3-init"]["environment"]
+    pipeline = s3["PIPELINE_BUCKET"]
+    snapshot = s3["SNAPSHOT_BUCKET"]
+    return (pipeline != snapshot and init["S3_BUCKET"] == pipeline
+            and init["SNAPSHOT_BUCKET"] == snapshot
+            and all(services[name]["environment"]["PI_STORE_URL"].startswith("s3://" + pipeline + "/")
+                    for name in ("coordinator", "worker")))
+if not agrees(services):
+    sys.exit("rendered compose buckets disagree")
+bad = copy.deepcopy(services)
+bad["s3-init"]["environment"]["S3_BUCKET"] = "different-bucket"
+if agrees(bad):
+    sys.exit("bucket check accepted a mismatch")
+PY
+  "$python" - "$work/compose.json" <<'PY' ||
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    services = json.load(source)["services"]
+alias = services["coordinator"]["environment"]["PI_ALIAS"]
+expected = f"-{alias}-*,+*"
+for name in ("es01", "es02", "es03"):
+    actual = services.get(name, {}).get("environment", {}).get("action.auto_create_index")
+    if actual != expected:
+        print(f"check-deploy: compose {name} action.auto_create_index must be {expected!r}, got {actual!r}", file=sys.stderr)
+        sys.exit(1)
+PY
+    fail "compose Elasticsearch auto-creation guard is missing or incorrect"
 fi
 
 step "ok"

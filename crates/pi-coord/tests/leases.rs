@@ -498,3 +498,61 @@ async fn leases_hold_on_a_real_s3_endpoint() {
     assert!(taken.took_over());
     taken.release().await.unwrap();
 }
+
+#[tokio::test]
+async fn stage_claim_rereads_after_update_race() {
+    let (store, faults) = FlakyStore::with_faults();
+    let manager = manager(&store, "one", 60_000);
+    let old = manager.claim_run("persons", "one").await.unwrap().unwrap();
+    old.release().await.unwrap();
+    faults.race_updates.store(1, Ordering::SeqCst);
+    assert!(matches!(
+        manager.claim_stage_run("persons", "one").await.unwrap(),
+        pi_coord::RunLease::Shared
+    ));
+    assert_eq!(faults.race_updates.load(Ordering::SeqCst), 0);
+    let (lease, _) = store
+        .get_json::<pi_coord::Lease>(&pi_store::alias_lease("persons").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.holder, "another-holder");
+}
+
+#[tokio::test]
+async fn run_claim_recovers_lost_conditional_responses() {
+    for share in [false, true] {
+        for update in [false, true] {
+            let (store, faults) = FlakyStore::with_faults();
+            let manager = manager(&store, "one", 60_000);
+            if update {
+                manager
+                    .claim_run("persons", "one")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .release()
+                    .await
+                    .unwrap();
+            }
+            let fault = if update {
+                &faults.lost_update_responses
+            } else {
+                &faults.lost_create_responses
+            };
+            fault.store(1, Ordering::SeqCst);
+            let guard = if share {
+                match manager.claim_stage_run("persons", "one").await.unwrap() {
+                    pi_coord::RunLease::Held(guard) => guard,
+                    other => panic!("expected held, got {other:?}"),
+                }
+            } else {
+                manager.claim_run("persons", "one").await.unwrap().unwrap()
+            };
+            assert_eq!(fault.load(Ordering::SeqCst), 0);
+            assert!(!guard.is_lost());
+            assert!(!guard.took_over());
+            guard.release().await.unwrap();
+        }
+    }
+}

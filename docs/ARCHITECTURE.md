@@ -8,7 +8,32 @@ Elasticsearch is a multi-node cluster with dedicated master nodes.
 
 This document is the contract between the crates, the deployment and the docs. When code and
 this file disagree, one of them is wrong: fix it in the same change. The reasons behind the
-main choices are in [adr/](adr/).
+main choices are in [adr/](adr/). Which parts of it an integrator can rely on between versions
+is the compatibility policy in [INTEGRATING.md](INTEGRATING.md#compatibility-policy).
+
+## Feed delivery contract
+
+Inputs live under `raw/` in the run store, or directly under `PI_INPUT_URL` when set.
+With `PI_DELIVERY=batch-20261028`, they live under `raw/batch-20261028/` (or
+`<PI_INPUT_URL>/batch-20261028/`): `persons/*.ndjson.gz`,
+`organizations/*.ndjson.gz`, and optionally `expected.json` for synthetic verification.
+Delivery names are slash-separated safe path segments (`[A-Za-z0-9._=-]`, excluding `.`
+and `..`, and the reserved segments `persons` and `organizations` (case-insensitive), at most 128 bytes each). Unset preserves the original layout. Each gzip contains
+NDJSON envelopes as described below. Feed listings are recursive: nested files beneath a feed directory belong to that feed; deliveries cannot be nested under a feed directory.
+
+A supplier writes `_COMPLETE` in the delivery root only after the last feed file is present.
+With `PI_REQUIRE_COMPLETE_MARKER=true`, plan permanently fails naming the missing marker;
+otherwise it is optional. The marker is a readiness signal, not a lock: suppliers must not
+add, remove, or overwrite files after marking a delivery complete, or while a run is planning
+or reading it. Use a new delivery for replacements. The plan pins listed input versions and
+extract fails if an input changes; it cannot detect files added after listing. A resumed run
+uses its existing plan and selected delivery.
+
+Unknown top-level record keys are retained in `_source` but `dynamic: false` does not index
+them. Each extract commit counts `fields_not_indexed` per kept record key, after duplicate-key
+reduction and before ID deduplication; the stage summaries sum these counts. Mapped disabled
+objects and builder-owned fields are not unknown. The first five distinct unknown names per
+task are logged without values. Nested unknown keys are not counted.
 
 ## The data
 
@@ -43,6 +68,60 @@ is not an object, or any other `organization_id` makes the line malformed (kind 
 Unknown fields are carried through untouched (the record is kept as raw JSON; only the fields
 the join needs are parsed).
 
+### Feed schema
+
+The names above (`id` and `record` in the envelope, `roles[].organization_id`, and the checked
+fields below) are the built-in feed schema. A feed with other names is described by a schema
+file (`PI_SCHEMA_FILE`) and an index mapping with the same names (`PI_MAPPING_FILE`); both unset
+means the built-in ones, so a deployment that sets neither behaves exactly as before. The
+schema file is a JSON object with optional keys `envelope.{id, record}`,
+`person.{references, reference_id, fields, reference_fields, disabled}` and
+`organization.{fields, disabled}`; a field table is a list of `{"name", "kind"}` (kinds
+`number`, `boolean`, `lenient_long`, `lenient_integer`, `lenient_boolean`, `string`,
+`string_array`, `object_array`, the `JsonKind`s below), a `disabled` list a list of names. A key
+left out keeps its built-in value; a table given replaces the built-in one whole. Everywhere in
+this document, `roles` and `organization_id` stand for `person.references` and
+`person.reference_id`. [OPERATIONS.md](OPERATIONS.md), "Feed schema", has a complete example.
+
+- `pi-model` resolves the file once into a `FeedSchema` (`FeedSchema::from_json`), strictly:
+  unknown keys, a section or entry that is not an object, empty names, a field name with a `.`,
+  `id` equal to `record`, a name listed twice in one object's tables (`fields` and `disabled`
+  together), a references field missing from `person.fields` or not the one `object_array`,
+  the organization id listed in `person.reference_fields` as anything but `number` or `string`,
+  and the names the builder writes (`organizations`, `unresolved_organization_ids` on the
+  person, `organization_resolved` in a reference) are refused, the error naming the file and
+  the field (`person.fields[2].name: ...`). The built-in schema is a static that borrows the
+  compiled tables; parsing a line compares keys against the schema's strings as it did against
+  the literals, with no lookup by name and no allocation per record.
+- At startup (`run`, `worker`, `stage`) `pi-es` checks the mapping against the schema
+  (`check_mapping`) and refuses to start when they disagree, listing every problem: `dynamic`
+  must be `false`; every field Elasticsearch parses (not disabled, not builder-owned) must be in
+  a table with a kind its type takes, and every table entry mapped; every `long`, `integer` and
+  `date` field must have `ignore_malformed: true`, whatever its kind (an id above `i64::MAX`, a
+  value past `i32` or text no date format reads would otherwise fail the document and the
+  load); every `keyword` with an index or doc values, including multi-fields, needs an integer `ignore_above`
+  at most 8191 (keywords with `index: false` and `doc_values: false`, and fields inside disabled objects, are exempt); text fields and text multi-fields may specify only `standard`, `simple`, `whitespace` or
+  `english` for `analyzer`, `search_analyzer` and `search_quote_analyzer` (or omit them),
+  so an analyzer cannot emit immense terms; the `enabled: false`
+  fields must be exactly the `disabled` lists; the builder's three
+  fields must be mapped as `object`, `long` with `ignore_malformed: true`, and `boolean`. Types
+  without a rule (`nested`, `float`, ...) are refused. Multi-fields (`fields`) must take what
+  their field lets through (`text`, `keyword`, or a number, date or boolean type with
+  `ignore_malformed: true`), and `copy_to` targets must be `text` or `keyword`. Fields of
+  one's own can be added to the mapping and the tables when they hold scalars; one that holds
+  an object (other than the references) is never indexed: on the person or the organization it
+  is mapped `enabled: false` and listed under `person.disabled` or `organization.disabled`,
+  inside a reference it is left out of the mapping. It stays in `_source` either way.
+- `plan` records the SHA-256 of both, as canonical JSON (keys sorted, no whitespace), in
+  `plan.json` (`schema`, under "Storage layout"), and every task checks it before it starts: a
+  resumed run, a worker or a `stage` command with another schema or mapping fails the run
+  permanently, naming the setting that differs. A plan without `schema` used the built-in ones.
+- Only the input names are configurable. The output's own names (`organizations`,
+  `unresolved_organization_ids`, `organization_resolved`), the counter and summary names
+  (`roles_resolved`, `resolved_roles`, ...) and `datagen`'s feeds (and so `verify --source
+  expected`) stay built-in; `verify --source summary` leaves out its two samples that query the
+  built-in mapping's fields for a run with another schema or mapping.
+
 **A number token longer than 1000 characters** (as written: sign, digits, `.`, exponent)
 anywhere in the record, mapped, unknown or inside a disabled object, makes the line malformed
 (kind `record`, the reason names the path, as in `addresses[2].zip: a number of 1001
@@ -68,12 +147,26 @@ byte. Such a record is kept, not malformed, and counted
 in the extract counter `records_with_repeated_keys` (per extracted line, like
 `values_ignored_by_index`).
 
+Date fields contribute to `values_ignored_by_index` for the built-in format
+`strict_date_optional_time||strict_year_month||strict_year`, including multi-fields. The
+Elasticsearch default and custom formats are uncounted. A scalar counts once if any applicable
+field ignores it, including a date multi-field, even if another field indexes it. Null is not
+counted; array elements count separately. The observed grammar is in
+[mapping.md](../crates/pi-es/src/mapping.md#date-observations-and-the-extraction-counter).
+
+Keyword values skipped by `ignore_above` are counted in `values_ignored_by_index` per
+input value, once even when multiple keyword fields ignore it. Each array element counts
+separately. Extraction resolves the smallest applicable limit from the mapping, including
+multi-fields and keyword `copy_to` targets, and measures UTF-16 code units. The count is
+per extracted line before deduplication and assembly, so it is not a count of `_ignored` entries.
+
 **Mapped fields must have the JSON kind their mapping expects**, or the record is malformed
 (kind `record`, the reason names the field, as in `roles[2].title: expected a string, number
 or boolean, found an object`): Elasticsearch would reject the document with a mapper error, and one bad record must
 cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELDS`,
-`ROLE_FIELDS`, `ORGANIZATION_FIELDS`), checked by `extract-persons` (the record and every role)
-and `extract-orgs`; a test in `pi-es` keeps it in step with `mapping.json`. Identifiers (`id`,
+`ROLE_FIELDS`, `ORGANIZATION_FIELDS`, or the feed schema's tables), checked by
+`extract-persons` (the record and every role) and `extract-orgs`; `pi-es` checks it against the
+index mapping at startup (`check_mapping`). Identifiers (`id`,
 `roles[].id`, `roles[].organization_id`, the organization's `id`) are strict: a number or a
 string the id rule above accepts (decimal digits within `u64`, so `"007"` passes and `"7a"`,
 `" 7"`, `"-1"` and `""` do not). Measures (`connections`, `followers`, `open_to_work`, `employee_count`,
@@ -82,7 +175,8 @@ of scalars passes. Elasticsearch skips a value it cannot read as the field's typ
 malformed values are not indexed and the field is listed in the document's `_ignored`; the
 record stays searchable by its other fields, and the value stays in `_source`. Extraction keeps
 such a record and counts in the extract counter `values_ignored_by_index` the values
-Elasticsearch skips (not malformed, not against `max_malformed`), following the rules
+Elasticsearch skips (not malformed, not against `max_malformed`),
+following the rules
 Elasticsearch 9.5.5 was observed to apply (`pi-model`'s `es_number`, pinned in its tests):
 - either number type: a boolean is skipped, and so is a string of spaces only; `""` is not;
 - `long` (`connections`, `followers`, `employee_count`): a string must be an exact decimal
@@ -140,7 +234,8 @@ line number), for organizations and for persons alike, whatever the partition or
 The document `_id` is the person id, so a resend is idempotent.
 
 The explicit mapping lives in `crates/pi-es/src/mapping.json` (`dynamic: false`; `roles` and
-`organizations` are `object`, not `nested`), with the reasons in `crates/pi-es/src/mapping.md`.
+`organizations` are `object`, not `nested`), with the reasons in `crates/pi-es/src/mapping.md`;
+`PI_MAPPING_FILE` replaces it for a feed with other names ("Feed schema").
 Term queries on `roles.title.keyword` and `organizations.name.keyword` are part of the
 acceptance check.
 
@@ -152,7 +247,7 @@ once the previous one has committed every task:
 
 | stage | one task per | reads | writes |
 |---|---|---|---|
-| `plan` | run | the input listing | `plan.json`: input files, partition count `P`, index name |
+| `plan` | run | the input listing | `plan.json`: input files, partition count `P`, index name, schema and mapping digests |
 | `extract-orgs` | organization file | `raw/organizations/<file>` | `orgs/p=<p>/` segments of `OrgRow`, quarantine |
 | `extract-persons` | person file | `raw/persons/<file>` | `persons/q=<q>/` `PersonRow`, `edges/p=<p>/` `EdgeRow`, quarantine |
 | `join` | partition `p` | `orgs/p`, `edges/p` | `joined/q=<q>/` segments of `JoinedRow` |
@@ -191,6 +286,9 @@ once the previous one has committed every task:
   output segments differs, and nothing downstream depends on that order. The counter `passes`
   records `k` per task. The estimate is a model, not a measurement: the overheads assume maps
   and vectors up to half empty after growing.
+- `load` checks the run index exists once per task before any bulk request; a missing index
+  permanently fails the task because a resume cannot recreate it. The deployment also blocks
+  auto-creation of run indexes, including if an index disappears after this check.
 - `load` sends byte-bounded bulk requests (`bulk_max_bytes`, default 8 MiB) with
   `senders_per_worker` in flight per task (default 2), retries 429/502/503/504 and transport
   errors with jittered exponential backoff, resends only the failed items, and checks every
@@ -201,14 +299,28 @@ once the previous one has committed every task:
   default `2 × bulk_max_bytes`): each takes its body length from the budget and gives it back
   once it is in a bulk request buffer, and one larger than the whole budget passes alone. A
   load task's memory is about `(senders_per_worker + 1) × bulk_max_bytes + load_buffer_bytes`.
+- Before loading, `prepare-index` reads the new or reused index's settings and mapping. It
+  permanently refuses analysis definitions, similarity settings, explicit index-level mapping
+  coerce, ignore_malformed or ignore_above, source mode other than `stored`, pipelines other
+  than `_none`, and index mode other than `standard`.
+  Every effective mapping key and value must match the startup mapping with run ownership;
+  names under `properties` and `fields` must also match in both directions. Equivalent
+  Elasticsearch response forms and omitted mapping defaults are accepted.
 - `prepare-index` creates `<alias>-<run_id>` (lowercased) with `number_of_replicas: 0`,
   `refresh_interval: -1`, `translog.durability: async`, the codec, and `shards` primaries
-  (default: 2 per data node, read from `_nodes`); an existing index counts as created, so a
-  retry succeeds.
-- `publish` refreshes and flushes while replicas are still 0 (so the complete-shard check covers
-  every copy), checks that the index count equals the sum of `assemble`'s `documents` counters,
+  (default: 2 per data node, read from `_nodes`). Its mapping `_meta.people_index.run_id`
+  records the exact run id. A retry reuses an existing index only when that id matches
+  case-sensitively; a different or missing owner fails the run permanently before loading.
+- `publish` first checks the run's own feed bounds, before contacting Elasticsearch: the
+  unresolved role organization share (no references gives a share of zero) and at least one
+  indexed organization, unless allowed; these are skipped once `publish.json` exists, since an
+  attempt only writes it after they passed. It then refreshes and flushes while replicas are
+  still 0 (so the complete-shard check covers every copy), checks that the index count equals the sum of `assemble`'s `documents` counters,
   then restores replicas (default 1), `refresh_interval: 1s` and request durability, waits for
-  the cluster health (`green` by default), records the indexes the alias points at in
+  the cluster health (`green` by default), rejects a newer serving run, and checks the new
+  count against the sum of the serving indexes (unless the minimum share is zero). A first publish skips the
+  count comparison. A failed bound is permanent and leaves the alias and new index in place.
+  The summary records the counts and configured bounds. Publish then records the indexes in
   `publish.json` (create-if-absent; a later attempt reads the first attempt's list back), moves
   the alias in one `_aliases` request, and deletes the recorded indexes and any others the alias
   pointed at (never the run's own; a 404 counts as deleted). The removes carry
@@ -229,12 +341,18 @@ once the previous one has committed every task:
   runs either). These deletes, and a failed listing (as `<alias>-*`), are reported under
   `deleted` and `not_deleted` like the previous indexes, and are not failures either. The same
   order holds the other way: a publish whose alias points at a newer run's index fails for good
-  before recording or moving anything, so a run resumed after a newer one published (its index
-  deleted, and re-created by `load`'s bulk writes) never takes the alias back. Runs of one alias
+  before recording or moving anything, so a run resumed after a newer one published (whose index may have been deleted) never takes the alias back. Runs of one alias
   must not publish at the same moment: between the listing and the delete, a concurrent publish
   could move the alias onto the index being deleted.
-  Publish then writes `summary.json` and deletes orphaned files (data and quarantine files no
-  commit lists).
+  Publish removes orphaned data and quarantine files no commit lists and writes `summary.json`.
+
+  After a successful alias swap, publish removes stage data for completed stamped runs older than
+  the newest `PI_RETAIN_RUNS` published runs (default 3, including the current run; 0 disables
+  cleanup). Equal boundary stamps, unstamped runs, the current run, and runs with live leases or
+  without published state are left alone. Only stage data directories are removed; plans, state,
+  commits, leases, stage specs, publish records, summaries and quarantine remain. A current run
+  without a stamp skips cleanup. Failed run inspections and failed deletes are logged and counted
+  as `retention_failures` in the summary; a later publish retries.
 
 ## Storage layout
 
@@ -245,6 +363,11 @@ All paths are under one prefix in the object store (`PI_STORE_URL`: `s3://bucket
 raw/organizations/*.ndjson.gz          inputs (or PI_INPUT_URL, a separate prefix)
 raw/persons/*.ndjson.gz
 raw/expected.json                      written by datagen, read by verify
+_run-leases/<alias>.json               conditional coordinator run lease
+raw/<delivery>/organizations/*.ndjson.gz
+raw/<delivery>/persons/*.ndjson.gz
+raw/<delivery>/_COMPLETE              optional readiness marker
+raw/<delivery>/expected.json          synthetic verification
 runs/<run_id>/plan.json
 runs/<run_id>/state.json               RunState: running | published | failed, current stage
 runs/<run_id>/failed.json              the failure marker (create-if-absent)
@@ -255,8 +378,10 @@ runs/<run_id>/<stage>/data/<dataset>/<p|q>=<n>/<task>-<attempt>-<n>.seg
 runs/<run_id>/quarantine/<task>-<attempt>.ndjson
 runs/<run_id>/publish.json             the indexes the alias served before (create-if-absent)
 runs/<run_id>/summary.json             written by publish, read by verify --source summary
-snapshots/                             reserved for Elasticsearch snapshots (k8s component)
 ```
+
+Elasticsearch snapshots use a separate bucket (default `people-index-snapshots`) and credentials;
+the snapshots component stores them under `snapshots/`.
 
 - Datasets: `orgs` and `edges` use the partition key `p`; `persons`, `joined` and `docs` use
   `q`. The partition number is not zero-padded.
@@ -264,9 +389,11 @@ snapshots/                             reserved for Elasticsearch snapshots (k8s
   Run, stage, task and attempt ids are `[A-Za-z0-9._=-]`, at most 128 bytes. Generated run ids
   are `20261015T120000Z-a1b2c3` (UTC start time first, so the greatest id is the newest run);
   `publish` reads that start second to tell older runs' indexes from newer ones.
-- `plan.json`: `{run_id, partitions, alias, index, organizations: [{key, size, version}],
-  persons: [{key, size, version}], total_bytes, created_at}`, written create-if-absent; a retry
-  reads it back. `version` is `{e_tag, version}` as the input listing reported it (the etag
+- `plan.json`: `{run_id, delivery, partitions, alias, index, organizations: [{key, size, version}],
+  persons: [{key, size, version}], total_bytes, schema: {feed_schema_sha256, mapping_sha256},
+  created_at}`, written create-if-absent; a retry reads it back. `schema` pins the feed schema
+  and the index mapping ("Feed schema"); every task refuses a run whose pin differs from its
+  own, and a plan without it means the built-in ones. `version` is `{e_tag, version}` as the input listing reported it (the etag
   always; a version id only where the store reports one). Extract reads each file with
   `If-Match` on that etag (and the version id, if any), so a run reads exactly the bytes it
   planned. The local filesystem's etag is its inode, modification time and size; it checks it
@@ -279,13 +406,14 @@ snapshots/                             reserved for Elasticsearch snapshots (k8s
   creates it; workers and the coordinator stop when they see it; resuming a failed run clears it.
 - Quarantine: one NDJSON line per entry, `{feed, file, line, kind, reason, sample}` with a
   sample of at most 1 KiB; kinds `syntax | envelope | record | too_long | document_too_large`.
-- `publish.json`: `{alias, index, previous}`, the indexes the alias pointed at (the run's own
+- `publish.json`: `{alias, index, previous, previous_docs}`, the indexes the alias pointed at (the run's own
   excluded) when the first publish attempt was about to move it; every attempt deletes
   these after the swap.
-- `summary.json`: `{run_id, alias, index, partitions, started_at, finished_at, wall_ms,
+- `summary.json`: `{run_id, delivery, alias, index, partitions, schema, started_at, finished_at, wall_ms,
   documents, persons_per_second, input_bytes, stages: [{stage, tasks, wall_ms, task_ms,
-  bytes_in, bytes_out, counters}], publish: {docs, previous, deleted, not_deleted},
-  orphans_deleted, orphans_left}`.
+  bytes_in, bytes_out, counters}], publish: {docs, previous_docs, resolved_roles, unresolved_roles, indexed_organizations,
+  min_share, max_unresolved, allow_empty_organizations, previous, deleted, not_deleted},
+  orphans_deleted, orphans_left, retention_failures}`.
 
 ### Segment files
 
@@ -340,20 +468,20 @@ the `expires_at` it already read, so a live lease costs no request on most polls
 Conditional updates need an S3-compatible store that answers 412 to a failed `If-None-Match: *`
 or a stale `If-Match`; the deployments use SeaweedFS 4.48, which does (see
 [ADR 0003](adr/0003-object-store-commits-and-leases.md)). The local filesystem store supports
-create-if-absent but not update-if-match, so it serves only the local executor; the distributed
-executor refuses it.
+create-if-absent but not update-if-match; the distributed executor refuses it. The run lock
+requires conditional writes (S3 or memory); local runs proceed without a run lock.
 
 ## Components
 
 | crate | what it owns |
 |---|---|
-| `pi-model` | the row types, envelope parsing and validation, ids, `Partitioner`, `LastWins`, `JoinedGroups`, `DocumentBuilder` (the join's output rules). Pure: no I/O. |
+| `pi-model` | the row types, the feed schema (`FeedSchema`), envelope parsing and validation, ids, `Partitioner`, `LastWins`, `JoinedGroups`, `DocumentBuilder` (the join's output rules). Pure: no I/O. |
 | `pi-segment` | `SegmentWriter` / `SegmentReader` for the segment format, rolling, magic, varint framing, `MemorySink` / `FileSink`. |
 | `pi-store` | `Store`: a thin wrapper over `object_store` (S3-compatible / local / memory) with put, get, stream, list, create-if-absent and update-if-match; `RunLayout`: every path above, built in one place. |
 | `pi-coord` | `TaskSpec`, `StageSpec`, `CommitLog`, `LeaseManager`, the `Stage` trait, the `Executor` trait with `LocalExecutor` (a bounded pool in one process) and `DistributedExecutor` (coordinator) plus `Worker` (lease-claiming workers), `RunDriver`, `RunState`, retries. |
-| `pi-es` | `EsClient` (reqwest, rustls, basic or API-key auth, custom CA), `IndexAdmin`, `BulkIndexer`, `Publisher`, `Verifier` (expected counts, content digest), the mapping. |
+| `pi-es` | `EsClient` (reqwest, rustls, basic or API-key auth, custom CA), `IndexAdmin`, `BulkIndexer`, `Publisher`, `Verifier` (expected counts, content digest), the mapping and its check against the feed schema (`check_mapping`). |
 | `pi-stages` | one type per stage implementing `Stage`, and `build_registry`. |
-| `pi-datagen` | a seeded generator of both feeds with realistic skew (Zipf organization popularity, a third null organization ids, configurable unresolved, malformed and duplicate rates, duplicate ids across files) that also writes `expected.json`: exact counts for the acceptance check. |
+| `pi-datagen` | a seeded generator of both feeds (in the built-in schema only) with realistic skew (Zipf organization popularity, a third null organization ids, configurable unresolved, malformed and duplicate rates, duplicate ids across files) that also writes `expected.json`: exact counts for the acceptance check. |
 | `people-index` | the binary: `run`, `worker`, `datagen`, `verify`, `stage` (one task, for debugging). |
 
 The seams are traits so each piece is tested alone: a stage is tested against a local or
@@ -394,13 +522,17 @@ checks the organization feed, `join` checks the person feed.
 
 ## Configuration
 
-Every option is a CLI flag with a `PI_*` environment variable (clap `env`). Byte sizes accept
-suffixes (`256MiB`), durations humantime (`60s`, `30m`).
+Every option is a CLI flag with a `PI_*` environment variable (clap `env`), except `stage`'s
+stage name and `--task`, and `verify`'s `--digest` and `--page-size`, which are flags only. Byte
+sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 
 | variable | meaning | default |
 |---|---|---|
 | `PI_STORE_URL` | object store prefix | `file://./store` |
 | `PI_INPUT_URL` | input prefix, if not `<store>/raw` | unset |
+| `PI_DELIVERY` | input sub-prefix for a delivery | unset |
+| `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the feed schema and the index mapping, as JSON files ("Feed schema"); empty is unset | unset: the built-in ones |
+| `PI_REQUIRE_COMPLETE_MARKER` | require `_COMPLETE` in the input root | false |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | S3-compatible store; an endpoint switches to path-style requests and an `http://` one allows plain HTTP | unset; region `us-east-1` |
 | `PI_ES_URL` | Elasticsearch | `http://localhost:9200` |
 | `PI_ES_USERNAME`, `PI_ES_PASSWORD` or `PI_ES_API_KEY` | auth | unset |
@@ -408,6 +540,7 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_ES_REQUEST_TIMEOUT`, `PI_ES_GZIP` | one request's timeout, gzip bulk bodies | `120s`, false |
 | `PI_ALIAS` | the published alias | `persons` |
 | `PI_RUN_ID` | run id (`run`, `worker`, `stage`) | generated; `worker` follows the newest run |
+| `PI_RUN_ID_FROM_JOB_NAME` | derive the run id for `run` or `worker` from a CronJob Job name; mutually exclusive with `PI_RUN_ID` | unset |
 | `PI_EXECUTOR` | `local` or `distributed` | `local` |
 | `PI_CONCURRENCY` | tasks at once in this process | number of CPUs |
 | `PI_WORKER_ID` | worker name in leases and commits | `HOSTNAME` |
@@ -423,6 +556,8 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_BULK_MAX_BYTES`, `PI_SENDERS_PER_WORKER` | load pressure | 8 MiB, 2 |
 | `PI_LOAD_BUFFER_BYTES` | decoded documents a load task holds waiting for the bulk indexer | 2 × `PI_BULK_MAX_BYTES` |
 | `PI_INDEX_SHARDS`, `PI_INDEX_REPLICAS`, `PI_INDEX_CODEC` | the index | 2 per data node, 1, `best_compression` |
+| `PI_PUBLISH_MIN_SHARE`, `PI_PUBLISH_MAX_UNRESOLVED`, `PI_PUBLISH_ALLOW_EMPTY_ORGANIZATIONS` | minimum new/previous document share (0 disables), maximum unresolved role organization share (1 disables), allow zero indexed organizations | 0.9, 0.25, false |
+| `PI_RETAIN_RUNS` | published runs whose segment data is retained; 0 disables cleanup | 3 |
 | `PI_PUBLISH_HEALTH`, `PI_HEALTH_TIMEOUT` | health publish waits for | `green`, `30m` |
 | `PI_METRICS_ADDR` | Prometheus endpoint, `off` to disable | `0.0.0.0:9464` |
 | `PI_LOG_FORMAT` | `json` or `pretty` (filter with `RUST_LOG`) | `json` |
@@ -437,10 +572,13 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
   with `distributed` it writes each stage's task list, runs the single-task stages, waits for
   the workers' commits, and moves on. An existing `PI_RUN_ID` is resumed. Exits 0 once
   published, 1 on failure.
+- `people-index scheduled`: rewrites to `run` for JOB_COMPLETION_INDEX 0 and `worker` for
+  other non-negative indices; a missing or invalid index fails. Scheduled worker failures exit 2
+  so the Job retries them, while coordinator failures exit 1.
 - `people-index worker`: claims and runs tasks of the current stage of `--run-id` (or of the
   newest run) until the run is published or failed, or the idle timeout passes, then exits 0.
 - `people-index datagen --persons N --organizations M --files F --seed S --out <url>`: writes
-  `organizations/`, `persons/` and `expected.json` under `--out`.
+  `organizations/`, `persons/` and `expected.json` under `--out`, in the built-in schema.
 - `people-index verify --expected <file|url>`: runs the acceptance queries against the alias
   (count, `persons_with_unresolved`, title and organization-name term counts) and exits 1 when
   a check fails. `--source summary [--run-id R]` checks the alias against a run's
@@ -450,9 +588,13 @@ suffixes (`256MiB`), durations humantime (`60s`, `30m`).
   comparing two indexes, not a defence against crafted collisions.
 - `people-index stage <name> --run-id R [--task T]`: one task (or every task) of one stage,
   through the local executor, for debugging. It rewrites `stages/<stage>.json` with the tasks it
-  ran, so never point it at a run that workers are following.
+  ran, so never point it at a run that workers are following. It follows the stage lease protocol
+  described under "Scheduled runs and coordinator lease". `--ignore-run-lock` permits dangerous
+  recovery overrides. Local stores warn and proceed without a lock.
 
-`run` and `worker` exit 143 on SIGTERM or Ctrl-C (a second signal exits at once).
+`run`, `worker` and `stage` exit 143 on SIGTERM or Ctrl-C (a second signal exits at once). A
+command line that does not parse (an unknown flag, a malformed value) exits 2; a setting refused
+after parsing exits 1.
 
 ## Metrics
 
@@ -478,7 +620,7 @@ Served on `PI_METRICS_ADDR` at `/metrics`:
   server and three agents labelled with three zones, so the multi-node layout is exercised on
   one machine. Components add monitoring (Elasticsearch exporter, ServiceMonitors, a PodMonitor
   for the pipeline, alert rules; no dashboards yet) and snapshots to the object store
-  (`snapshots/`, SLM policy `nightly`).
+  (a separate bucket, `snapshots/`, SLM policy `nightly`).
 - **Compose** (`deploy/compose`): the same topology on one Docker host: three Elasticsearch
   nodes (master and data, one zone each), SeaweedFS, the coordinator and `--scale worker=N`.
 
@@ -486,5 +628,26 @@ Failure model: a worker that dies loses its lease and another worker takes the t
 coordinator that dies is restarted by its Job and resumes from the commits already in the store
 (`run` with an existing `PI_RUN_ID` skips committed stages and tasks). Elasticsearch loss of a
 data node during the load is absorbed by retries; the count check in `publish` refuses to move
-the alias if documents are missing. Only one coordinator per run is assumed (the Job guarantees
-it); there is no coordinator lease.
+the alias if documents are missing. A coordinator holds the alias run lease when the store supports conditional updates.
+
+## Scheduled runs and coordinator lease
+
+The optional schedule component creates one Indexed Job per scheduled minute. Index zero is the
+coordinator; the others are workers. Each derives the same stamped run id from the Job name's
+numeric Unix-minute suffix and a stable hash of the name. The stamp is the scheduled minute;
+a late Job within startingDeadlineSeconds can lose to a manual run started in the meantime. The coordinator claims
+`_run-leases/<alias>.json` before planning using conditional writes, renews it, and releases it
+on exit. A different run is refused while the lease is live; the same run may resume and an
+expired lease can be taken over. Loss of the lease stops the coordinator. The lock requires a store supporting conditional updates; local runs have no lock. Publish orders stamped ids; hand-picked unstamped ids are not
+ordered.
+
+A hand-run `stage` claims and renews the alias lease through execution when free or expired.
+It shares a live same-run lease, but refuses to rewrite the current stage spec when the run is
+Running and the spec is missing or assigns tasks to workers. This is checked on every sharing
+poll; a coordinator reaching the stage between polls can still race it for up to one interval.
+A sharing stage retries lease, state and stage spec read failures on polls and stops if they persist for about a TTL. A shared stage polls at the
+renewal interval and adopts a released or expired lease. A same-run coordinator taking the lease
+is a handover: the stage returns to sharing. It stops if a different run holds the lease.
+A live different run is refused. `--ignore-run-lock` overrides the refusal and worker-spec
+check, but still claims a free lease and monitors a shared lease; overriding a busy lease allows
+concurrent writes and publication. Stores without conditional updates proceed without a lock.

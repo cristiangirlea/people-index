@@ -1,6 +1,8 @@
 //! From command-line arguments to the library types: stores, the run context, the stage
-//! settings and the Elasticsearch client settings.
+//! settings (the feed schema and the index mapping included) and the Elasticsearch client
+//! settings.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -8,6 +10,7 @@ use pi_coord::{
     CancellationToken, LeaseConfig, LocalExecutor, RetryPolicy, RunContext, StoreCoordination,
 };
 use pi_es::{Auth, EsConfig, HealthStatus, Secret};
+use pi_model::FeedSchema;
 use pi_segment::SegmentConfig;
 use pi_stages::{EsStageConfig, StagesConfig};
 use pi_store::{RunLayout, Store, StoreOptions};
@@ -21,6 +24,8 @@ pub struct Stores {
     pub runs: Store,
     /// The input store when separate (`PI_INPUT_URL`).
     pub inputs: Option<Store>,
+    /// Selected input delivery.
+    pub delivery: Option<String>,
 }
 
 impl Stores {
@@ -36,24 +41,50 @@ impl Stores {
                 Store::open(url, &options).with_context(|| format!("opening the inputs {url}"))
             })
             .transpose()?;
-        Ok(Self { runs, inputs })
+        input_root(args)?;
+        Ok(Self {
+            runs,
+            inputs,
+            delivery: args.delivery.clone(),
+        })
     }
 
     /// The layout of a run: inputs under `raw/` of the run store, or at the top of the input
     /// store when one is set.
     pub fn layout(&self, run_id: &str) -> anyhow::Result<RunLayout> {
         let layout = RunLayout::new(run_id)?;
-        Ok(if self.inputs.is_some() {
-            layout.with_input_root("")
-        } else {
-            layout
-        })
+        let root = input_root_parts(self.inputs.is_some(), self.delivery.as_deref())?;
+        Ok(layout.with_input_root(&root))
     }
 
     /// The context of a run, tied to `cancel`.
     pub fn context(&self, run_id: &str, cancel: CancellationToken) -> anyhow::Result<RunContext> {
         Ok(RunContext::with_layout(self.runs.clone(), self.layout(run_id)?).with_cancel(cancel))
     }
+}
+
+/// Validates the delivery and returns its input prefix without opening a store.
+pub fn input_root(args: &StoreArgs) -> anyhow::Result<String> {
+    input_root_parts(args.input_url.is_some(), args.delivery.as_deref())
+}
+
+fn input_root_parts(separate: bool, delivery: Option<&str>) -> anyhow::Result<String> {
+    if let Some(delivery) = delivery {
+        for segment in delivery.split('/') {
+            pi_store::validate_id("delivery segment", segment)?;
+            anyhow::ensure!(
+                !segment.eq_ignore_ascii_case("persons")
+                    && !segment.eq_ignore_ascii_case("organizations"),
+                "reserved delivery segment {segment:?}"
+            );
+        }
+    }
+    Ok(match (separate, delivery) {
+        (true, None) => String::new(),
+        (true, Some(d)) => d.to_owned(),
+        (false, None) => "raw".to_owned(),
+        (false, Some(d)) => format!("raw/{d}"),
+    })
 }
 
 /// S3 options from the arguments; credentials and region come from the `AWS_*` variables.
@@ -87,10 +118,40 @@ pub fn es_config(args: &EsArgs) -> anyhow::Result<EsConfig> {
     Ok(config)
 }
 
+/// A settings path, `None` when unset or empty (compose passes an unset variable as empty).
+fn file_setting(value: Option<&str>) -> Option<&Path> {
+    value.filter(|v| !v.trim().is_empty()).map(Path::new)
+}
+
+/// Reads `PI_SCHEMA_FILE`, or the built-in schema when it is unset.
+pub fn feed_schema(pipeline: &PipelineArgs) -> anyhow::Result<Option<FeedSchema>> {
+    let Some(path) = file_setting(pipeline.schema_file.as_deref()) else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("PI_SCHEMA_FILE: reading {}", path.display()))?;
+    FeedSchema::from_json(&text)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("PI_SCHEMA_FILE {}: {e}", path.display()))
+}
+
+/// Reads `PI_MAPPING_FILE`, or `None` for the built-in mapping when it is unset.
+pub fn index_mapping(pipeline: &PipelineArgs) -> anyhow::Result<Option<serde_json::Value>> {
+    let Some(path) = file_setting(pipeline.mapping_file.as_deref()) else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("PI_MAPPING_FILE: reading {}", path.display()))?;
+    pi_es::parse_mapping(&text)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("PI_MAPPING_FILE {}: {e}", path.display()))
+}
+
 /// The stage settings.
 pub fn stages_config(
     pipeline: &PipelineArgs,
     es: &EsArgs,
+    exec: &crate::cli::ExecArgs,
     stores: &Stores,
 ) -> anyhow::Result<StagesConfig> {
     let codec = pipeline
@@ -101,8 +162,10 @@ pub fn stages_config(
         .publish_health
         .parse()
         .map_err(|e| anyhow::anyhow!("PI_PUBLISH_HEALTH: {e}"))?;
-    let config = StagesConfig {
+    let mut config = StagesConfig {
         alias: pipeline.alias.clone(),
+        delivery: stores.delivery.clone(),
+        require_complete_marker: pipeline.require_complete_marker,
         partition_target_bytes: pipeline.partition_target_bytes,
         min_partitions: pipeline.min_partitions,
         max_malformed: pipeline.max_malformed,
@@ -129,8 +192,34 @@ pub fn stages_config(
             codec,
             wait_for,
             health_timeout: pipeline.health_timeout,
+            retain_runs: pipeline.retain_runs,
+            lease_clock_skew: pi_coord::LeaseConfig::new(exec.lease_ttl).clock_skew,
+            publish_min_share: pipeline.publish_min_share,
+            publish_max_unresolved: pipeline.publish_max_unresolved,
+            publish_allow_empty_organizations: pipeline.publish_allow_empty_organizations,
         },
+        ..StagesConfig::default()
     };
+    if let Some(schema) = feed_schema(pipeline)? {
+        config.schema = Arc::new(schema);
+    }
+    if let Some(mapping) = index_mapping(pipeline)? {
+        config.mapping = Arc::new(mapping);
+        config.mapping_source = format!(
+            "PI_MAPPING_FILE {}",
+            pipeline.mapping_file.as_deref().unwrap_or_default()
+        );
+    }
+    pi_es::check_mapping(&config.mapping, &config.schema).map_err(|e| {
+        let source = |value: Option<&str>| {
+            file_setting(value).map_or("built-in".to_owned(), |p| p.display().to_string())
+        };
+        anyhow::anyhow!(
+            "{e} (PI_SCHEMA_FILE: {}, PI_MAPPING_FILE: {})",
+            source(pipeline.schema_file.as_deref()),
+            source(pipeline.mapping_file.as_deref())
+        )
+    })?;
     config.validate()?;
     Ok(config)
 }
@@ -214,9 +303,18 @@ mod tests {
             "1MiB",
             "--task-memory-bytes",
             "64MiB",
+            "--retain-runs",
+            "7",
+            "--publish-min-share",
+            "0.7",
+            "--publish-max-unresolved",
+            "0.4",
         ]);
         let stores = Stores::open(&args.store).unwrap();
-        let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
+        let cfg = stages_config(&args.pipeline, &args.es, &args.exec, &stores).unwrap();
+        assert!((cfg.es.publish_min_share - 0.7).abs() < f64::EPSILON);
+        assert!((cfg.es.publish_max_unresolved - 0.4).abs() < f64::EPSILON);
+        assert_eq!(cfg.es.retain_runs, 7);
         assert_eq!(cfg.alias, "people");
         assert_eq!(cfg.es.codec, pi_es::Codec::Default);
         assert_eq!(cfg.es.bulk.senders, 4);
@@ -227,10 +325,75 @@ mod tests {
     }
 
     #[test]
+    fn retain_runs_environment_reaches_stage_config() {
+        if std::env::var_os("PI_TEST_RETAIN_CHILD").is_some() {
+            let args = run_args(&["--store-url", "memory://"]);
+            let stores = Stores::open(&args.store).unwrap();
+            let cfg = stages_config(&args.pipeline, &args.es, &args.exec, &stores).unwrap();
+            assert_eq!(cfg.es.retain_runs, 7);
+        } else {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings::tests::retain_runs_environment_reaches_stage_config",
+                ])
+                .env("PI_TEST_RETAIN_CHILD", "1")
+                .env("PI_RETAIN_RUNS", "7")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+    }
+
+    #[test]
     fn a_separate_input_store_moves_the_input_root() {
         let args = run_args(&["--store-url", "memory://", "--input-url", "memory://"]);
         let stores = Stores::open(&args.store).unwrap();
         assert_eq!(stores.layout("r1").unwrap().raw_persons(), "persons");
+    }
+
+    #[test]
+    fn delivery_validation_and_layout() {
+        for bad in [
+            "..",
+            ".",
+            "",
+            "/a",
+            "a/",
+            "a//b",
+            "a\\b",
+            "persons",
+            "organizations",
+            "a/persons/b",
+            "a/organizations",
+            "Persons",
+            "a/ORGANIZATIONS/b",
+        ] {
+            assert!(input_root_parts(false, Some(bad)).is_err(), "{bad:?}");
+        }
+        for (separate, expected) in [(false, "raw/a/b/persons"), (true, "a/b/persons")] {
+            let args = if separate {
+                run_args(&[
+                    "--store-url",
+                    "memory://",
+                    "--input-url",
+                    "memory://",
+                    "--delivery",
+                    "a/b",
+                ])
+            } else {
+                run_args(&["--store-url", "memory://", "--delivery", "a/b"])
+            };
+            assert_eq!(
+                Stores::open(&args.store)
+                    .unwrap()
+                    .layout("r1")
+                    .unwrap()
+                    .raw_persons(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -252,18 +415,101 @@ mod tests {
     fn bad_codec_is_refused() {
         let args = run_args(&["--store-url", "memory://", "--index-codec", "zip"]);
         let stores = Stores::open(&args.store).unwrap();
-        assert!(stages_config(&args.pipeline, &args.es, &stores).is_err());
+        assert!(stages_config(&args.pipeline, &args.es, &args.exec, &stores).is_err());
+    }
+
+    #[test]
+    fn schema_and_mapping_files_are_read_and_checked_against_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let schema = r#"{"envelope": {"id": "key"},
+            "person": {"references": "jobs",
+                "fields": [{"name": "name", "kind": "string"}, {"name": "jobs", "kind": "object_array"}],
+                "reference_fields": [{"name": "organization_id", "kind": "number"}], "disabled": []},
+            "organization": {"fields": [], "disabled": []}}"#;
+        let mapping = r#"{"dynamic": false, "properties": {
+            "name": {"type": "text"},
+            "jobs": {"type": "object", "properties": {
+                "organization_id": {"type": "long", "ignore_malformed": true},
+                "organization_resolved": {"type": "boolean"}}},
+            "organizations": {"type": "object", "properties": {}},
+            "unresolved_organization_ids": {"type": "long", "ignore_malformed": true}}}"#;
+        std::fs::write(path("schema.json"), schema).unwrap();
+        std::fs::write(path("mapping.json"), mapping).unwrap();
+        std::fs::write(path("bad.json"), r#"{"envelope": {"id": ""}}"#).unwrap();
+
+        let config = |extra: &[&str]| {
+            let mut command_line = vec!["--store-url", "memory://"];
+            command_line.extend_from_slice(extra);
+            let args = run_args(&command_line);
+            let stores = Stores::open(&args.store).unwrap();
+            stages_config(&args.pipeline, &args.es, &args.exec, &stores)
+        };
+        // Unset and empty both mean the built-in ones.
+        for extra in [&[][..], &["--schema-file", "", "--mapping-file", " "][..]] {
+            let cfg = config(extra).unwrap();
+            assert!(cfg.schema.is_builtin());
+            assert_eq!(*cfg.mapping, pi_es::mapping());
+            assert_eq!(cfg.mapping_source, "built-in mapping");
+        }
+
+        let builtin_file = path("builtin.json");
+        std::fs::write(&builtin_file, pi_es::mapping().to_string()).unwrap();
+        let cfg = config(&["--mapping-file", &builtin_file]).unwrap();
+        assert_eq!(*cfg.mapping, pi_es::mapping());
+        assert_eq!(
+            cfg.mapping_source,
+            format!("PI_MAPPING_FILE {builtin_file}")
+        );
+
+        let (schema_file, mapping_file, bad) =
+            (path("schema.json"), path("mapping.json"), path("bad.json"));
+        let cfg = config(&[
+            "--schema-file",
+            &schema_file,
+            "--mapping-file",
+            &mapping_file,
+        ])
+        .unwrap();
+        assert_eq!(cfg.schema.envelope_id(), "key");
+        assert_eq!(cfg.schema.references(), "jobs");
+        assert_eq!(cfg.mapping["properties"]["jobs"]["type"], "object");
+
+        // Each without the other does not fit; the error names both sources.
+        let err = format!(
+            "{:#}",
+            config(&["--schema-file", &schema_file]).unwrap_err()
+        );
+        assert!(err.contains("does not fit the feed schema"), "{err}");
+        assert!(err.contains("PI_MAPPING_FILE: built-in"), "{err}");
+        assert!(err.contains(&schema_file), "{err}");
+        let err = format!(
+            "{:#}",
+            config(&["--mapping-file", &mapping_file]).unwrap_err()
+        );
+        assert!(err.contains("PI_SCHEMA_FILE: built-in"), "{err}");
+
+        // A bad or missing file names the setting, the file and the field.
+        let err = format!("{:#}", config(&["--schema-file", &bad]).unwrap_err());
+        assert!(err.contains("PI_SCHEMA_FILE"), "{err}");
+        assert!(err.contains(&bad), "{err}");
+        assert!(err.contains("envelope.id: empty name"), "{err}");
+        let missing = path("missing.json");
+        let err = format!("{:#}", config(&["--mapping-file", &missing]).unwrap_err());
+        assert!(err.contains("PI_MAPPING_FILE: reading"), "{err}");
+        let err = format!("{:#}", config(&["--mapping-file", &bad]).unwrap_err());
+        assert!(err.contains("does not fit the feed schema"), "{err}");
     }
 
     #[test]
     fn the_load_buffer_defaults_to_twice_the_bulk_size() {
         let args = run_args(&["--store-url", "memory://", "--bulk-max-bytes", "1MiB"]);
         let stores = Stores::open(&args.store).unwrap();
-        let cfg = stages_config(&args.pipeline, &args.es, &stores).unwrap();
+        let cfg = stages_config(&args.pipeline, &args.es, &args.exec, &stores).unwrap();
         assert_eq!(cfg.load_buffer_bytes, None);
         assert_eq!(cfg.effective_load_buffer_bytes(), 2 << 20);
         let args = run_args(&["--store-url", "memory://", "--load-buffer-bytes", "0"]);
         let stores = Stores::open(&args.store).unwrap();
-        assert!(stages_config(&args.pipeline, &args.es, &stores).is_err());
+        assert!(stages_config(&args.pipeline, &args.es, &args.exec, &stores).is_err());
     }
 }

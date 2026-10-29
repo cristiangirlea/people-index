@@ -33,6 +33,18 @@ The store must refuse a conditional write that does not hold (HTTP 412 for `If-N
 an existing key and for a stale `If-Match`): commits and leases depend on it. SeaweedFS 4.48
 passes; `s3-init` checks it on every start and stops the stack if a store does not.
 
+## Alias setting
+
+`PI_ALIAS` defaults to `persons`; run indexes are `<alias>-<run_id>`. It must be a
+lowercase safe store segment (`a-z`, digits, `.`, `_`, `=`, `-`), not `.` or `..`,
+not starting with `.`, `-` or `_`, and at most 126 bytes. This leaves room for the separator
+and a 128-byte run ID within Elasticsearch's 255-byte index-name limit. Startup refuses
+aliases whose run indexes can match a built-in Elasticsearch 9.5.5 index template, naming
+the template; for example `logs`, `metrics`, and `traces` are refused. The observed
+patterns and probe are in [mapping.md](../crates/pi-es/src/mapping.md#built-in-index-templates-elasticsearch-955).
+Review templates installed on your own cluster and on other Elasticsearch versions too;
+the built-in list does not cover them.
+
 ## Compose
 
 Prerequisites: Docker with Compose v2, GNU make and bash. On Linux, Elasticsearch needs

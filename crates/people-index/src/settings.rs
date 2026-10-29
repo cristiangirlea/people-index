@@ -147,6 +147,27 @@ pub fn index_mapping(pipeline: &PipelineArgs) -> anyhow::Result<Option<serde_jso
         .map_err(|e| anyhow::anyhow!("PI_MAPPING_FILE {}: {e}", path.display()))
 }
 
+fn validate_alias(alias: &str) -> anyhow::Result<()> {
+    pi_es::validate_index_name(alias).map_err(|e| anyhow::anyhow!("PI_ALIAS: {e}"))?;
+    anyhow::ensure!(
+        !alias.starts_with('.'),
+        "PI_ALIAS must not start with a dot"
+    );
+    // Reserve the separator and the maximum 128-byte run ID.
+    anyhow::ensure!(
+        alias.len() <= 126,
+        "PI_ALIAS must be at most 126 bytes so every run index fits in 255 bytes"
+    );
+    pi_store::validate_id("alias", alias).map_err(|e| anyhow::anyhow!("PI_ALIAS: {e}"))?;
+    let prefix = format!("{alias}-");
+    if let Some((name, pattern)) = pi_es::builtin_template_for_prefix(&prefix) {
+        anyhow::bail!(
+            "PI_ALIAS {alias:?} can match Elasticsearch built-in template {name:?} ({pattern})"
+        );
+    }
+    Ok(())
+}
+
 /// The stage settings.
 pub fn stages_config(
     pipeline: &PipelineArgs,
@@ -154,6 +175,7 @@ pub fn stages_config(
     exec: &crate::cli::ExecArgs,
     stores: &Stores,
 ) -> anyhow::Result<StagesConfig> {
+    validate_alias(&pipeline.alias)?;
     let codec = pipeline
         .index_codec
         .parse()
@@ -284,6 +306,65 @@ mod tests {
             Command::Run(r) => r,
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn aliases_reject_template_collisions_and_invalid_names() {
+        for (alias, template) in [
+            ("logs", "logs"),
+            ("logs-x", "logs"),
+            ("synthetics-x", "synthetics"),
+            ("metrics", "metrics"),
+            ("traces", "traces-apm"),
+            ("synthetics", "synthetics"),
+            ("agentless", "agentless"),
+        ] {
+            let error = validate_alias(alias).unwrap_err().to_string();
+            assert!(error.contains(template), "{alias}: {error}");
+        }
+        for alias in ["persons", "custom-people", "profiling"] {
+            assert!(validate_alias(alias).is_ok(), "{alias}");
+        }
+        for alias in [
+            "",
+            ".",
+            "..",
+            "-a",
+            "_a",
+            "+a",
+            "Upper",
+            "a/b",
+            "a\\b",
+            "a*",
+            "a?",
+            "a\"",
+            "a<",
+            "a>",
+            "a|",
+            "a b",
+            "a,b",
+            "a#",
+            "a:",
+            ".monitoring-es-7",
+            ".ml-state",
+        ] {
+            assert!(validate_alias(alias).is_err(), "{alias:?}");
+        }
+        assert!(validate_alias(&"a".repeat(126)).is_ok());
+        assert!(validate_alias(&"a".repeat(127)).is_err());
+    }
+
+    #[test]
+    fn alias_validation_is_applied_to_stage_settings() {
+        let args = run_args(&["--store-url", "memory://", "--alias", "logs"]);
+        let stores = Stores::open(&args.store).unwrap();
+        let error = stages_config(&args.pipeline, &args.es, &args.exec, &stores)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("PI_ALIAS") && error.contains("logs"),
+            "{error}"
+        );
     }
 
     #[test]

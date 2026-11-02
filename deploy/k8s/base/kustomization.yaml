@@ -30,6 +30,7 @@ configMapGenerator:
   # Jobs; credentials come from Secrets.
   - name: people-index-config
     literals:
+      - PI_STORE_RETRY_TIMEOUT=120s
       - PI_STORE_URL=s3://people-index/
       - PI_S3_ENDPOINT=http://s3:8333
       - AWS_REGION=us-east-1

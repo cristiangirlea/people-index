@@ -459,6 +459,11 @@ renewal landed but its response was lost), the holder goes on with the etag it r
 whose renewals fail for a whole ttl, or whose lease was taken or deleted, has its task
 cancelled. Leases avoid duplicate work; commits are what keep a duplicate harmless.
 
+The renewal loop bounds each wait and store operation to one renewal interval before the held lease expiry. If an
+S3 retry is still blocked at that deadline, it signals lease loss and cancels the task or coordinator;
+the store retry window may therefore exceed the lease TTL. A request already accepted by the
+server can still complete, so conditional writes and first-wins commits remain essential.
+
 A polling worker lists `_lease/` once per poll (next to `_commit/`) and tries to claim only the
 tasks whose lease is absent, released or past `expires_at + clock_skew`. It reads a lease body
 only when its listed etag changed since the last poll and judges an unchanged lease's expiry from
@@ -529,6 +534,7 @@ sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | variable | meaning | default |
 |---|---|---|
 | `PI_STORE_URL` | object store prefix | `file://./store` |
+| `PI_STORE_RETRY_TIMEOUT` | S3 retry window from the initial request, at most 5 minutes; a request or backoff can finish after it | `120s` |
 | `PI_INPUT_URL` | input prefix, if not `<store>/raw` | unset |
 | `PI_DELIVERY` | input sub-prefix for a delivery | unset |
 | `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the feed schema and the index mapping, as JSON files ("Feed schema"); empty is unset | unset: the built-in ones |

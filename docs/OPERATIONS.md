@@ -45,6 +45,22 @@ patterns and probe are in [mapping.md](../crates/pi-es/src/mapping.md#built-in-i
 Review templates installed on your own cluster and on other Elasticsearch versions too;
 the built-in list does not cover them.
 
+## S3 retries
+
+`PI_STORE_RETRY_TIMEOUT` sets the S3 retry window (default `120s`, maximum `5m`).
+The window limits when another retry may start, not the duration of an in-flight request or
+backoff. The limit accounts for S3 signature age and short-lived STS credentials:
+`object_store` resends the same signed request. Lease renewal stops one renewal interval
+before the held lease expires.
+
+For any method, `object_store` retries refused connections, requests never sent, 5xx, 429
+and 408. Timeouts and connections dropped mid-request are retried only for reads and plain
+overwrites; conditional writes return those errors to the commit retry and lease loop.
+404, 412 and 304 are never retried. 409 is retried only for If-Match updates; the header
+is retained, so conditional semantics are unchanged. Backoff grows linearly on average:
+each delay is random between the initial delay and the previous delay times the base,
+subject to the maximum.
+
 ## Compose
 
 Prerequisites: Docker with Compose v2, GNU make and bash. On Linux, Elasticsearch needs

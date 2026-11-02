@@ -1,9 +1,14 @@
 //! Connection options for S3-compatible stores.
 
+/// Default S3 retry window.
+pub const DEFAULT_STORE_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// How to reach an S3-compatible endpoint. Unset fields fall back to the standard `AWS_*`
 /// environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, ...).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreOptions {
+    /// Maximum time after the first request to start retries.
+    pub retry_timeout: std::time::Duration,
     /// A custom endpoint (`PI_S3_ENDPOINT`), e.g. `http://minio:9000`. Setting one switches to
     /// path-style requests, which local S3 servers expect.
     pub s3_endpoint: Option<String>,
@@ -14,6 +19,18 @@ pub struct StoreOptions {
     /// Force virtual-hosted-style requests (`bucket.host`). Defaults to false (path style)
     /// when an endpoint is set, and to the AWS default otherwise.
     pub virtual_hosted_style: Option<bool>,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self {
+            retry_timeout: DEFAULT_STORE_RETRY_TIMEOUT,
+            s3_endpoint: None,
+            s3_region: None,
+            allow_http: None,
+            virtual_hosted_style: None,
+        }
+    }
 }
 
 impl StoreOptions {

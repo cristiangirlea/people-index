@@ -333,10 +333,10 @@ the run and is deleted once a newer run has published.
   20,000 persons and 5,000 organizations in 4 files per feed with two workers on one runner
   (`make compose-run` defaults to 200,000 and 50,000). The production example's sizing is
   reasoned, not measured ([README, Limitations](../README.md#limitations)).
-- **Kubernetes**: no Kubernetes cluster has run it yet. The manifests pass schema validation
-  and their parts were checked against Elasticsearch and SeaweedFS containers, but ECK
-  reconciliation, NetworkPolicy enforcement and a distributed run on Kubernetes have not been
-  exercised.
+- **Kubernetes**: run by hand on k3d (the local overlay: ECK reconciliation, two distributed
+  runs, verify, and the rollback and restore steps, with the NetworkPolicies in place); not in
+  CI, and not yet with the production overlay, a multi-host cluster or large data. That a
+  NetworkPolicy blocks what it should was not tested.
 - **Windows**: the local `file://` store fails a write now and then with "Access is denied"
   (#43); use the S3 store for anything that matters. Linux is not affected.
 - **One alias per run store**: retention counts runs across the whole store prefix, and a

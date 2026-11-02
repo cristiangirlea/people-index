@@ -53,6 +53,8 @@ at before. Readers only ever query the alias.
 - The shard count is fixed when the index is created; new data nodes help the next run.
 - The ECK operator and its CRDs are a cluster prerequisite, and the local overlay needs about
   10 GiB of memory for Docker.
-- Not yet verified on a real cluster: ECK reconciliation and NetworkPolicy enforcement. The
-  node roles, awareness settings, the writer role and the snapshot setup were checked against
-  Elasticsearch containers.
+- The node roles, awareness settings, the writer role and the snapshot setup were checked
+  against Elasticsearch containers. On 2026-11-02 ECK reconciled the local overlay on k3d (three
+  master and three data nodes, green, the snapshot repository registered) and two distributed
+  runs completed with the NetworkPolicies in place ([OPERATIONS.md](../OPERATIONS.md#rollback-and-restore)).
+  That a NetworkPolicy blocks what it should is not yet tested.

@@ -225,6 +225,14 @@ impl RunLayout {
         format!("{}/failed.json", self.run_root())
     }
 
+    /// `runs/<run_id>/skipped.json`: written create-if-absent, instead of any run state, by a
+    /// coordinator following the newest delivery (`PI_DELIVERY=latest`) when the alias already
+    /// serves it; workers that see it exit as done.
+    #[must_use]
+    pub fn skipped(&self) -> String {
+        format!("{}/skipped.json", self.run_root())
+    }
+
     /// `runs/<run_id>/publish.json`: the indexes the alias served before this run's index,
     /// recorded create-if-absent before the alias moves, so a resumed `publish` still deletes
     /// them.
@@ -369,6 +377,7 @@ mod tests {
         assert_eq!(l.plan(), format!("{r}/plan.json"));
         assert_eq!(l.state(), format!("{r}/state.json"));
         assert_eq!(l.failure_marker(), format!("{r}/failed.json"));
+        assert_eq!(l.skipped(), format!("{r}/skipped.json"));
         assert_eq!(l.publish_record(), format!("{r}/publish.json"));
         assert_eq!(l.summary(), format!("{r}/summary.json"));
         assert_eq!(

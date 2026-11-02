@@ -657,7 +657,10 @@ The keystore lives in each container, so a recreated container needs the keys ag
 1. Stop new runs. Suspend the schedule
    (`kubectl --context <context> -n people-index patch cronjob pi-schedule -p '{"spec":{"suspend":true}}'`)
    and keep it suspended until the cause of the rollback is fixed: the next run reads the same
-   feed (`raw/` or the configured `PI_DELIVERY`) and would publish it again.
+   feed (`raw/` or the configured `PI_DELIVERY`) and would publish it again. With
+   `PI_DELIVERY=latest` the next run targets the newest complete delivery: after a rollback to
+   an older delivery's index it publishes the newest again; after restoring the index of the
+   current delivery it is skipped.
 2. Stop any hand-run `stage` commands. Let a running run finish, or stop it. A run that publishes
    during the restore moves the alias, and its cleanup deletes any `persons-*` index that no
    alias points at and whose run is older: the restored index, until step 4 below puts the alias on it. To stop a run on
@@ -877,7 +880,8 @@ Not yet exercised against an external S3 store.
 ## Scheduled runs
 
 A scheduled run reads whatever `PI_DELIVERY` the ConfigMap sets. With it unset, each run
-re-indexes `raw/`.
+re-indexes `raw/`; with a delivery name, each run reads that delivery again until the ConfigMap
+changes. `PI_DELIVERY=latest` follows new deliveries instead ("Following new deliveries" below).
 
 Add `../../components/schedule` to an overlay's `components` and apply that overlay.
 The proposed defaults run at 02:00 UTC daily; patch the CronJob's `schedule`, `timeZone`,
@@ -960,6 +964,40 @@ patches:
 
 Also configure zone spread and node anti-affinity for the cluster; the shared indexed pod
 shape deliberately has no hard worker-only spread rule.
+
+### Following new deliveries
+
+To have each scheduled run pick up the newest delivery on its own, set `PI_DELIVERY=latest` in
+the overlay's ConfigMap (`people-index-config`, for example a `configMapGenerator` entry with
+`behavior: merge` and the literal `PI_DELIVERY=latest`). It is opt-in; leaving `PI_DELIVERY`
+unset or naming a delivery behaves as before. With it:
+
+- A new run plans the newest delivery under `raw/` (or the top of `PI_INPUT_URL`) that has its
+  `_COMPLETE` marker, the greatest name in byte order. Name deliveries so that name order is
+  time order: `batch-20261102` or `20261102T0200Z`, never `batch-9` beside `batch-10`. A
+  delivery still being written (no `_COMPLETE` yet) is passed over for older complete ones. No
+  complete delivery, or a directory named `latest`, fails the run; the error names the input
+  root.
+- The chosen name is recorded in the run's `plan.json` (`delivery`) and in `summary.json`. A
+  resumed run keeps it, even after a newer delivery arrived.
+- When the alias already serves that delivery (the run behind the alias's index read it), or a
+  delivery whose name sorts after it (a hand run of a named delivery that has no `_COMPLETE`),
+  the run is skipped, since planning would publish the same or older data: no plan and no run state, only `runs/<run_id>/skipped.json` (`reason`,
+  `delivery`, `serving_run`, `skipped_at`), the log line `no new delivery; run skipped`, and
+  the counter `pi_runs_skipped_total`. The coordinator releases the run lease and exits 0 and
+  its workers exit 0, so the Job completes. `PI_REPUBLISH_UNCHANGED_DELIVERY=true` plans and
+  publishes the delivery again instead (after a mapping change, say). These are proposed
+  defaults: follow by name, skip an unchanged delivery.
+- If deliveries stop arriving, every run is skipped and the alias keeps its index: the
+  `PeopleIndexAliasOld` alert (see "Pipeline alerts") is the signal, as it is without `latest`.
+  A skip is not a failure and raises no alert of its own.
+- The newest complete delivery stays the target. A hand run with `PI_DELIVERY` set to an older
+  delivery's name, or a rollback to an older index, lasts only until the next scheduled run,
+  which publishes the newest complete delivery again. To stay on an older delivery, keep
+  `pi-schedule` suspended, or set the ConfigMap's `PI_DELIVERY` to that delivery's name, until
+  a corrected, newer delivery is marked complete; then set it back to `latest` (see "Rollback
+  and restore").
+
 ## A feed delivery
 
 For a new delivery `batch-20261028`, place gzipped NDJSON files under
@@ -968,6 +1006,9 @@ For a new delivery `batch-20261028`, place gzipped NDJSON files under
 written, create the empty `raw/batch-20261028/_COMPLETE` object. Then run with
 `PI_DELIVERY=batch-20261028 PI_REQUIRE_COMPLETE_MARKER=true`; use the same `PI_DELIVERY`
 for `verify --source expected`. Never modify a completed delivery; use a new prefix.
+`PI_DELIVERY=latest` plans the newest complete delivery instead of a named one ("Following new
+deliveries" under "Scheduled runs"); `latest` is reserved, so no delivery can be named that,
+and `datagen` and `verify --source expected` need the name.
 
 For a synthetic delivery, `people-index datagen --delivery batch-20261028` writes the feeds
 and `expected.json` there; create `_COMPLETE` separately after it succeeds. An explicit

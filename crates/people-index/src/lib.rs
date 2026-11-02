@@ -1,12 +1,13 @@
 //! people-index: the command line (docs/ARCHITECTURE.md, "Commands").
 //!
 //! The binary is a thin `main`; everything is here so the integration tests can drive the
-//! same code: argument parsing ([`cli`]), settings ([`settings`]), the datagen store sink
-//! ([`store_sink`]) and the subcommands ([`commands`]).
+//! same code: argument parsing ([`cli`]), settings ([`settings`]), the choice of delivery
+//! ([`delivery`]), the datagen store sink ([`store_sink`]) and the subcommands ([`commands`]).
 
 pub mod byte_size;
 pub mod cli;
 pub mod commands;
+pub mod delivery;
 pub mod run_id;
 pub mod settings;
 pub mod shutdown;
@@ -84,19 +85,8 @@ async fn dispatch(command: Command) -> ExitCode {
             if let Err(e) = start_service(&args.metrics, &cancel) {
                 return failure(&e);
             }
-            commands::run::run(args, cancel.clone()).await.map(|outcome| {
-                print_json(&json!({
-                    "run_id": outcome.run_id,
-                    "status": format!("{:?}", outcome.status).to_lowercase(),
-                    "stages_run": outcome.stages.iter().map(|s| json!({
-                        "stage": s.stage,
-                        "tasks": s.tasks(),
-                        "ran": s.ran,
-                        "skipped": s.skipped,
-                        "duration_ms": u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX),
-                    })).collect::<Vec<_>>(),
-                    "stages_skipped": outcome.skipped,
-                }));
+            commands::run::run(args, cancel.clone()).await.map(|end| {
+                print_json(&run_json(&end));
                 true
             })
         }
@@ -108,8 +98,8 @@ async fn dispatch(command: Command) -> ExitCode {
                 .await
                 .map(|report| {
                     tracing::info!(exit = ?report.exit, committed = report.committed, duplicates = report.duplicates, lost = report.lost, "worker done");
-                    // Published or failed both end a worker's job (the coordinator reports
-                    // the run's fate); only a shutdown is not a clean exit.
+                    // Published, failed or skipped all end a worker's job (the coordinator
+                    // reports the run's fate); only a shutdown is not a clean exit.
                     !matches!(report.exit, WorkerExit::Cancelled)
                 })
         }
@@ -179,6 +169,32 @@ async fn dispatch(command: Command) -> ExitCode {
     }
 }
 
+/// What `run` prints. A skipped run (nothing new to publish) is a success, so the scheduled
+/// Job completes.
+fn run_json(end: &commands::run::RunEnd) -> serde_json::Value {
+    match end {
+        commands::run::RunEnd::Published(outcome) => json!({
+            "run_id": outcome.run_id,
+            "status": format!("{:?}", outcome.status).to_lowercase(),
+            "stages_run": outcome.stages.iter().map(|s| json!({
+                "stage": s.stage,
+                "tasks": s.tasks(),
+                "ran": s.ran,
+                "skipped": s.skipped,
+                "duration_ms": u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX),
+            })).collect::<Vec<_>>(),
+            "stages_skipped": outcome.skipped,
+        }),
+        commands::run::RunEnd::Skipped(skipped) => json!({
+            "run_id": skipped.run_id,
+            "status": "skipped",
+            "delivery": skipped.delivery,
+            "serving_run": skipped.serving_run,
+            "reason": skipped.reason,
+        }),
+    }
+}
+
 /// Signal handling and the metrics endpoint, for the long-running commands.
 fn start_service(metrics: &cli::MetricsArgs, cancel: &CancellationToken) -> anyhow::Result<()> {
     shutdown::install(cancel.clone());
@@ -230,5 +246,35 @@ mod scheduled_tests {
         for index in [None, Some("bad")] {
             assert!(rewrite_scheduled(&mut ["pi".into(), "scheduled".into()], index).is_err());
         }
+    }
+
+    #[test]
+    fn a_skipped_run_prints_its_status_delivery_and_serving_run() {
+        let skipped = pi_coord::RunSkipped::new(
+            "r1",
+            "no new delivery: the alias already serves b1, from run r0",
+            "b1",
+            Some("r0".into()),
+        );
+        assert_eq!(
+            run_json(&commands::run::RunEnd::Skipped(skipped)),
+            json!({
+                "run_id": "r1",
+                "status": "skipped",
+                "delivery": "b1",
+                "serving_run": "r0",
+                "reason": "no new delivery: the alias already serves b1, from run r0",
+            })
+        );
+        let published = pi_coord::RunOutcome {
+            run_id: "r2".into(),
+            status: pi_coord::RunStatus::Published,
+            stages: Vec::new(),
+            skipped: vec![pi_coord::StageName::Plan],
+        };
+        assert_eq!(
+            run_json(&commands::run::RunEnd::Published(published)),
+            json!({"run_id": "r2", "status": "published", "stages_run": [], "stages_skipped": ["plan"]})
+        );
     }
 }

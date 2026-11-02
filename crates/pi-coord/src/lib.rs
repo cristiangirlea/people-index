@@ -8,6 +8,7 @@
 //!   [`LeaseManager`].
 //! - [`RunDriver`] runs the stages in order and records [`RunState`], so a run id that is run
 //!   again resumes: completed stages and committed tasks are skipped.
+//! - [`RunSkipped`] marks a run its coordinator decided not to plan; its workers exit as done.
 //!
 //! The protocol is in docs/ARCHITECTURE.md (Commits, Leases).
 
@@ -25,6 +26,7 @@ mod registry;
 mod retry;
 mod run_state;
 mod runner;
+mod skipped;
 mod stage;
 mod stage_name;
 mod stage_spec;
@@ -46,6 +48,7 @@ pub use local::LocalExecutor;
 pub use registry::StageRegistry;
 pub use retry::RetryPolicy;
 pub use run_state::{RunState, RunStatus, latest_run_id};
+pub use skipped::RunSkipped;
 pub use stage::Stage;
 pub use stage_name::{StageName, UnknownStage};
 pub use stage_spec::{RunBy, StageSpec};

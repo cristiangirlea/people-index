@@ -38,7 +38,8 @@ failed, leaving the alias where it was).
 named `*.ndjson.gz` under `persons/` and `organizations/` (the contract is in
 [The feed contract](#the-feed-contract) below). With `PI_DELIVERY=<name>` a run reads
 `raw/<name>/` instead of `raw/`; write `raw/<name>/_COMPLETE` once the last file is in place and
-set `PI_REQUIRE_COMPLETE_MARKER=true` so a run never plans a half-written delivery. A delivery is
+set `PI_REQUIRE_COMPLETE_MARKER=true` so a run never plans a half-written delivery
+(`PI_DELIVERY=latest` makes each run plan the newest complete one, by name). A delivery is
 never changed after it is marked complete: put replacements in a new one
 ([ARCHITECTURE.md, Feed delivery contract](ARCHITECTURE.md#feed-delivery-contract),
 [OPERATIONS.md, A feed delivery](OPERATIONS.md#a-feed-delivery)). Feeds whose field names differ
@@ -203,7 +204,8 @@ differently (`PI_EXECUTOR=distributed`, smaller or larger task memory).
 | `PI_STORE_RETRY_TIMEOUT` | `120s` | S3 retry window from the initial request |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | unset; `us-east-1` | an S3-compatible endpoint (path-style requests) and its credentials |
 | `PI_INPUT_URL` | `<store>/raw` | inputs under a separate prefix |
-| `PI_DELIVERY`, `PI_REQUIRE_COMPLETE_MARKER` | unset, false | which delivery a run reads, and whether `_COMPLETE` is required |
+| `PI_DELIVERY`, `PI_REQUIRE_COMPLETE_MARKER` | unset, false | which delivery a run reads, and whether `_COMPLETE` is required; `PI_DELIVERY=latest` plans the newest complete delivery and skips a run whose delivery the alias already serves ([Scheduled runs](OPERATIONS.md#following-new-deliveries)) |
+| `PI_REPUBLISH_UNCHANGED_DELIVERY` | false | with `PI_DELIVERY=latest`, publish the newest delivery again instead of skipping the run |
 | `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the built-in ones | feeds with other field names |
 | `PI_ES_URL`, `PI_ES_CA_CERT` | `http://localhost:9200`, unset | the cluster and the CA to trust |
 | `PI_ES_USERNAME` + `PI_ES_PASSWORD`, or `PI_ES_API_KEY` | unset | the pipeline's identity (one or the other) |

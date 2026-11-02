@@ -113,6 +113,26 @@ mod tests {
         }
     }
     #[test]
+    fn datagen_cannot_write_to_latest() {
+        let argv = [
+            "people-index",
+            "datagen",
+            "--store-url",
+            "memory://",
+            "--delivery",
+            "latest",
+        ];
+        let Command::Datagen(parsed) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("datagen")
+        };
+        let err = destination(&parsed).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "PI_DELIVERY=latest is reserved: a run resolves it to the newest complete delivery when it plans; name the delivery here"
+        );
+    }
+
+    #[test]
     fn destinations_without_delivery_and_with_explicit_out() {
         for (args, expected) in [
             (

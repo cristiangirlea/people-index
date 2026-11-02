@@ -71,7 +71,8 @@ pub struct StoreArgs {
     /// Input prefix holding organizations/ and persons/, when not <store>/raw.
     #[arg(long, env = "PI_INPUT_URL")]
     pub input_url: Option<String>,
-    /// Delivery sub-prefix beneath the input root.
+    /// Delivery sub-prefix beneath the input root. The reserved value latest makes a run plan
+    /// the newest delivery that has its _COMPLETE marker.
     #[arg(long, env = "PI_DELIVERY")]
     pub delivery: Option<String>,
     /// Time after the first S3 request during which retries may start.
@@ -253,6 +254,10 @@ pub struct RunArgs {
     /// Give up on a distributed stage after this long (default: never).
     #[arg(long, env = "PI_STAGE_TIMEOUT", value_parser = parse_duration)]
     pub stage_timeout: Option<Duration>,
+    /// With PI_DELIVERY=latest, plan the newest complete delivery even when the alias already
+    /// serves it (default: such a run is skipped).
+    #[arg(long, env = "PI_REPUBLISH_UNCHANGED_DELIVERY", default_value_t = false)]
+    pub republish_unchanged_delivery: bool,
     #[command(flatten)]
     pub store: StoreArgs,
     #[command(flatten)]

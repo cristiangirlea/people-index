@@ -2,7 +2,7 @@
 //!
 //! A worker follows one run: it reads the current stage from the run state, claims that
 //! stage's uncommitted tasks with leases, runs them through the stage registry, commits, and
-//! exits when the run is published or failed. Any number of workers can follow the same run;
+//! exits when the run is published, failed or skipped. Any number of workers can follow the same run;
 //! leases keep them from duplicating work and commits keep a duplicate harmless.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -21,6 +21,7 @@ use crate::registry::StageRegistry;
 use crate::retry::RetryPolicy;
 use crate::run_state::{RunState, RunStatus};
 use crate::runner::{TaskOutcome, run_task};
+use crate::skipped::RunSkipped;
 use crate::stage::Stage;
 use crate::stage_name::StageName;
 use crate::stage_spec::{RunBy, StageSpec};
@@ -36,6 +37,9 @@ pub enum WorkerExit {
     Published,
     /// The run failed (by this worker or another participant); the recorded error.
     Failed(String),
+    /// The coordinator skipped the run (`skipped.json`, the alias already serves the newest
+    /// delivery): nothing to do, which is done.
+    Skipped,
     /// The worker's context was cancelled (shutdown).
     Cancelled,
     /// Nothing to do for longer than the idle timeout.
@@ -224,6 +228,12 @@ impl Loop<'_> {
             return Ok(Some(WorkerExit::Failed(f.error)));
         }
         let Some(state) = RunState::load(&self.ctx.store, &self.ctx.layout).await? else {
+            // A coordinator decides a skip before it writes any run state, so the skip record
+            // is only looked for while there is none.
+            if let Some(skipped) = RunSkipped::load(&self.ctx.store, &self.ctx.layout).await? {
+                tracing::info!(run = %self.ctx.run_id, delivery = %skipped.delivery, reason = %skipped.reason, "run skipped by its coordinator");
+                return Ok(Some(WorkerExit::Skipped));
+            }
             return Ok(None);
         };
         match state.status {

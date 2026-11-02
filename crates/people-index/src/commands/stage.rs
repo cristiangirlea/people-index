@@ -4,6 +4,7 @@
 //! skipped, and a successful one commits. The stage's task list file is rewritten with the
 //! tasks run, so do not point it at a run that distributed workers are following.
 
+use anyhow::Context as _;
 use pi_coord::{CancellationToken, StageName, StageReport};
 
 use crate::cli::StageArgs;
@@ -11,8 +12,20 @@ use crate::settings::{Stores, coordination, local_executor, stages_config};
 
 /// Runs the selected tasks of the stage and returns their report.
 pub async fn run(args: StageArgs, cancel: CancellationToken) -> anyhow::Result<StageReport> {
-    let name: StageName = args.name.parse()?;
     let stores = Stores::open(&args.store)?;
+    run_with(&args, stores, cancel).await
+}
+
+/// [`run`] on stores already opened.
+pub async fn run_with(
+    args: &StageArgs,
+    mut stores: Stores,
+    cancel: CancellationToken,
+) -> anyhow::Result<StageReport> {
+    let name: StageName = args.name.parse()?;
+    if stores.follow_latest {
+        stores.delivery = recorded_delivery(&stores.runs, &args.run_id).await?;
+    }
     let ctx = stores.context(&args.run_id, cancel.child_token())?;
     let registry = pi_stages::build_registry(stages_config(
         &args.pipeline,
@@ -45,6 +58,23 @@ pub async fn run(args: StageArgs, cancel: CancellationToken) -> anyhow::Result<S
         work,
     )
     .await
+}
+
+/// With `PI_DELIVERY=latest`, the delivery the run's plan recorded: a hand-run stage never
+/// chooses one, so a run without a plan is refused.
+async fn recorded_delivery(runs: &pi_store::Store, run_id: &str) -> anyhow::Result<Option<String>> {
+    let key = pi_store::RunLayout::new(run_id)?.plan();
+    match runs
+        .get_json::<pi_stages::Plan>(&key)
+        .await
+        .with_context(|| format!("reading {key}"))?
+    {
+        Some((plan, _)) => Ok(plan.delivery),
+        None => anyhow::bail!(
+            "PI_DELIVERY=latest: run {run_id} has no plan yet, and stage does not choose a \
+             delivery; let run plan it, or set PI_DELIVERY to the delivery's name"
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The lock owns the full lifecycle.
@@ -193,6 +223,111 @@ mod tests {
     use super::*;
     use pi_coord::{LeaseConfig, LeaseManager, RunLease};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn with_latest_a_stage_uses_the_recorded_delivery_and_never_chooses_one() {
+        let store = pi_store::Store::memory();
+        let err = recorded_delivery(&store, "r1")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "PI_DELIVERY=latest: run r1 has no plan yet, and stage does not choose a delivery; \
+             let run plan it, or set PI_DELIVERY to the delivery's name"
+        );
+        for (run_id, delivery) in [
+            ("r1", serde_json::json!("b1")),
+            ("r2", serde_json::Value::Null),
+        ] {
+            store
+                .put_json(
+                    &pi_store::RunLayout::new(run_id).unwrap().plan(),
+                    &serde_json::json!({"run_id": run_id, "delivery": delivery, "partitions": 16,
+                        "alias": "persons", "index": "persons-r1", "organizations": [],
+                        "persons": [], "total_bytes": 1, "created_at": "2026-11-01T02:00:00Z"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                recorded_delivery(&store, run_id).await.unwrap(),
+                delivery.as_str().map(str::to_owned)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn with_latest_the_stage_command_runs_a_planned_run_and_refuses_an_unplanned_one() {
+        use clap::Parser as _;
+        let store = pi_store::Store::memory();
+        store
+            .put("raw/b1/persons/a.ndjson.gz", vec![1])
+            .await
+            .unwrap();
+        let plan = |run_id: &str| {
+            serde_json::json!({"run_id": run_id, "delivery": "b1", "partitions": 16,
+                "alias": "persons", "index": format!("persons-{run_id}"), "organizations": [],
+                "persons": [], "total_bytes": 1, "created_at": "2026-11-01T02:00:00Z"})
+        };
+        store
+            .put_json(&pi_store::RunLayout::new("r1").unwrap().plan(), &plan("r1"))
+            .await
+            .unwrap();
+        let stage = |run_id: &str| {
+            let crate::cli::Command::Stage(args) = crate::cli::Cli::try_parse_from([
+                "people-index",
+                "stage",
+                "plan",
+                "--run-id",
+                run_id,
+                "--store-url",
+                "memory://",
+                "--delivery",
+                "latest",
+                "--metrics-addr",
+                "off",
+            ])
+            .unwrap()
+            .command
+            else {
+                unreachable!()
+            };
+            args
+        };
+        let on = |args: &StageArgs| Stores {
+            runs: store.clone(),
+            ..Stores::open(&args.store).unwrap()
+        };
+        let planned = stage("r1");
+        let report = run_with(&planned, on(&planned), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.stage, StageName::Plan);
+        // Nothing read or wrote a delivery named latest.
+        assert_eq!(
+            store.list_keys("raw/latest").await.unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            recorded_delivery(&store, "r1").await.unwrap().as_deref(),
+            Some("b1")
+        );
+
+        let unplanned = stage("r2");
+        let err = run_with(&unplanned, on(&unplanned), CancellationToken::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "PI_DELIVERY=latest: run r2 has no plan yet, and stage does not choose a delivery; \
+             let run plan it, or set PI_DELIVERY to the delivery's name"
+        );
+        assert_eq!(
+            store.list_keys("runs/r2").await.unwrap(),
+            Vec::<String>::new()
+        );
+    }
 
     #[tokio::test]
     async fn stage_lock_excludes_shares_releases_and_overrides() {

@@ -200,6 +200,7 @@ differently (`PI_EXECUTOR=distributed`, smaller or larger task memory).
 | setting | default | what for |
 |---|---|---|
 | `PI_STORE_URL` | `file://./store` | the run store, `s3://bucket/prefix` |
+| `PI_STORE_RETRY_TIMEOUT` | `120s` | S3 retry window from the initial request |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | unset; `us-east-1` | an S3-compatible endpoint (path-style requests) and its credentials |
 | `PI_INPUT_URL` | `<store>/raw` | inputs under a separate prefix |
 | `PI_DELIVERY`, `PI_REQUIRE_COMPLETE_MARKER` | unset, false | which delivery a run reads, and whether `_COMPLETE` is required |

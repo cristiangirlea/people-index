@@ -63,6 +63,77 @@ async fn a_live_lease_is_kept_alive_by_renewals() {
 }
 
 #[tokio::test]
+async fn blocked_renewal_loses_lease_before_expiry() {
+    let (store, faults) = FlakyStore::with_faults();
+    let manager = manager(&store, "a", 300);
+    let guard = manager
+        .try_claim(StageName::Join, "t")
+        .await
+        .unwrap()
+        .unwrap();
+    let (lease, _) = manager.read(StageName::Join, "t").await.unwrap().unwrap();
+    faults.blocked_updates.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(2), guard.lost_token().cancelled())
+        .await
+        .expect("blocked renewal must signal lease loss");
+    assert!(guard.is_lost());
+    assert!(OffsetDateTime::now_utc() < lease.expires_at);
+}
+
+#[tokio::test]
+async fn briefly_blocked_renewal_keeps_lease() {
+    let (store, faults) = FlakyStore::with_faults();
+    let manager = manager(&store, "a", 600);
+    let guard = manager
+        .try_claim(StageName::Join, "t")
+        .await
+        .unwrap()
+        .unwrap();
+    faults.blocked_updates.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    faults.blocked_updates.store(false, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!guard.is_lost());
+    assert!(
+        manager
+            .read(StageName::Join, "t")
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+            .renewals
+            > 0
+    );
+}
+
+#[tokio::test]
+async fn lost_commit_response_is_our_success() {
+    let (store, faults) = FlakyStore::with_faults();
+    let log = CommitLog::new(store.clone(), ctx(&store, "r1").layout);
+    let record = CommitRecord {
+        stage: StageName::Join,
+        task_id: "t".into(),
+        attempt: AttemptId::new(),
+        worker: "a".into(),
+        committed_at: OffsetDateTime::now_utc(),
+        report: TaskReport::default(),
+    };
+    faults.lost_create_responses.store(1, Ordering::SeqCst);
+    assert!(matches!(
+        log.commit(&record).await.unwrap(),
+        CommitOutcome::Committed
+    ));
+    assert_eq!(
+        log.get(StageName::Join, "t")
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt,
+        record.attempt
+    );
+}
+
+#[tokio::test]
 async fn an_expired_lease_is_taken_over() {
     let store = Store::memory();
     let a = manager(&store, "a", 200);

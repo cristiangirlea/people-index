@@ -7,6 +7,10 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Fixed
+
+- Retry transient S3 failures through brief store outages with the configurable `PI_STORE_RETRY_TIMEOUT` window.
+
 ### Changed
 
 - Pin the production example release image by digest and check rendered Job images.

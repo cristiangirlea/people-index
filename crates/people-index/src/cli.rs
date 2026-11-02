@@ -17,6 +17,14 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     humantime::parse_duration(text).map_err(|e| format!("{text:?}: {e}"))
 }
 
+fn parse_store_retry_timeout(text: &str) -> Result<Duration, String> {
+    let duration = parse_duration(text)?;
+    if duration > Duration::from_secs(300) {
+        return Err("PI_STORE_RETRY_TIMEOUT must be at most 5 minutes".into());
+    }
+    Ok(duration)
+}
+
 /// people-index: joins a person feed with an organization feed and publishes one searchable
 /// Elasticsearch index, as staged, idempotent tasks over an object store.
 #[derive(Debug, Parser)]
@@ -66,6 +74,9 @@ pub struct StoreArgs {
     /// Delivery sub-prefix beneath the input root.
     #[arg(long, env = "PI_DELIVERY")]
     pub delivery: Option<String>,
+    /// Time after the first S3 request during which retries may start.
+    #[arg(long, env = "PI_STORE_RETRY_TIMEOUT", default_value = humantime::format_duration(pi_store::DEFAULT_STORE_RETRY_TIMEOUT).to_string(), value_parser = parse_store_retry_timeout)]
+    pub store_retry_timeout: Duration,
     /// S3-compatible endpoint (MinIO). Credentials come from AWS_* variables.
     #[arg(long, env = "PI_S3_ENDPOINT")]
     pub s3_endpoint: Option<String>,

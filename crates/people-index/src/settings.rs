@@ -92,6 +92,7 @@ fn input_root_parts(separate: bool, delivery: Option<&str>) -> anyhow::Result<St
 pub fn store_options(args: &StoreArgs) -> StoreOptions {
     StoreOptions {
         s3_endpoint: args.s3_endpoint.clone(),
+        retry_timeout: args.store_retry_timeout,
         ..StoreOptions::default()
     }
 }
@@ -305,6 +306,46 @@ mod tests {
         match Cli::try_parse_from(argv).unwrap().command {
             Command::Run(r) => r,
             _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn store_retry_timeout_wiring_and_limit() {
+        let default = run_args(&[]);
+        assert_eq!(
+            store_options(&default.store).retry_timeout,
+            StoreOptions::default().retry_timeout
+        );
+        let args = run_args(&["--store-retry-timeout", "5m"]);
+        assert_eq!(
+            store_options(&args.store).retry_timeout,
+            std::time::Duration::from_secs(300)
+        );
+        let error = Cli::try_parse_from(["people-index", "run", "--store-retry-timeout", "301s"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 5 minutes"), "{error}");
+    }
+
+    #[test]
+    fn store_retry_timeout_environment_wiring() {
+        const CHILD: &str = "PI_TEST_RETRY_ENV_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(
+                store_options(&run_args(&[]).store).retry_timeout,
+                std::time::Duration::from_secs(47)
+            );
+        } else {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings::tests::store_retry_timeout_environment_wiring",
+                ])
+                .env(CHILD, "1")
+                .env("PI_STORE_RETRY_TIMEOUT", "47s")
+                .status()
+                .unwrap();
+            assert!(status.success());
         }
     }
 

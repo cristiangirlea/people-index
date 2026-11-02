@@ -64,6 +64,9 @@ impl CommitLog {
         match self.store.put_json_create_if_absent(&key, record).await? {
             CreateOutcome::Created(_) => Ok(CommitOutcome::Committed),
             CreateOutcome::AlreadyExists => match self.get(record.stage, &record.task_id).await? {
+                Some(existing) if existing.attempt == record.attempt => {
+                    Ok(CommitOutcome::Committed)
+                }
                 Some(existing) => Ok(CommitOutcome::AlreadyCommitted(Box::new(existing))),
                 // Commits are never deleted while a run is live; a vanished one means someone
                 // removed the run under us, which must not pass for success.

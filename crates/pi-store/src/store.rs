@@ -19,7 +19,10 @@ use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
-use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
+use object_store::{
+    BackoffConfig, GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload,
+    RetryConfig,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio_util::io::StreamReader;
@@ -28,6 +31,40 @@ use crate::error::{StoreError, StoreResult};
 use crate::location::StoreLocation;
 use crate::options::StoreOptions;
 use crate::version::ObjectVersion;
+
+fn s3_retry_config(retry_timeout: std::time::Duration) -> RetryConfig {
+    RetryConfig {
+        backoff: BackoffConfig {
+            init_backoff: std::time::Duration::from_millis(250),
+            max_backoff: std::time::Duration::from_secs(10),
+            base: 2.0,
+        },
+        max_retries: usize::MAX,
+        retry_timeout,
+    }
+}
+
+fn s3_builder(bucket: &str, options: &StoreOptions) -> AmazonS3Builder {
+    let mut builder = AmazonS3Builder::from_env()
+        .with_retry(s3_retry_config(options.retry_timeout))
+        .with_bucket_name(bucket)
+        .with_allow_http(options.allow_http_resolved());
+    if let Some(region) = &options.s3_region {
+        builder = builder.with_region(region);
+    } else if std::env::var_os("AWS_REGION").is_none()
+        && std::env::var_os("AWS_DEFAULT_REGION").is_none()
+    {
+        builder = builder.with_region("us-east-1");
+    }
+    if let Some(endpoint) = &options.s3_endpoint {
+        builder = builder
+            .with_endpoint(endpoint)
+            .with_virtual_hosted_style_request(options.virtual_hosted_style.unwrap_or(false));
+    } else if let Some(virtual_hosted) = options.virtual_hosted_style {
+        builder = builder.with_virtual_hosted_style_request(virtual_hosted);
+    }
+    builder
+}
 
 /// Which kind of backend a [`Store`] talks to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -176,23 +213,7 @@ impl Store {
 
     /// A store on an S3-compatible bucket, optionally under a key prefix.
     pub fn s3(bucket: &str, prefix: &str, options: &StoreOptions) -> StoreResult<Self> {
-        let mut builder = AmazonS3Builder::from_env()
-            .with_bucket_name(bucket)
-            .with_allow_http(options.allow_http_resolved());
-        if let Some(region) = &options.s3_region {
-            builder = builder.with_region(region);
-        } else if std::env::var_os("AWS_REGION").is_none()
-            && std::env::var_os("AWS_DEFAULT_REGION").is_none()
-        {
-            builder = builder.with_region("us-east-1");
-        }
-        if let Some(endpoint) = &options.s3_endpoint {
-            builder = builder
-                .with_endpoint(endpoint)
-                .with_virtual_hosted_style_request(options.virtual_hosted_style.unwrap_or(false));
-        } else if let Some(virtual_hosted) = options.virtual_hosted_style {
-            builder = builder.with_virtual_hosted_style_request(virtual_hosted);
-        }
+        let builder = s3_builder(bucket, options);
         let s3 = builder.build().map_err(|e| StoreError::InvalidUrl {
             url: format!("s3://{bucket}/{prefix}"),
             reason: e.to_string(),
@@ -599,6 +620,140 @@ fn prefix_path(prefix: &str) -> StoreResult<Option<Path>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn s3_recovers_after_connection_refused() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let listener = TcpListener::bind(addr).await.unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let body = "<?xml version=\"1.0\"?><ListBucketResult><Name>test</Name><IsTruncated>false</IsTruncated></ListBucketResult>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let options = StoreOptions {
+            s3_endpoint: Some(format!("http://{addr}")),
+            retry_timeout: Duration::from_secs(15),
+            ..StoreOptions::default()
+        };
+        let client = s3_builder("test", &options)
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .build()
+            .unwrap();
+        let store = Store::from_object_store(Arc::new(client), Backend::S3, "s3://test");
+        let start = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(20), store.list(""))
+            .await
+            .unwrap();
+        assert_eq!(result.unwrap(), []);
+        assert!(start.elapsed() >= Duration::from_secs(5));
+        server.await.unwrap();
+    }
+
+    fn test_s3(endpoint: String, timeout: std::time::Duration) -> Store {
+        let options = StoreOptions {
+            s3_endpoint: Some(endpoint),
+            s3_region: Some("us-east-1".into()),
+            retry_timeout: timeout,
+            ..StoreOptions::default()
+        };
+        let client = s3_builder("test", &options)
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .build()
+            .unwrap();
+        Store::from_object_store(Arc::new(client), Backend::S3, "s3://test")
+    }
+
+    #[test]
+    fn retry_configuration_has_time_bound_without_count_limit() {
+        let timeout = std::time::Duration::from_secs(7);
+        let config = s3_retry_config(timeout);
+        assert_eq!(config.max_retries, usize::MAX);
+        assert_eq!(config.retry_timeout, timeout);
+    }
+
+    #[tokio::test]
+    async fn s3_stops_retrying_when_endpoint_stays_down() {
+        use std::time::{Duration, Instant};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let store = test_s3(format!("http://{addr}"), Duration::from_secs(1));
+        let start = Instant::now();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(4), store.list(""))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(start.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn s3_http_retry_and_terminal_responses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&calls);
+        Mock::given(method("GET"))
+            .and(path("/test/retry"))
+            .respond_with(move |_: &wiremock::Request| {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_string("ok")
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/test/conditional"))
+            .and(wiremock::matchers::header("if-match", "etag"))
+            .respond_with(ResponseTemplate::new(412))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let store = test_s3(server.uri(), std::time::Duration::from_secs(3));
+        assert_eq!(store.get("retry").await.unwrap().bytes, "ok");
+        assert!(store.get("missing").await.is_err());
+        let version = ObjectVersion {
+            e_tag: Some("etag".into()),
+            version: None,
+        };
+        assert!(matches!(
+            store
+                .put_update_if_match("conditional", "body", &version)
+                .await,
+            Err(StoreError::PreconditionFailed { .. })
+        ));
+        server.verify().await;
+    }
 
     #[test]
     fn keys_are_validated() {

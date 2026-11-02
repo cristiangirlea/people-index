@@ -17,6 +17,10 @@ use pi_store::{RunLayout, Store, StoreOptions};
 
 use crate::cli::{EsArgs, ExecArgs, PipelineArgs, StoreArgs};
 
+/// The reserved `PI_DELIVERY` value: the coordinator plans the newest complete delivery
+/// ([`crate::delivery`]). A delivery cannot be named this.
+pub const LATEST_DELIVERY: &str = "latest";
+
 /// The stores a command works with.
 #[derive(Debug, Clone)]
 pub struct Stores {
@@ -24,8 +28,11 @@ pub struct Stores {
     pub runs: Store,
     /// The input store when separate (`PI_INPUT_URL`).
     pub inputs: Option<Store>,
-    /// Selected input delivery.
+    /// Selected input delivery: the one `PI_DELIVERY` names or, with `PI_DELIVERY=latest`,
+    /// the one the run chose (unset until then).
     pub delivery: Option<String>,
+    /// `PI_DELIVERY=latest`: the coordinator chooses the delivery when it plans a run.
+    pub follow_latest: bool,
 }
 
 impl Stores {
@@ -41,12 +48,28 @@ impl Stores {
                 Store::open(url, &options).with_context(|| format!("opening the inputs {url}"))
             })
             .transpose()?;
-        input_root(args)?;
+        let follow_latest = args.delivery.as_deref() == Some(LATEST_DELIVERY);
+        if !follow_latest {
+            input_root(args)?;
+        }
         Ok(Self {
             runs,
             inputs,
-            delivery: args.delivery.clone(),
+            delivery: args.delivery.clone().filter(|_| !follow_latest),
+            follow_latest,
         })
+    }
+
+    /// The store the inputs are read from.
+    #[must_use]
+    pub fn input_store(&self) -> &Store {
+        self.inputs.as_ref().unwrap_or(&self.runs)
+    }
+
+    /// The prefix deliveries are directories of: `raw`, or the top of the input store.
+    #[must_use]
+    pub fn deliveries_root(&self) -> &'static str {
+        if self.inputs.is_some() { "" } else { "raw" }
     }
 
     /// The layout of a run: inputs under `raw/` of the run store, or at the top of the input
@@ -63,8 +86,15 @@ impl Stores {
     }
 }
 
-/// Validates the delivery and returns its input prefix without opening a store.
+/// Validates the delivery and returns its input prefix without opening a store. A command
+/// that needs it now (`datagen`) cannot follow `PI_DELIVERY=latest`, which only a coordinator
+/// resolves when it plans.
 pub fn input_root(args: &StoreArgs) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        args.delivery.as_deref() != Some(LATEST_DELIVERY),
+        "PI_DELIVERY=latest is reserved: a run resolves it to the newest complete delivery when \
+         it plans; name the delivery here"
+    );
     input_root_parts(args.input_url.is_some(), args.delivery.as_deref())
 }
 
@@ -92,6 +122,7 @@ fn input_root_parts(separate: bool, delivery: Option<&str>) -> anyhow::Result<St
 pub fn store_options(args: &StoreArgs) -> StoreOptions {
     StoreOptions {
         s3_endpoint: args.s3_endpoint.clone(),
+        retry_timeout: args.store_retry_timeout,
         ..StoreOptions::default()
     }
 }
@@ -309,6 +340,46 @@ mod tests {
     }
 
     #[test]
+    fn store_retry_timeout_wiring_and_limit() {
+        let default = run_args(&[]);
+        assert_eq!(
+            store_options(&default.store).retry_timeout,
+            StoreOptions::default().retry_timeout
+        );
+        let args = run_args(&["--store-retry-timeout", "5m"]);
+        assert_eq!(
+            store_options(&args.store).retry_timeout,
+            std::time::Duration::from_secs(300)
+        );
+        let error = Cli::try_parse_from(["people-index", "run", "--store-retry-timeout", "301s"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 5 minutes"), "{error}");
+    }
+
+    #[test]
+    fn store_retry_timeout_environment_wiring() {
+        const CHILD: &str = "PI_TEST_RETRY_ENV_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(
+                store_options(&run_args(&[]).store).retry_timeout,
+                std::time::Duration::from_secs(47)
+            );
+        } else {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings::tests::store_retry_timeout_environment_wiring",
+                ])
+                .env(CHILD, "1")
+                .env("PI_STORE_RETRY_TIMEOUT", "47s")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+    }
+
+    #[test]
     fn aliases_reject_template_collisions_and_invalid_names() {
         for (alias, template) in [
             ("logs", "logs"),
@@ -475,6 +546,49 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn latest_is_reserved_for_the_run_to_resolve() {
+        let args = run_args(&["--store-url", "memory://", "--delivery", "latest"]);
+        let stores = Stores::open(&args.store).unwrap();
+        assert!(stores.follow_latest);
+        assert_eq!(stores.delivery, None);
+        assert_eq!(stores.deliveries_root(), "raw");
+        assert_eq!(stores.input_store().url(), stores.runs.url());
+        // Until a run chooses, nothing reads a delivery named latest.
+        assert_eq!(stores.layout("r1").unwrap().raw_persons(), "raw/persons");
+        let cfg = stages_config(&args.pipeline, &args.es, &args.exec, &stores).unwrap();
+        assert_eq!(cfg.delivery, None);
+        assert!(!cfg.require_complete_marker);
+        let err = input_root(&args.store).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "PI_DELIVERY=latest is reserved: a run resolves it to the newest complete delivery when it plans; name the delivery here"
+        );
+
+        let args = run_args(&[
+            "--store-url",
+            "memory://",
+            "--input-url",
+            "memory://",
+            "--delivery",
+            "latest",
+        ]);
+        let stores = Stores::open(&args.store).unwrap();
+        assert!(stores.follow_latest);
+        assert_eq!(stores.deliveries_root(), "");
+
+        // Only the whole value is reserved.
+        for name in ["latest-1", "a/latest", "Latest"] {
+            let args = run_args(&["--store-url", "memory://", "--delivery", name]);
+            let stores = Stores::open(&args.store).unwrap();
+            assert!(!stores.follow_latest, "{name}");
+            assert_eq!(stores.delivery.as_deref(), Some(name));
+        }
+        let stores = Stores::open(&run_args(&["--store-url", "memory://"]).store).unwrap();
+        assert!(!stores.follow_latest);
+        assert_eq!(stores.delivery, None);
     }
 
     #[test]

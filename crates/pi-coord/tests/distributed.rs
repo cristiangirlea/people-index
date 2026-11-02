@@ -405,6 +405,28 @@ async fn a_worker_without_a_run_idles_out() {
 }
 
 #[tokio::test]
+async fn a_worker_waiting_for_a_skipped_run_exits_as_done() {
+    let store = Store::memory();
+    let ctx = ctx(&store, "r1");
+    let registry = Arc::new(StageRegistry::new());
+    // The worker starts first, as the scheduled Job's workers do, and waits for the run.
+    let waiting = spawn_worker(worker("w", &registry, 1_000), &ctx);
+    tokio::time::sleep(POLL * 3).await;
+    assert!(!waiting.is_finished());
+    pi_coord::RunSkipped::new("r1", "no new delivery", "b1", Some("r0".into()))
+        .record(&ctx.store, &ctx.layout)
+        .await
+        .unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.exit, WorkerExit::Skipped);
+    assert_eq!(report.committed, 0);
+}
+
+#[tokio::test]
 async fn a_stage_that_never_commits_times_out() {
     let store = Store::memory();
     let ctx = ctx(&store, "r1");

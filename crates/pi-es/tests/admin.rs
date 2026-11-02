@@ -398,6 +398,38 @@ async fn existing_index_mapping_read_retries_busy_answer() {
 }
 
 #[tokio::test]
+async fn run_owner_reads_the_mapping_meta() {
+    let server = MockServer::start().await;
+    for (index, mappings) in [
+        (
+            "persons-r1",
+            json!({"_meta": {"people_index": {"run_id": "R1"}}, "properties": {}}),
+        ),
+        ("persons-old", json!({"properties": {}})),
+        ("persons-bad", json!("none")),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/{index}/_mapping")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({index: {"mappings": mappings}})),
+            )
+            .mount(&server)
+            .await;
+    }
+    let admin = IndexAdmin::new(client(&server));
+    assert_eq!(
+        admin.run_owner("persons-r1").await.unwrap().as_deref(),
+        Some("R1")
+    );
+    assert_eq!(admin.run_owner("persons-old").await.unwrap(), None);
+    assert!(matches!(
+        admin.run_owner("persons-bad").await,
+        Err(EsError::Decode { .. })
+    ));
+    assert!(admin.run_owner("Bad").await.is_err());
+}
+
+#[tokio::test]
 async fn effective_index_validation_rejects_template_changes() {
     for component in [
         "analyzer",

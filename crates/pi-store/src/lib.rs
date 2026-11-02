@@ -15,7 +15,7 @@ mod version;
 pub use error::{StoreError, StoreResult};
 pub use layout::{Dataset, LayoutError, RUNS_ROOT, RunLayout, alias_lease, validate_id};
 pub use location::StoreLocation;
-pub use options::StoreOptions;
+pub use options::{DEFAULT_STORE_RETRY_TIMEOUT, StoreOptions};
 pub use store::{
     Backend, ByteStream, CreateOutcome, ObjectInfo, ObjectReader, ObjectWriter, Store, StoredObject,
 };

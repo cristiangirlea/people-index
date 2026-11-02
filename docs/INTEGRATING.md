@@ -38,7 +38,8 @@ failed, leaving the alias where it was).
 named `*.ndjson.gz` under `persons/` and `organizations/` (the contract is in
 [The feed contract](#the-feed-contract) below). With `PI_DELIVERY=<name>` a run reads
 `raw/<name>/` instead of `raw/`; write `raw/<name>/_COMPLETE` once the last file is in place and
-set `PI_REQUIRE_COMPLETE_MARKER=true` so a run never plans a half-written delivery. A delivery is
+set `PI_REQUIRE_COMPLETE_MARKER=true` so a run never plans a half-written delivery
+(`PI_DELIVERY=latest` makes each run plan the newest complete one, by name). A delivery is
 never changed after it is marked complete: put replacements in a new one
 ([ARCHITECTURE.md, Feed delivery contract](ARCHITECTURE.md#feed-delivery-contract),
 [OPERATIONS.md, A feed delivery](OPERATIONS.md#a-feed-delivery)). Feeds whose field names differ
@@ -200,9 +201,11 @@ differently (`PI_EXECUTOR=distributed`, smaller or larger task memory).
 | setting | default | what for |
 |---|---|---|
 | `PI_STORE_URL` | `file://./store` | the run store, `s3://bucket/prefix` |
+| `PI_STORE_RETRY_TIMEOUT` | `120s` | S3 retry window from the initial request |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | unset; `us-east-1` | an S3-compatible endpoint (path-style requests) and its credentials |
 | `PI_INPUT_URL` | `<store>/raw` | inputs under a separate prefix |
-| `PI_DELIVERY`, `PI_REQUIRE_COMPLETE_MARKER` | unset, false | which delivery a run reads, and whether `_COMPLETE` is required |
+| `PI_DELIVERY`, `PI_REQUIRE_COMPLETE_MARKER` | unset, false | which delivery a run reads, and whether `_COMPLETE` is required; `PI_DELIVERY=latest` plans the newest complete delivery and skips a run whose delivery the alias already serves ([Scheduled runs](OPERATIONS.md#following-new-deliveries)) |
+| `PI_REPUBLISH_UNCHANGED_DELIVERY` | false | with `PI_DELIVERY=latest`, publish the newest delivery again instead of skipping the run |
 | `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the built-in ones | feeds with other field names |
 | `PI_ES_URL`, `PI_ES_CA_CERT` | `http://localhost:9200`, unset | the cluster and the CA to trust |
 | `PI_ES_USERNAME` + `PI_ES_PASSWORD`, or `PI_ES_API_KEY` | unset | the pipeline's identity (one or the other) |
@@ -333,10 +336,10 @@ the run and is deleted once a newer run has published.
   20,000 persons and 5,000 organizations in 4 files per feed with two workers on one runner
   (`make compose-run` defaults to 200,000 and 50,000). The production example's sizing is
   reasoned, not measured ([README, Limitations](../README.md#limitations)).
-- **Kubernetes**: no Kubernetes cluster has run it yet. The manifests pass schema validation
-  and their parts were checked against Elasticsearch and SeaweedFS containers, but ECK
-  reconciliation, NetworkPolicy enforcement and a distributed run on Kubernetes have not been
-  exercised.
+- **Kubernetes**: run by hand on k3d (the local overlay: ECK reconciliation, two distributed
+  runs, verify, and the rollback and restore steps, with the NetworkPolicies in place); not in
+  CI, and not yet with the production overlay, a multi-host cluster or large data. That a
+  NetworkPolicy blocks what it should was not tested.
 - **Windows**: the local `file://` store fails a write now and then with "Access is denied"
   (#43); use the S3 store for anything that matters. Linux is not affected.
 - **One alias per run store**: retention counts runs across the whole store prefix, and a

@@ -243,6 +243,8 @@ pub struct Faults {
     /// While set, every update-if-match is refused and the object left alone: a store whose
     /// conditional check never accepts the version it handed out.
     pub refused_updates: Arc<AtomicBool>,
+    /// Hold conditional updates indefinitely, simulating a blocked store request.
+    pub blocked_updates: Arc<AtomicBool>,
     /// Simulate a winning update whose response to the loser is a precondition failure.
     pub race_updates: Arc<AtomicUsize>,
     /// A landed conditional write whose retry reports a precondition failure.
@@ -320,6 +322,13 @@ impl ObjectStore for FlakyStore {
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
         self.faults.puts.fetch_add(1, Ordering::SeqCst);
+        if matches!(opts.mode, PutMode::Update(_))
+            && self.faults.blocked_updates.load(Ordering::SeqCst)
+        {
+            while self.faults.blocked_updates.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
         self.check()?;
         if matches!(opts.mode, PutMode::Update(_))
             && self.faults.refused_updates.load(Ordering::SeqCst)

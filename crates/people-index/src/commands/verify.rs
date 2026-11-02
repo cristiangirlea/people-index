@@ -47,6 +47,11 @@ pub async fn load_expected(args: &VerifyArgs) -> anyhow::Result<Expected> {
         }
         None => {
             let stores = Stores::open(&args.store)?;
+            anyhow::ensure!(
+                !stores.follow_latest,
+                "PI_DELIVERY=latest does not say which expected.json to read: pass --expected, \
+                 set PI_DELIVERY to the delivery's name, or use --source summary"
+            );
             let key = stores
                 .layout("verify")?
                 .input_key(pi_datagen::EXPECTED_FILE);

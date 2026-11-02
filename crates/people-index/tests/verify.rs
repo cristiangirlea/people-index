@@ -348,3 +348,18 @@ async fn expected_mode_reads_selected_delivery() {
         .unwrap();
     assert!(outcome.report.passed());
 }
+
+#[tokio::test]
+async fn expected_mode_refuses_latest() {
+    let store = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    let err = verify::run(args(&store, &server, &["--delivery", "latest"]))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        err,
+        "PI_DELIVERY=latest does not say which expected.json to read: pass --expected, set \
+         PI_DELIVERY to the delivery's name, or use --source summary"
+    );
+}

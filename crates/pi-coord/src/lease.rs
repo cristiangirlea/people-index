@@ -539,7 +539,12 @@ async fn renew_loop(mut r: Renewal) -> Option<(Lease, ObjectVersion)> {
     // Set after adopting a version re-read from the store, to renew on it at once rather than
     // an interval later; never twice in a row, so a store that keeps refusing cannot spin.
     let mut renew_at_once = false;
+    let mut wait = interval;
     loop {
+        let remaining = (r.lease.expires_at - OffsetDateTime::now_utc())
+            .try_into()
+            .unwrap_or(Duration::ZERO);
+        let deadline = Instant::now() + remaining.saturating_sub(interval);
         let immediate = std::mem::take(&mut renew_at_once);
         if immediate {
             if r.stop.is_cancelled() {
@@ -548,24 +553,40 @@ async fn renew_loop(mut r: Renewal) -> Option<(Lease, ObjectVersion)> {
         } else {
             tokio::select! {
                 () = r.stop.cancelled() => return Some((r.lease, r.version)),
-                () = tokio::time::sleep(interval) => {}
+                () = tokio::time::sleep(wait) => {}
+                () = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!(key = %r.key, "lease lost: renewal still pending at lease expiry");
+                    return lose(&r.lost);
+                },
             }
         }
+        wait = interval;
         let mut next = r.lease.clone();
         next.expires_at = add(OffsetDateTime::now_utc(), r.config.ttl);
         next.renewals += 1;
-        let failure = match r
-            .store
-            .put_json_update_if_match(&r.key, &next, &r.version)
-            .await
-        {
-            Ok(version) => {
+        let renewal = tokio::time::timeout_at(deadline, async {
+            match r
+                .store
+                .put_json_update_if_match(&r.key, &next, &r.version)
+                .await
+            {
+                Err(StoreError::PreconditionFailed { .. }) => Err(still_ours(&r).await),
+                result => Ok(result),
+            }
+        })
+        .await;
+        let failure = match renewal {
+            Err(_) => {
+                tracing::warn!(key = %r.key, "lease lost: renewal still pending at lease expiry");
+                return lose(&r.lost);
+            }
+            Ok(Ok(Ok(version))) => {
                 r.lease = next;
                 r.version = version;
                 last_ok = Instant::now();
                 continue;
             }
-            Err(StoreError::PreconditionFailed { .. }) => match still_ours(&r).await {
+            Ok(Err(result)) => match result {
                 Ok(Some((lease, version))) => {
                     // The stored expiry bounds the holder: a store that keeps refusing renewals
                     // of a lease that is still ours must not keep us past it. The next renewal
@@ -585,7 +606,7 @@ async fn renew_loop(mut r: Renewal) -> Option<(Lease, ObjectVersion)> {
                 Ok(None) => return lose(&r.lost),
                 Err(e) => e,
             },
-            Err(e) => e,
+            Ok(Ok(Err(e))) => e,
         };
         // Give up before the lease could lapse: past this point another worker may already
         // consider it expired, and two holders is what leases exist to prevent.
@@ -594,6 +615,7 @@ async fn renew_loop(mut r: Renewal) -> Option<(Lease, ObjectVersion)> {
             return lose(&r.lost);
         }
         tracing::warn!(key = %r.key, error = %failure, "lease renewal failed; retrying");
+        wait = interval / 2;
     }
 }
 

@@ -235,11 +235,13 @@ What has not been done or measured yet, plainly:
   budget, segment size, concurrency) rather than input size, with `join` and `assemble` running
   a partition in several passes when it is estimated larger than `PI_TASK_MEMORY_BYTES`, but
   the estimate is a model and the actual peak has not been profiled.
-- **No Kubernetes cluster has run it yet.** The Kubernetes manifests pass schema validation and
-  their pieces were checked against Elasticsearch and SeaweedFS containers, but ECK
-  reconciliation, NetworkPolicy enforcement and a distributed run on k3d have not been
-  exercised. The distributed run itself is tested only on Docker Compose (CI's end-to-end on
-  `main`, a small generated data set on one runner).
+- **Kubernetes has been run by hand, not in CI.** On 2026-11-02 the local overlay on k3d (ECK
+  3.5.0, three master and three data nodes, the in-cluster SeaweedFS) ran two distributed runs
+  of 20000 persons, a verify, and the rollback and restore steps
+  ([OPERATIONS.md](docs/OPERATIONS.md#rollback-and-restore)), with the NetworkPolicies in place.
+  That a policy blocks what it should was not tested, nor larger data, a multi-host cluster or
+  the production overlay. CI tests the distributed run only on Docker Compose (a small generated
+  data set on one runner).
 - **One coordinator per run** is assumed (the Kubernetes Job and compose guarantee it). The
   coordinator's run lease on the alias (on a store with conditional writes) excludes other run
   ids, not a second coordinator for the same id.

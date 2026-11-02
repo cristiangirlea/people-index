@@ -603,10 +603,14 @@ export ES_URL=https://es-es-http:9200 ES_CA=es-ca.crt ES_RESOLVE=es-es-http:9200
 ES_ADMIN_PASSWORD="$(kubectl --context <context> -n people-index get secret es-es-elastic-user \
   -o jsonpath='{.data.elastic}' | base64 -d)"
 
+# Windows: Git Bash's curl uses Schannel, which checks certificate revocation that a private CA
+# cannot answer (CERT_TRUST_REVOCATION_STATUS_UNKNOWN); --ssl-no-revoke skips only that check.
+case "$(curl -V)" in *Schannel*) ES_NO_REVOKE=--ssl-no-revoke ;; *) ES_NO_REVOKE= ;; esac
+
 # Every call below, as the elastic superuser; the password goes to curl on stdin.
 es() {
   printf 'user = "elastic:%s"\n' "$ES_ADMIN_PASSWORD" |
-    curl -K - -sS --fail-with-body --cacert "$ES_CA" ${ES_RESOLVE:+--resolve "$ES_RESOLVE"} \
+    curl -K - -sS --fail-with-body $ES_NO_REVOKE --cacert "$ES_CA" ${ES_RESOLVE:+--resolve "$ES_RESOLVE"} \
       -H 'Content-Type: application/json' "$@"
   echo
 }
@@ -828,8 +832,31 @@ index `persons-20261028-221205`, 20000 documents; snapshot 0.9 s; restore under 
 green 3.0 s, the renamed copy 2.2 s; the counts, the reader's search through the alias and the
 content digest (`verify`) matched, and the second run then published over the restored index
 and deleted it. The whole `make compose-e2e` took 4 min 4 s (the earlier runs: snapshot 1.1 s,
-restores 2.6 to 3.0 s and 2.4 to 2.5 s, about 4 min 50 s). Not yet exercised on k3d or against
-an external S3 store.
+restores 2.6 to 3.0 s and 2.4 to 2.5 s, about 4 min 50 s).
+
+Exercised on 2026-11-02 on k3d by hand, with the commands above (`k3d-people-index`:
+1 server and 3 zoned agents, ECK 3.5.0, Elasticsearch 9.5.5 with three master and three data
+nodes, the in-cluster SeaweedFS 4.48, the image built from main; Git Bash on Windows):
+- Access: the port-forward with `--resolve es-es-http:9200:127.0.0.1` verified ECK's
+  certificate; the repository `people-index` and the `nightly` policy were in place.
+- Run `20261102-k3d01` (20000 documents, `make run`, then `make verify`) published; its alias
+  run lease was released.
+- `_slm/policy/nightly/_execute` took a snapshot of the index in 3 s.
+- After the index was deleted the alias answered 404. Restore under its own name with
+  `include_aliases: false` restored 6 of 6 shards, reached green about 7 s after the delete,
+  and counted 20000, the `documents` in the run's `summary.json`; the alias stayed off it until
+  the step-4 request moved it.
+- `make verify` against the restored alias passed in the local overlay's `VERIFY_SOURCE=expected`
+  mode (datagen's `expected.json`). Step 5's `summary` mode was not exercised on k3d.
+- A newer run, `20261102-k3d02`, then published over the rollback and deleted the restored
+  index, as described above. It first failed in `load`: the in-cluster SeaweedFS was OOM-killed
+  under that load (#113) and the run's store retries ran out within seconds (#114).
+  `make resume` finished it from its commits in 20 s.
+
+The `es()` helper ran with the same `--ssl-no-revoke` choice written another way (a bash
+array), not the `case` line above.
+
+Not yet exercised against an external S3 store.
 
 ## Scheduled runs
 

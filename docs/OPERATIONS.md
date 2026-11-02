@@ -424,6 +424,21 @@ What to watch during a load: a rising rate of bulk retries means the cluster is 
 
 ## Sizing
 
+**In-cluster SeaweedFS.** The local store (base and local overlay) requests 1.5 GiB and is
+limited to 2 GiB. Its memory peaked at 1491 MiB (1.46 GiB) during `make compose-e2e` (200,000
+persons: a run that fails in publish, two good runs, a snapshot and the restore drill; sampled
+about every 5 s, so the true peak may be a little higher); at the earlier 512 MiB it was
+OOM-killed on k3d mid-run (#113). With these values, on 2026-11-02, a 200,000-person run on
+k3d with an SLM snapshot taken during `load` finished with no SeaweedFS restart; its memory
+peaked at 910 MiB there (`kubectl top`, every 5 s). It grows with the data it holds and serves, so measure
+before running larger data on it; production uses an external S3 store instead.
+
+**Docker memory for the local overlay.** During a run the overlay requests about 12.5 GiB:
+Elasticsearch 7.5 GiB (three 1 GiB masters, three 1.5 GiB data nodes), SeaweedFS 1.5 GiB (up to
+2 GiB), and a run's three workers and coordinator 3.5 GiB, plus the k3s nodes, the ECK
+operator and system pods. The k3d nodes share one Docker VM without per-node caps, so the
+scheduler cannot see a shortfall: give Docker at least 14 GiB.
+
 **Run store.** Budget for roughly `PI_RETAIN_RUNS` (default 3) published runs of segments,
 plus current and unfinished runs and runs sharing a boundary timestamp. Set it to 0 to disable
 cleanup. Retention is store-wide: aliases or deployments sharing a bucket prefix share one

@@ -258,6 +258,7 @@ What has not been done or measured yet, plainly:
 
 ## Project documents
 
+- [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 

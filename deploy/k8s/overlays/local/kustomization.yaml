@@ -5,7 +5,7 @@
 #   kubectl --context k3d-people-index apply --server-side -k deploy/k8s/overlays/local
 #
 # Elasticsearch: 3 masters (512 MiB heap) and 3 data nodes (768 MiB heap), one of each per
-# zone, about 7.5 GiB of memory in all; give Docker at least 10 GiB. Snapshots go to the
+# zone, about 7.5 GiB of memory in all; give Docker at least 14 GiB (OPERATIONS.md, Sizing). Snapshots go to the
 # in-cluster store. Monitoring is left out because k3d has no prometheus-operator; add
 # `- ../../components/monitoring` to `components` (and generate es-exporter-credentials, as
 # overlays/production-example does) once kube-prometheus-stack is installed.

@@ -1,4 +1,7 @@
-//! `people-index worker`: claims tasks of a run until it is published or failed.
+//! `people-index worker`: claims tasks of a run until it is published, failed or skipped.
+//!
+//! Workers never choose a delivery: with `PI_DELIVERY=latest` too, every task reads the input
+//! files the run's plan lists.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,11 +17,20 @@ use crate::settings::{Stores, concurrency, coordination, retry_policy, stages_co
 /// before the coordinator).
 pub async fn run(args: WorkerArgs, cancel: CancellationToken) -> anyhow::Result<WorkerReport> {
     let stores = Stores::open(&args.store)?;
+    run_with(&args, &stores, cancel).await
+}
+
+/// [`run`] on stores already opened.
+pub async fn run_with(
+    args: &WorkerArgs,
+    stores: &Stores,
+    cancel: CancellationToken,
+) -> anyhow::Result<WorkerReport> {
     let registry = Arc::new(pi_stages::build_registry(stages_config(
         &args.pipeline,
         &args.es,
         &args.exec,
-        &stores,
+        stores,
     )?)?);
     let run_id = match (args.run_id.clone(), args.run_id_from_job_name.as_deref()) {
         (_, Some(name)) => crate::run_id::from_job_name(name)?,

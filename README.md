@@ -92,7 +92,7 @@ make compose-down   # stop, keep the data (make compose-clean deletes it)
 Size the synthetic data with `DATAGEN_PERSONS`, `DATAGEN_ORGANIZATIONS`, `DATAGEN_FILES`,
 `DATAGEN_SEED` and the workers with `WORKERS` (`make compose-run WORKERS=6`).
 
-**Kubernetes on k3d** (k3d 5 and kubectl; Docker needs at least 10 GiB of memory for the local
+**Kubernetes on k3d** (k3d 5 and kubectl; Docker needs at least 14 GiB of memory for the local
 overlay):
 
 ```bash

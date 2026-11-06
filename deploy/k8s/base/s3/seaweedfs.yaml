@@ -2,7 +2,7 @@
 # and S3 gateway in one process).
 #
 # Why SeaweedFS: the pipeline's commit and lease protocol needs conditional writes, and this
-# store answers them like S3 does (verified against chrislusf/seaweedfs:4.48: PUT with
+# store answers them like S3 does (verified against chrislusf/seaweedfs:4.48, and 4.50 by check-s3: PUT with
 # `If-None-Match: *` on an existing key and PUT with a stale `If-Match` etag both return 412,
 # and of 16 concurrent create-if-absent PUTs on one key exactly one wins). MinIO no longer
 # publishes container images.

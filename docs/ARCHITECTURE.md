@@ -491,7 +491,7 @@ the `expires_at` it already read, so a live lease costs no request on most polls
 `lease_ttl / 3`, costs one read).
 
 Conditional updates need an S3-compatible store that answers 412 to a failed `If-None-Match: *`
-or a stale `If-Match`; the deployments use SeaweedFS 4.48, which does (see
+or a stale `If-Match`; the deployments use SeaweedFS 4.50, which does (see
 [ADR 0003](adr/0003-object-store-commits-and-leases.md)). The local filesystem store supports
 create-if-absent but not update-if-match; the distributed executor refuses it. The run lock
 requires conditional writes (S3 or memory); local runs proceed without a run lock.
@@ -645,7 +645,7 @@ Served on `PI_METRICS_ADDR` at `/metrics`:
 
 - **Kubernetes** (`deploy/k8s`, Kustomize): ECK 3.5.0 runs Elasticsearch 9.5.5 with three
   dedicated master nodes and a data node set spread across zones (`topology.kubernetes.io/zone`,
-  shard allocation awareness); SeaweedFS 4.48 is the S3-compatible store locally (the
+  shard allocation awareness); SeaweedFS 4.50 is the S3-compatible store locally (the
   production example uses external S3); the coordinator is a Job and the workers a Job with
   `parallelism: N`, spread across zones and nodes. `deploy/k3d` creates a local cluster of one
   server and three agents labelled with three zones, so the multi-node layout is exercised on

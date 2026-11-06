@@ -29,6 +29,20 @@ or reading it. Use a new delivery for replacements. The plan pins listed input v
 extract fails if an input changes; it cannot detect files added after listing. A resumed run
 uses its existing plan and selected delivery.
 
+`PI_DELIVERY=latest` is a reserved value, so no delivery can be named `latest`: the coordinator
+chooses the delivery when it plans a new run. Of the directories directly under the input root
+(`raw/`, or the top of `PI_INPUT_URL`) that hold a `_COMPLETE` object it takes the greatest name
+in byte order, so delivery names must sort in time order (`batch-20261102`, `20261102T0200Z`).
+The feed directories of the layout without deliveries (`persons`, `organizations`) and names
+that are not a delivery segment are passed over; a directory named `latest`, or no complete
+delivery at all, fails the run permanently with an error naming the input root. `latest`
+implies `PI_REQUIRE_COMPLETE_MARKER=true`. The plan records the chosen name in `delivery`, and
+every task reads the files the plan lists: a resumed run, its workers and a `stage` command use
+the recorded delivery and never resolve `latest` again (`stage` refuses a run without a plan).
+`datagen` and `verify --source expected` cannot follow it; name the delivery there. Whether a
+run whose newest delivery the alias already serves runs at all is decided under the alias lease
+("Scheduled runs and coordinator lease").
+
 Unknown top-level record keys are retained in `_source` but `dynamic: false` does not index
 them. Each extract commit counts `fields_not_indexed` per kept record key, after duplicate-key
 reduction and before ID deduplication; the stage summaries sum these counts. Mapped disabled
@@ -371,6 +385,7 @@ raw/<delivery>/expected.json          synthetic verification
 runs/<run_id>/plan.json
 runs/<run_id>/state.json               RunState: running | published | failed, current stage
 runs/<run_id>/failed.json              the failure marker (create-if-absent)
+runs/<run_id>/skipped.json             a run PI_DELIVERY=latest skipped, instead of any run state
 runs/<run_id>/stages/<stage>.json      the stage's task list and run_by, written by the coordinator
 runs/<run_id>/<stage>/_commit/<task>.json
 runs/<run_id>/<stage>/_lease/<task>.json
@@ -391,7 +406,8 @@ the snapshots component stores them under `snapshots/`.
   `publish` reads that start second to tell older runs' indexes from newer ones.
 - `plan.json`: `{run_id, delivery, partitions, alias, index, organizations: [{key, size, version}],
   persons: [{key, size, version}], total_bytes, schema: {feed_schema_sha256, mapping_sha256},
-  created_at}`, written create-if-absent; a retry reads it back. `schema` pins the feed schema
+  created_at}`, written create-if-absent; a retry reads it back. `delivery` is the configured
+  `PI_DELIVERY`, or the delivery `PI_DELIVERY=latest` chose. `schema` pins the feed schema
   and the index mapping ("Feed schema"); every task refuses a run whose pin differs from its
   own, and a plan without it means the built-in ones. `version` is `{e_tag, version}` as the input listing reported it (the etag
   always; a version id only where the store reports one). Extract reads each file with
@@ -404,6 +420,10 @@ the snapshots component stores them under `snapshots/`.
 - `state.json`: `{run_id, status, stage, completed, error, started_at, updated_at}`.
 - `failed.json`: `{stage, task_id, worker, error, failed_at}`. Whoever fails the run first
   creates it; workers and the coordinator stop when they see it; resuming a failed run clears it.
+- `skipped.json`: `{run_id, reason, delivery, serving_run, skipped_at}`, created
+  create-if-absent by a coordinator that found the alias already serving the newest complete
+  delivery, in place of a plan and a state. It is final for the run id: the coordinator started
+  again with that id exits as skipped, and workers that find no state but this file exit 0.
 - Quarantine: one NDJSON line per entry, `{feed, file, line, kind, reason, sample}` with a
   sample of at most 1 KiB; kinds `syntax | envelope | record | too_long | document_too_large`.
 - `publish.json`: `{alias, index, previous, previous_docs}`, the indexes the alias pointed at (the run's own
@@ -458,6 +478,11 @@ renewal re-reads the lease: if it still carries the holder's own `holder` token 
 renewal landed but its response was lost), the holder goes on with the etag it read. A holder
 whose renewals fail for a whole ttl, or whose lease was taken or deleted, has its task
 cancelled. Leases avoid duplicate work; commits are what keep a duplicate harmless.
+
+The renewal loop bounds each wait and store operation to one renewal interval before the held lease expiry. If an
+S3 retry is still blocked at that deadline, it signals lease loss and cancels the task or coordinator;
+the store retry window may therefore exceed the lease TTL. A request already accepted by the
+server can still complete, so conditional writes and first-wins commits remain essential.
 
 A polling worker lists `_lease/` once per poll (next to `_commit/`) and tries to claim only the
 tasks whose lease is absent, released or past `expires_at + clock_skew`. It reads a lease body
@@ -529,8 +554,10 @@ sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | variable | meaning | default |
 |---|---|---|
 | `PI_STORE_URL` | object store prefix | `file://./store` |
+| `PI_STORE_RETRY_TIMEOUT` | S3 retry window from the initial request, at most 5 minutes; a request or backoff can finish after it | `120s` |
 | `PI_INPUT_URL` | input prefix, if not `<store>/raw` | unset |
-| `PI_DELIVERY` | input sub-prefix for a delivery | unset |
+| `PI_DELIVERY` | input sub-prefix for a delivery; `latest`: the newest complete one, chosen when a run plans ("Feed delivery contract") | unset |
+| `PI_REPUBLISH_UNCHANGED_DELIVERY` | `run` with `PI_DELIVERY=latest`: plan the newest delivery even when the alias already serves it, instead of skipping the run | false |
 | `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the feed schema and the index mapping, as JSON files ("Feed schema"); empty is unset | unset: the built-in ones |
 | `PI_REQUIRE_COMPLETE_MARKER` | require `_COMPLETE` in the input root | false |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | S3-compatible store; an endpoint switches to path-style requests and an `http://` one allows plain HTTP | unset; region `us-east-1` |
@@ -571,12 +598,14 @@ sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 - `people-index run`: the coordinator. With `PI_EXECUTOR=local` it runs every stage itself;
   with `distributed` it writes each stage's task list, runs the single-task stages, waits for
   the workers' commits, and moves on. An existing `PI_RUN_ID` is resumed. Exits 0 once
-  published, 1 on failure.
+  published, or once skipped (`PI_DELIVERY=latest` and no new delivery; it prints
+  `"status": "skipped"`), 1 on failure.
 - `people-index scheduled`: rewrites to `run` for JOB_COMPLETION_INDEX 0 and `worker` for
   other non-negative indices; a missing or invalid index fails. Scheduled worker failures exit 2
   so the Job retries them, while coordinator failures exit 1.
 - `people-index worker`: claims and runs tasks of the current stage of `--run-id` (or of the
-  newest run) until the run is published or failed, or the idle timeout passes, then exits 0.
+  newest run) until the run is published, failed or skipped, or the idle timeout passes, then
+  exits 0.
 - `people-index datagen --persons N --organizations M --files F --seed S --out <url>`: writes
   `organizations/`, `persons/` and `expected.json` under `--out`, in the built-in schema.
 - `people-index verify --expected <file|url>`: runs the acceptance queries against the alias
@@ -606,6 +635,8 @@ Served on `PI_METRICS_ADDR` at `/metrics`:
 - stages: `pi_stage_duration_seconds{stage}`, `pi_stage_tasks{stage}`;
 - leases: `pi_lease_takeovers_total`, `pi_lease_lost_total`;
 - data: `pi_malformed_lines_total{feed}`, `pi_documents_indexed_total`;
+- runs: `pi_runs_skipped_total` (a coordinator that skipped its run; it exits right after, so a
+  scrape rarely catches it, and the log line and `skipped.json` are the record);
 - bulk: `pi_es_bulk_requests_total`, `pi_es_bulk_retries_total`,
   `pi_es_bulk_items_retried_total`, `pi_es_bulk_docs_indexed_total`,
   `pi_es_bulk_wire_bytes_total`.
@@ -640,6 +671,25 @@ a late Job within startingDeadlineSeconds can lose to a manual run started in th
 on exit. A different run is refused while the lease is live; the same run may resume and an
 expired lease can be taken over. Loss of the lease stops the coordinator. The lock requires a store supporting conditional updates; local runs have no lock. Publish orders stamped ids; hand-picked unstamped ids are not
 ordered.
+
+With `PI_DELIVERY=latest`, the coordinator decides what its run reads holding the alias lease and
+before it writes any run state. A run with a plan resumes with the plan's delivery; a run with a
+`skipped.json` stays skipped. Otherwise it finds the newest complete delivery and the delivery
+the alias serves: the alias's one index, the run that index names as its owner in its mapping
+(`_meta.people_index.run_id`, written by `prepare-index` and kept through a snapshot restore),
+and that run's `plan.json`. The alias is the reference, not the newest published run in the
+store: a rollback or restore re-points it at an older run's index, and it can be moved by hand.
+When the served delivery is the same as the newest complete one, or sorts after it (a hand run
+of a named delivery without its marker; planning the newest would publish older data over it),
+and `PI_REPUBLISH_UNCHANGED_DELIVERY` is false, the coordinator writes `skipped.json` (its
+`reason` names the served delivery), releases the lease, logs `no new delivery; run skipped`, counts `pi_runs_skipped_total` and exits 0; its
+workers (the scheduled Job's learn the run id from the Job name and wait for the run) find no
+run state but `skipped.json` and exit 0, so the Job completes. An alias that does not exist yet,
+points at several indexes, names no owner or an owner without a plan in this store means the
+newest delivery is planned (a warning says why for the last three); an Elasticsearch error
+while reading the alias fails the coordinator before any run state. A run whose state exists
+without a plan (its coordinator stopped in between) is past the decision and plans the newest
+delivery.
 
 A hand-run `stage` claims and renews the alias lease through execution when free or expired.
 It shares a live same-run lease, but refuses to rewrite the current stage spec when the run is

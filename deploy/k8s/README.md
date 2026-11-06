@@ -49,7 +49,7 @@ kubectl --context k3d-people-index -n people-index wait elasticsearch/es \
 ```
 
 Server-side apply because the ECK CRDs are too large for the annotation client-side apply keeps.
-Docker needs at least 10 GiB of memory for the local overlay.
+Docker needs at least 14 GiB of memory for the local overlay (the sum is in docs/OPERATIONS.md, Sizing).
 
 Generate inputs, then run the pipeline:
 

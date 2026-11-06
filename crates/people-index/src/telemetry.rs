@@ -49,3 +49,10 @@ pub fn record_stage(report: &pi_coord::StageReport) {
     #[allow(clippy::cast_precision_loss, reason = "task counts are small")]
     metrics::gauge!("pi_stage_tasks", "stage" => stage).set(report.tasks() as f64);
 }
+
+/// Counts a run its coordinator skipped because the alias already serves the newest
+/// delivery. The coordinator exits right after, so a scrape rarely sees it; the log line and
+/// `runs/<id>/skipped.json` are the record.
+pub fn record_skip() {
+    metrics::counter!("pi_runs_skipped_total").increment(1);
+}

@@ -17,6 +17,14 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     humantime::parse_duration(text).map_err(|e| format!("{text:?}: {e}"))
 }
 
+fn parse_store_retry_timeout(text: &str) -> Result<Duration, String> {
+    let duration = parse_duration(text)?;
+    if duration > Duration::from_secs(300) {
+        return Err("PI_STORE_RETRY_TIMEOUT must be at most 5 minutes".into());
+    }
+    Ok(duration)
+}
+
 /// people-index: joins a person feed with an organization feed and publishes one searchable
 /// Elasticsearch index, as staged, idempotent tasks over an object store.
 #[derive(Debug, Parser)]
@@ -63,9 +71,13 @@ pub struct StoreArgs {
     /// Input prefix holding organizations/ and persons/, when not <store>/raw.
     #[arg(long, env = "PI_INPUT_URL")]
     pub input_url: Option<String>,
-    /// Delivery sub-prefix beneath the input root.
+    /// Delivery sub-prefix beneath the input root. The reserved value latest makes a run plan
+    /// the newest delivery that has its _COMPLETE marker.
     #[arg(long, env = "PI_DELIVERY")]
     pub delivery: Option<String>,
+    /// Time after the first S3 request during which retries may start.
+    #[arg(long, env = "PI_STORE_RETRY_TIMEOUT", default_value = humantime::format_duration(pi_store::DEFAULT_STORE_RETRY_TIMEOUT).to_string(), value_parser = parse_store_retry_timeout)]
+    pub store_retry_timeout: Duration,
     /// S3-compatible endpoint (MinIO). Credentials come from AWS_* variables.
     #[arg(long, env = "PI_S3_ENDPOINT")]
     pub s3_endpoint: Option<String>,
@@ -242,6 +254,10 @@ pub struct RunArgs {
     /// Give up on a distributed stage after this long (default: never).
     #[arg(long, env = "PI_STAGE_TIMEOUT", value_parser = parse_duration)]
     pub stage_timeout: Option<Duration>,
+    /// With PI_DELIVERY=latest, plan the newest complete delivery even when the alias already
+    /// serves it (default: such a run is skipped).
+    #[arg(long, env = "PI_REPUBLISH_UNCHANGED_DELIVERY", default_value_t = false)]
+    pub republish_unchanged_delivery: bool,
     #[command(flatten)]
     pub store: StoreArgs,
     #[command(flatten)]

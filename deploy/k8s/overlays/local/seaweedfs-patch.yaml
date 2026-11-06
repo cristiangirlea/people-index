@@ -3,9 +3,9 @@
   value:
     requests:
       cpu: 100m
-      memory: 256Mi
+      memory: 1536Mi
     limits:
-      memory: 512Mi
+      memory: 2Gi
 - op: replace
   path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
   value: 10Gi

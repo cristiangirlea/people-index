@@ -45,6 +45,22 @@ patterns and probe are in [mapping.md](../crates/pi-es/src/mapping.md#built-in-i
 Review templates installed on your own cluster and on other Elasticsearch versions too;
 the built-in list does not cover them.
 
+## S3 retries
+
+`PI_STORE_RETRY_TIMEOUT` sets the S3 retry window (default `120s`, maximum `5m`).
+The window limits when another retry may start, not the duration of an in-flight request or
+backoff. The limit accounts for S3 signature age and short-lived STS credentials:
+`object_store` resends the same signed request. Lease renewal stops one renewal interval
+before the held lease expires.
+
+For any method, `object_store` retries refused connections, requests never sent, 5xx, 429
+and 408. Timeouts and connections dropped mid-request are retried only for reads and plain
+overwrites; conditional writes return those errors to the commit retry and lease loop.
+404, 412 and 304 are never retried. 409 is retried only for If-Match updates; the header
+is retained, so conditional semantics are unchanged. Backoff grows linearly on average:
+each delay is random between the initial delay and the previous delay times the base,
+subject to the maximum.
+
 ## Compose
 
 Prerequisites: Docker with Compose v2, GNU make and bash. On Linux, Elasticsearch needs
@@ -408,6 +424,21 @@ What to watch during a load: a rising rate of bulk retries means the cluster is 
 
 ## Sizing
 
+**In-cluster SeaweedFS.** The local store (base and local overlay) requests 1.5 GiB and is
+limited to 2 GiB. Its memory peaked at 1491 MiB (1.46 GiB) during `make compose-e2e` (200,000
+persons: a run that fails in publish, two good runs, a snapshot and the restore drill; sampled
+about every 5 s, so the true peak may be a little higher); at the earlier 512 MiB it was
+OOM-killed on k3d mid-run (#113). With these values, on 2026-11-02, a 200,000-person run on
+k3d with an SLM snapshot taken during `load` finished with no SeaweedFS restart; its memory
+peaked at 910 MiB there (`kubectl top`, every 5 s). It grows with the data it holds and serves, so measure
+before running larger data on it; production uses an external S3 store instead.
+
+**Docker memory for the local overlay.** During a run the overlay requests about 12.5 GiB:
+Elasticsearch 7.5 GiB (three 1 GiB masters, three 1.5 GiB data nodes), SeaweedFS 1.5 GiB (up to
+2 GiB), and a run's three workers and coordinator 3.5 GiB, plus the k3s nodes, the ECK
+operator and system pods. The k3d nodes share one Docker VM without per-node caps, so the
+scheduler cannot see a shortfall: give Docker at least 14 GiB.
+
 **Run store.** Budget for roughly `PI_RETAIN_RUNS` (default 3) published runs of segments,
 plus current and unfinished runs and runs sharing a boundary timestamp. Set it to 0 to disable
 cleanup. Retention is store-wide: aliases or deployments sharing a bucket prefix share one
@@ -603,10 +634,14 @@ export ES_URL=https://es-es-http:9200 ES_CA=es-ca.crt ES_RESOLVE=es-es-http:9200
 ES_ADMIN_PASSWORD="$(kubectl --context <context> -n people-index get secret es-es-elastic-user \
   -o jsonpath='{.data.elastic}' | base64 -d)"
 
+# Windows: Git Bash's curl uses Schannel, which checks certificate revocation that a private CA
+# cannot answer (CERT_TRUST_REVOCATION_STATUS_UNKNOWN); --ssl-no-revoke skips only that check.
+case "$(curl -V)" in *Schannel*) ES_NO_REVOKE=--ssl-no-revoke ;; *) ES_NO_REVOKE= ;; esac
+
 # Every call below, as the elastic superuser; the password goes to curl on stdin.
 es() {
   printf 'user = "elastic:%s"\n' "$ES_ADMIN_PASSWORD" |
-    curl -K - -sS --fail-with-body --cacert "$ES_CA" ${ES_RESOLVE:+--resolve "$ES_RESOLVE"} \
+    curl -K - -sS --fail-with-body $ES_NO_REVOKE --cacert "$ES_CA" ${ES_RESOLVE:+--resolve "$ES_RESOLVE"} \
       -H 'Content-Type: application/json' "$@"
   echo
 }
@@ -637,7 +672,10 @@ The keystore lives in each container, so a recreated container needs the keys ag
 1. Stop new runs. Suspend the schedule
    (`kubectl --context <context> -n people-index patch cronjob pi-schedule -p '{"spec":{"suspend":true}}'`)
    and keep it suspended until the cause of the rollback is fixed: the next run reads the same
-   feed (`raw/` or the configured `PI_DELIVERY`) and would publish it again.
+   feed (`raw/` or the configured `PI_DELIVERY`) and would publish it again. With
+   `PI_DELIVERY=latest` the next run targets the newest complete delivery: after a rollback to
+   an older delivery's index it publishes the newest again; after restoring the index of the
+   current delivery it is skipped.
 2. Stop any hand-run `stage` commands. Let a running run finish, or stop it. A run that publishes
    during the restore moves the alias, and its cleanup deletes any `persons-*` index that no
    alias points at and whose run is older: the restored index, until step 4 below puts the alias on it. To stop a run on
@@ -828,13 +866,37 @@ index `persons-20261028-221205`, 20000 documents; snapshot 0.9 s; restore under 
 green 3.0 s, the renamed copy 2.2 s; the counts, the reader's search through the alias and the
 content digest (`verify`) matched, and the second run then published over the restored index
 and deleted it. The whole `make compose-e2e` took 4 min 4 s (the earlier runs: snapshot 1.1 s,
-restores 2.6 to 3.0 s and 2.4 to 2.5 s, about 4 min 50 s). Not yet exercised on k3d or against
-an external S3 store.
+restores 2.6 to 3.0 s and 2.4 to 2.5 s, about 4 min 50 s).
+
+Exercised on 2026-11-02 on k3d by hand, with the commands above (`k3d-people-index`:
+1 server and 3 zoned agents, ECK 3.5.0, Elasticsearch 9.5.5 with three master and three data
+nodes, the in-cluster SeaweedFS 4.48, the image built from main; Git Bash on Windows):
+- Access: the port-forward with `--resolve es-es-http:9200:127.0.0.1` verified ECK's
+  certificate; the repository `people-index` and the `nightly` policy were in place.
+- Run `20261102-k3d01` (20000 documents, `make run`, then `make verify`) published; its alias
+  run lease was released.
+- `_slm/policy/nightly/_execute` took a snapshot of the index in 3 s.
+- After the index was deleted the alias answered 404. Restore under its own name with
+  `include_aliases: false` restored 6 of 6 shards, reached green about 7 s after the delete,
+  and counted 20000, the `documents` in the run's `summary.json`; the alias stayed off it until
+  the step-4 request moved it.
+- `make verify` against the restored alias passed in the local overlay's `VERIFY_SOURCE=expected`
+  mode (datagen's `expected.json`). Step 5's `summary` mode was not exercised on k3d.
+- A newer run, `20261102-k3d02`, then published over the rollback and deleted the restored
+  index, as described above. It first failed in `load`: the in-cluster SeaweedFS was OOM-killed
+  under that load (#113) and the run's store retries ran out within seconds (#114).
+  `make resume` finished it from its commits in 20 s.
+
+The `es()` helper ran with the same `--ssl-no-revoke` choice written another way (a bash
+array), not the `case` line above.
+
+Not yet exercised against an external S3 store.
 
 ## Scheduled runs
 
 A scheduled run reads whatever `PI_DELIVERY` the ConfigMap sets. With it unset, each run
-re-indexes `raw/`.
+re-indexes `raw/`; with a delivery name, each run reads that delivery again until the ConfigMap
+changes. `PI_DELIVERY=latest` follows new deliveries instead ("Following new deliveries" below).
 
 Add `../../components/schedule` to an overlay's `components` and apply that overlay.
 The proposed defaults run at 02:00 UTC daily; patch the CronJob's `schedule`, `timeZone`,
@@ -917,6 +979,40 @@ patches:
 
 Also configure zone spread and node anti-affinity for the cluster; the shared indexed pod
 shape deliberately has no hard worker-only spread rule.
+
+### Following new deliveries
+
+To have each scheduled run pick up the newest delivery on its own, set `PI_DELIVERY=latest` in
+the overlay's ConfigMap (`people-index-config`, for example a `configMapGenerator` entry with
+`behavior: merge` and the literal `PI_DELIVERY=latest`). It is opt-in; leaving `PI_DELIVERY`
+unset or naming a delivery behaves as before. With it:
+
+- A new run plans the newest delivery under `raw/` (or the top of `PI_INPUT_URL`) that has its
+  `_COMPLETE` marker, the greatest name in byte order. Name deliveries so that name order is
+  time order: `batch-20261102` or `20261102T0200Z`, never `batch-9` beside `batch-10`. A
+  delivery still being written (no `_COMPLETE` yet) is passed over for older complete ones. No
+  complete delivery, or a directory named `latest`, fails the run; the error names the input
+  root.
+- The chosen name is recorded in the run's `plan.json` (`delivery`) and in `summary.json`. A
+  resumed run keeps it, even after a newer delivery arrived.
+- When the alias already serves that delivery (the run behind the alias's index read it), or a
+  delivery whose name sorts after it (a hand run of a named delivery that has no `_COMPLETE`),
+  the run is skipped, since planning would publish the same or older data: no plan and no run state, only `runs/<run_id>/skipped.json` (`reason`,
+  `delivery`, `serving_run`, `skipped_at`), the log line `no new delivery; run skipped`, and
+  the counter `pi_runs_skipped_total`. The coordinator releases the run lease and exits 0 and
+  its workers exit 0, so the Job completes. `PI_REPUBLISH_UNCHANGED_DELIVERY=true` plans and
+  publishes the delivery again instead (after a mapping change, say). These are proposed
+  defaults: follow by name, skip an unchanged delivery.
+- If deliveries stop arriving, every run is skipped and the alias keeps its index: the
+  `PeopleIndexAliasOld` alert (see "Pipeline alerts") is the signal, as it is without `latest`.
+  A skip is not a failure and raises no alert of its own.
+- The newest complete delivery stays the target. A hand run with `PI_DELIVERY` set to an older
+  delivery's name, or a rollback to an older index, lasts only until the next scheduled run,
+  which publishes the newest complete delivery again. To stay on an older delivery, keep
+  `pi-schedule` suspended, or set the ConfigMap's `PI_DELIVERY` to that delivery's name, until
+  a corrected, newer delivery is marked complete; then set it back to `latest` (see "Rollback
+  and restore").
+
 ## A feed delivery
 
 For a new delivery `batch-20261028`, place gzipped NDJSON files under
@@ -925,6 +1021,9 @@ For a new delivery `batch-20261028`, place gzipped NDJSON files under
 written, create the empty `raw/batch-20261028/_COMPLETE` object. Then run with
 `PI_DELIVERY=batch-20261028 PI_REQUIRE_COMPLETE_MARKER=true`; use the same `PI_DELIVERY`
 for `verify --source expected`. Never modify a completed delivery; use a new prefix.
+`PI_DELIVERY=latest` plans the newest complete delivery instead of a named one ("Following new
+deliveries" under "Scheduled runs"); `latest` is reserved, so no delivery can be named that,
+and `datagen` and `verify --source expected` need the name.
 
 For a synthetic delivery, `people-index datagen --delivery batch-20261028` writes the feeds
 and `expected.json` there; create `_COMPLETE` separately after it succeeds. An explicit

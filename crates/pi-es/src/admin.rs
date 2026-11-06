@@ -307,6 +307,27 @@ impl IndexAdmin {
         Ok(names)
     }
 
+    /// The run that created `index`: its mapping's `_meta.people_index.run_id`, which
+    /// `prepare-index` writes. `None` when the index has none (made by hand, or before run
+    /// indexes recorded their owner).
+    pub async fn run_owner(&self, index: &str) -> Result<Option<String>> {
+        validate_index_name(index)?;
+        let path = format!("/{index}/_mapping");
+        let response = self.client.json(Method::GET, &path, None).await?;
+        let mappings = response
+            .get(index)
+            .and_then(|v| v.get("mappings"))
+            .filter(|v| v.is_object())
+            .ok_or_else(|| EsError::Decode {
+                path: path.clone(),
+                message: "no mappings object".into(),
+            })?;
+        Ok(mappings
+            .pointer("/_meta/people_index/run_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
     /// The indices named `<prefix>*` that no alias points at, sorted (open and closed alike).
     /// One `GET /<prefix>*/_alias`, which lists every matching index with its aliases and needs
     /// only `view_index_metadata` on the pattern.

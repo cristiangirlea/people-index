@@ -7,9 +7,25 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Added
+
+- `PI_DELIVERY=latest`: a run plans the newest delivery that has its `_COMPLETE` marker (by
+  name), records it in `plan.json`, and is skipped (`runs/<id>/skipped.json`, exit 0, its
+  workers too) when the alias already serves that delivery or a newer one, unless
+  `PI_REPUBLISH_UNCHANGED_DELIVERY=true`; a delivery can no longer be named `latest`.
+
 ### Changed
 
+- **Breaking** (the feed contract and settings, (a) and (c) of the
+  [compatibility policy](docs/INTEGRATING.md#compatibility-policy)): a delivery can no longer be
+  named `latest`. `PI_DELIVERY=latest` used to read `raw/latest/`; it now plans the newest
+  complete delivery, and a directory named `latest` fails such a run. Remedy: rename the
+  delivery and set `PI_DELIVERY` to the new name.
 - Pin the production example release image by digest and check rendered Job images.
+
+### Fixed
+
+- Retry transient S3 failures through brief store outages with the configurable `PI_STORE_RETRY_TIMEOUT` window.
 
 ## [0.1.0] - 2026-10-29
 

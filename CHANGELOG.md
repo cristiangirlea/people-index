@@ -13,6 +13,7 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
   name), records it in `plan.json`, and is skipped (`runs/<id>/skipped.json`, exit 0, its
   workers too) when the alias already serves that delivery or a newer one, unless
   `PI_REPUBLISH_UNCHANGED_DELIVERY=true`; a delivery can no longer be named `latest`.
+- A security policy (`SECURITY.md`) for reporting vulnerabilities privately.
 
 ### Changed
 

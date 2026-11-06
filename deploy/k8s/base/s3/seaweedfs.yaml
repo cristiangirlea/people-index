@@ -2,7 +2,7 @@
 # and S3 gateway in one process).
 #
 # Why SeaweedFS: the pipeline's commit and lease protocol needs conditional writes, and this
-# store answers them like S3 does (verified against chrislusf/seaweedfs:4.48: PUT with
+# store answers them like S3 does (verified against chrislusf/seaweedfs:4.48, and 4.50 by check-s3: PUT with
 # `If-None-Match: *` on an existing key and PUT with a stale `If-Match` etag both return 412,
 # and of 16 concurrent create-if-absent PUTs on one key exactly one wins). MinIO no longer
 # publishes container images.
@@ -44,7 +44,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: identity-config
-          image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+          image: chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
           command: ["/bin/sh", "/scripts/identity-config.sh"]
           env:
             - {name: PIPELINE_BUCKET, value: people-index}
@@ -72,7 +72,7 @@ spec:
             - {name: scripts, mountPath: /scripts, readOnly: true}
       containers:
         - name: seaweedfs
-          image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+          image: chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
           # The image's entrypoint adds `-dir=/data -volume.max=0` for `server`.
           args:
             - server

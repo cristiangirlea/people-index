@@ -38,7 +38,8 @@ and keep consistent with the store, and a commit in it would still have to agree
 written elsewhere.
 
 **The store must refuse conditional writes that do not hold**: HTTP 412 for
-`If-None-Match: *` on an existing key and for a stale or missing `If-Match` key, with exactly one
+`If-None-Match: *` on an existing key and for a stale `If-Match`, and 412 or 404 for `If-Match`
+on a missing key (the S3 client reads both as a failed precondition), with exactly one
 winner under concurrency. AWS S3 documents both conditions. Other S3-compatible servers differ
 and must be checked; the compose stack's `s3-init` probes every start and stops the stack if
 the store fails.
@@ -46,7 +47,11 @@ the store fails.
 **Store choice: SeaweedFS 4.48** for compose and the local k3d cluster. Probed with the
 deployment's own flags: 412 in every case above, and in 16-way races of create-if-absent and of
 update-if-match on one key, exactly one 200 in each of three rounds; anonymous or wrongly signed
-requests get 403. The lease tests and the store conformance suite pass against it. MinIO is not
+requests get 403. The lease tests and the store conformance suite pass against it. Re-verified
+with SeaweedFS 4.50 on 2026-11-06 (`scripts/check-s3.sh`: the conformance suite, its
+create-if-absent and update-if-match races, and the lease test). Since 4.49 SeaweedFS answers an
+`If-Match` on a missing key with 404, as AWS S3 does (SeaweedFS #11882); the client maps it to a
+failed precondition, which the conformance suite checks. MinIO is not
 used because its project stopped publishing community container images, so there was no
 maintained image to pin; it was not tested. The local filesystem backend supports
 create-if-absent (an atomic hard link) but not update-if-match, so it serves only the local

@@ -30,7 +30,7 @@ for another `PI_ALIAS`, edit the excluded pattern to match its lowercased `<alia
 every Elasticsearch node set.
 
 The store must refuse a conditional write that does not hold (HTTP 412 for `If-None-Match: *` on
-an existing key and for a stale `If-Match`): commits and leases depend on it. SeaweedFS 4.48
+an existing key and for a stale `If-Match`): commits and leases depend on it. SeaweedFS 4.50
 passes; `s3-init` checks it on every start and stops the stack if a store does not.
 
 ## Alias setting

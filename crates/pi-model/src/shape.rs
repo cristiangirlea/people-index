@@ -7,8 +7,12 @@
 //! quarantines the record as `record`, naming the field: one bad record costs that record, not
 //! the run.
 //!
-//! Identifiers are strict ([`JsonKind::Number`]): an `id` or `organization_id` that is not a
-//! number, or a string the id rule accepts ([`crate::parse_decimal_id`]), is quarantined. Measures are lenient ([`JsonKind::LenientLong`],
+//! Identifiers are strict ([`JsonKind::Number`]): an `id` or `organization_id` must be a
+//! number or a string the id rule accepts ([`crate::parse_decimal_id`]); otherwise it is
+//! quarantined.
+//! Identifiers outside the mapped numeric range or past the numeric string limit are kept and counted as
+//! ignored by the index; the join still reads their numeric value. Measures are lenient
+//! ([`JsonKind::LenientLong`],
 //! [`JsonKind::LenientInteger`], [`JsonKind::LenientBoolean`]): their mapping has
 //! `ignore_malformed`, so Elasticsearch skips a scalar it cannot read as the field's type (the
 //! value is not indexed and the field is listed in the document's `_ignored`) and keeps the
@@ -53,7 +57,8 @@ pub type Name = Cow<'static, str>;
 pub enum JsonKind {
     /// A number, or a string of ASCII decimal digits within `u64` (the id rule,
     /// [`crate::parse_decimal_id`]; Elasticsearch coerces it): `long`, `integer`. Strict, for
-    /// identifiers: anything else is quarantined.
+    /// identifiers: longer strings are kept and counted when Elasticsearch skips them;
+    /// anything outside the id rule is quarantined.
     Number,
     /// `true` or `false`, or the strings `"true"`, `"false"` and `""` (Elasticsearch reads the
     /// empty string as false): `boolean`. Strict: anything else is quarantined.
@@ -128,6 +133,8 @@ pub struct FieldShape {
     pub kind: JsonKind,
     /// Smallest applicable keyword limit, resolved from the mapping.
     pub keyword_limit: Option<usize>,
+    /// Numeric mapping type for strict numbers; defaults to the built-in `long`.
+    pub numeric_type: NumericType,
     /// Date formats for which extraction can identify certain ignored values.
     pub date_format: Option<crate::es_date::DateFormat>,
 }
@@ -140,6 +147,7 @@ impl FieldShape {
             name: name.into(),
             kind,
             keyword_limit: None,
+            numeric_type: NumericType::Long,
             date_format: None,
         }
     }
@@ -150,6 +158,7 @@ const fn field(name: &'static str, kind: JsonKind) -> FieldShape {
         name: Cow::Borrowed(name),
         kind,
         keyword_limit: None,
+        numeric_type: NumericType::Long,
         date_format: None,
     }
 }
@@ -251,6 +260,7 @@ pub(crate) fn check_fields(
                 shape.kind,
                 shape.keyword_limit,
                 shape.date_format,
+                shape.numeric_type,
                 &mut ignored,
             )
             .map_err(|(at, found)| mismatch(&prefix, shape, &at, found))?;
@@ -270,6 +280,7 @@ fn check_value(
     kind: JsonKind,
     limit: Option<usize>,
     date_format: Option<crate::es_date::DateFormat>,
+    numeric_type: NumericType,
     ignored: &mut OnIgnored<'_>,
 ) -> Result<(), Mismatch> {
     if is_null(value) {
@@ -290,7 +301,18 @@ fn check_value(
     };
     match kind {
         JsonKind::Number | JsonKind::Boolean if parses(text, kind) => {
-            if date_format.is_some_and(|format| crate::es_date::certainly_ignored(text, format)) {
+            if kind == JsonKind::Number
+                && text.len() > es_number::MAX_STRING_CHARS + 2
+                && string_value(text).is_some_and(|s| !es_number::fits_numeric_string(&s))
+            {
+                ignored(&[], "a string above the numeric length limit");
+            } else if kind == JsonKind::Number
+                && es_number::read(text, numeric_type) != Reading::Indexed
+            {
+                ignored(&[], "a number out of range");
+            } else if date_format
+                .is_some_and(|format| crate::es_date::certainly_ignored(text, format))
+            {
                 ignored(&[], "an invalid date");
             } else if over_limit(text) {
                 ignored(&[], "a value above ignore_above");
@@ -473,18 +495,21 @@ mod tests {
             FieldShape {
                 name: "country".into(),
                 kind: JsonKind::String,
+                numeric_type: NumericType::Long,
                 keyword_limit: Some(8191),
                 date_format: None,
             },
             FieldShape {
                 name: "skills".into(),
                 kind: JsonKind::StringArray,
+                numeric_type: NumericType::Long,
                 keyword_limit: Some(512),
                 date_format: None,
             },
             FieldShape {
                 name: "first_name".into(),
                 kind: JsonKind::String,
+                numeric_type: NumericType::Long,
                 keyword_limit: Some(512),
                 date_format: None,
             },
@@ -503,18 +528,21 @@ mod tests {
             FieldShape {
                 name: "skills".into(),
                 kind: JsonKind::StringArray,
+                numeric_type: NumericType::Long,
                 keyword_limit: Some(512),
                 date_format: None,
             },
             FieldShape {
                 name: "id".into(),
                 kind: JsonKind::Number,
+                numeric_type: NumericType::Long,
                 keyword_limit: Some(3),
                 date_format: None,
             },
             FieldShape {
                 name: "followers".into(),
                 kind: JsonKind::LenientLong,
+                numeric_type: NumericType::Long,
                 keyword_limit: Some(3),
                 date_format: None,
             },

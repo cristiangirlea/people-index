@@ -183,8 +183,16 @@ cost that record, not the load. The rule is a table in `pi-model` (`PERSON_FIELD
 index mapping at startup (`check_mapping`). Identifiers (`id`,
 `roles[].id`, `roles[].organization_id`, the organization's `id`) are strict: a number or a
 string the id rule above accepts (decimal digits within `u64`, so `"007"` passes and `"7a"`,
-`" 7"`, `"-1"` and `""` do not). Measures (`connections`, `followers`, `open_to_work`, `employee_count`,
-`founded_year`) are lenient, since their mapping has `ignore_malformed`: any scalar or array
+`" 7"`, `"-1"` and `""` do not). Elasticsearch 9.5.5 and 9.5.6 skip identifier strings
+longer than 1000 UTF-16 code units after JSON unescaping in numeric fields under
+`ignore_malformed`, even when leading zeros make the value fit. A term query on that field
+cannot find the value, as with ids above `i64::MAX`. The record is kept and the join still
+uses the parsed `u64`. Each over-limit string and each number or decimal string outside
+the mapped numeric type (above `i64::MAX` for `long`, past `i32` for `integer`) counts once
+in `values_ignored_by_index`, even if more than one rule ignores it. These records are kept
+rather than quarantined because 0.1.0 accepted them: quarantining them would change the feed
+contract, (a) of the [compatibility policy](INTEGRATING.md#compatibility-policy).
+Measures (`connections`, `followers`, `open_to_work`, `employee_count`, `founded_year`) are lenient, since their mapping has `ignore_malformed`: any scalar or array
 of scalars passes. Elasticsearch skips a value it cannot read as the field's type: the
 malformed values are not indexed and the field is listed in the document's `_ignored`; the
 record stays searchable by its other fields, and the value stays in `_source`. Extraction keeps

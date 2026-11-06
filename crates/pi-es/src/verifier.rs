@@ -401,11 +401,16 @@ struct Sample {
 }
 
 /// An id as the `long` mapping indexes it: a number or a string of digits up to `i64::MAX`.
-/// Larger ids are dropped by `ignore_malformed`, so a term query could not find them.
+/// Larger ids and strings above 1000 UTF-16 code units are dropped by `ignore_malformed`, so
+/// a term query could not find them.
 fn indexable_id(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number.as_i64().filter(|id| *id >= 0),
-        Value::String(text) if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) => {
+        Value::String(text)
+            if pi_model::fits_numeric_string(text)
+                && !text.is_empty()
+                && text.bytes().all(|b| b.is_ascii_digit()) =>
+        {
             text.parse().ok()
         }
         _ => None,
@@ -434,4 +439,32 @@ fn fold_page(hits: &[Value]) -> Result<DocumentDigest> {
         page.add(id, &hit["_source"]);
     }
     Ok(page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexable_id_checks_long_range() {
+        for (id, expected) in [
+            (i64::MAX as u64, Some(i64::MAX)),
+            (i64::MAX as u64 + 1, None),
+        ] {
+            assert_eq!(indexable_id(&serde_json::json!(id)), expected);
+            assert_eq!(indexable_id(&Value::String(id.to_string())), expected);
+        }
+    }
+
+    #[test]
+    fn indexable_id_checks_decoded_string_length() {
+        for (length, expected) in [(1000, Some(42)), (1001, None)] {
+            let digits = format!("{}42", "0".repeat(length - 2));
+            assert_eq!(indexable_id(&Value::String(digits)), expected);
+
+            let json = format!(r#""{}42""#, r"\u0030".repeat(length - 2));
+            let value = serde_json::from_str(&json).unwrap();
+            assert_eq!(indexable_id(&value), expected);
+        }
+    }
 }

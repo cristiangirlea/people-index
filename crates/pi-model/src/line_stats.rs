@@ -1,6 +1,7 @@
 //! What extraction noticed in a line it kept, besides the row.
 
-/// A value above a keyword limit or a value of a lenient field ([`crate::JsonKind::LenientLong`],
+/// An identifier outside its numeric range or above the string length limit, a value above a keyword limit,
+/// or a value of a lenient field ([`crate::JsonKind::LenientLong`],
 /// [`crate::JsonKind::LenientInteger`], [`crate::JsonKind::LenientBoolean`]) that Elasticsearch
 /// skips (`ignore_above` or `ignore_malformed`): the malformed value is not indexed and the field is listed in
 /// the document's `_ignored`; the record stays searchable by its other fields, and the value
@@ -16,7 +17,8 @@ pub struct IgnoredValue {
 /// What extraction noticed in a line it kept.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LineStats {
-    /// Values above keyword limits and lenient values Elasticsearch skips (lists in `_ignored`),
+    /// Out-of-range identifiers, over-limit identifier strings, values above keyword limits and lenient values
+    /// Elasticsearch skips (lists in `_ignored`),
     /// following the rules observed on Elasticsearch 9.5.5 and re-verified on 9.5.6, every
     /// element of an array counted on its own. One known divergence: a non-ASCII decimal digit
     /// in a `long` string is counted, though Elasticsearch indexes it.

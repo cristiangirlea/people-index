@@ -234,7 +234,9 @@ Changing `PI_ALIAS` also changes the names in `roles.yml` (both roles), the
   `PI_MAX_LINE_BYTES` (8 MiB) is malformed.
 - **Records**: the built-in person and organization fields are listed in
   [ARCHITECTURE.md, The data](ARCHITECTURE.md#the-data). Unknown fields pass through to
-  `_source` untouched but are not indexed (`dynamic: false`).
+  `_source` untouched but are not indexed (`dynamic: false`). Identifier strings longer than
+  1000 decoded characters are kept but not indexed, and counted once per value in
+  `values_ignored_by_index`; the join still uses their parsed `u64` value.
 - **Organization references**: each `roles[]` entry may carry `organization_id` (the same id rule;
   null or absent means no organization). The document gets the full record of every distinct
   resolved organization in `organizations[]`, `roles[].organization_resolved`, and

@@ -542,6 +542,125 @@ mod tests {
     type Parse = fn(&[u8]) -> Result<LineStats, MalformedRecord>;
 
     #[test]
+    fn identifier_strings_skipped_by_elasticsearch_are_kept_and_counted() {
+        let person: Parse = |line| {
+            let (row, stats) = parse_person_line(line, Seq::default())?;
+            assert_eq!(row.org_ids, [42]);
+            Ok(stats)
+        };
+        let organization: Parse =
+            |line| parse_org_line(line, Seq::default()).map(|(_, stats)| stats);
+        for (parse, template, path) in [
+            (
+                person,
+                r#"{"id":"ID","roles":[{"organization_id":42}]}"#,
+                "id",
+            ),
+            (
+                person,
+                r#"{"roles":[{"id":"ID","organization_id":42}]}"#,
+                "roles[0].id",
+            ),
+            (
+                person,
+                r#"{"roles":[{"organization_id":"ID"}]}"#,
+                "roles[0].organization_id",
+            ),
+            (organization, r#"{"id":"ID"}"#, "id"),
+        ] {
+            for zero in ["0", r"\u0030"] {
+                for (length, count) in [(1000, 0), (1001, 1)] {
+                    let digits = format!("{}42", zero.repeat(length - 2));
+                    let record = template.replace("ID", &digits);
+                    let line = format!(r#"{{"id":1,"record":{record}}}"#);
+                    let stats = parse(line.as_bytes()).unwrap();
+                    assert_eq!(stats.ignored_by_index, count, "{path}, {length}");
+                    if count == 0 {
+                        assert_eq!(stats, LineStats::default(), "{path}");
+                    } else {
+                        assert_eq!(stats.first_ignored.unwrap().field, path);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identifiers_count_the_mapped_numeric_range_and_preserve_join_ids() {
+        for (ty, max) in [("long", i64::MAX as u64), ("integer", i32::MAX as u64)] {
+            let schema = FeedSchema::from_json(
+                r#"{"person":{"fields":[{"name":"external_id","kind":"number"},
+                    {"name":"roles","kind":"object_array"}]}}"#,
+            )
+            .unwrap()
+            .with_index_limits(&serde_json::json!({
+                "properties": {"external_id": {"type": ty}}
+            }));
+            for (id, count) in [(max, 0), (max + 1, 1)] {
+                for value in [id.to_string(), format!("\"{id}\"")] {
+                    let line = format!(r#"{{"id":1,"record":{{"external_id":{value}}}}}"#);
+                    let (_, stats) =
+                        parse_person_line_with(&schema, line.as_bytes(), Seq::default(), true)
+                            .unwrap();
+                    assert_eq!(stats.ignored_by_index, count, "{ty}: {value}");
+                }
+            }
+        }
+        for value in [
+            "9223372036854775807",
+            "9223372036854775808",
+            "\"9223372036854775807\"",
+            "\"9223372036854775808\"",
+        ] {
+            let line = format!(
+                r#"{{"id":1,"record":{{"id":{value},"roles":[{{"organization_id":{value}}}]}}}}"#
+            );
+            let (row, stats) = parse_person_line(line.as_bytes(), Seq::default()).unwrap();
+            let id = value.trim_matches('"').parse::<u64>().unwrap();
+            assert_eq!(row.org_ids, [id]);
+            assert_eq!(
+                stats.ignored_by_index,
+                if id > i64::MAX as u64 { 2 } else { 0 }
+            );
+            let table = std::collections::HashMap::from([(id, br#"{"name":"Large"}"#.to_vec())]);
+            let built = crate::DocumentBuilder::default()
+                .build_row(&row, &table)
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&built.doc.body).unwrap();
+            assert_eq!(body["roles"][0]["organization_resolved"], true);
+            assert_eq!(body["organizations"][0]["name"], "Large");
+        }
+    }
+
+    #[test]
+    fn schema_number_strings_are_kept_and_counted_once() {
+        let schema = FeedSchema::from_json(
+            r#"{"person":{"fields":[{"name":"external_id","kind":"number"},
+                {"name":"roles","kind":"object_array"}]}}"#,
+        )
+        .unwrap()
+        .with_index_limits(&serde_json::json!({
+            "properties": {"external_id": {"type": "long", "fields": {
+                "keyword": {"type": "keyword", "ignore_above": 10}
+            }}}
+        }));
+        for zero in ["0", r"\u0030"] {
+            for length in [1000, 1001] {
+                let digits = format!("{}42", zero.repeat(length - 2));
+                let line = format!(
+                    r#"{{"id":1,"record":{{"external_id":"{digits}","roles":[{{"organization_id":42}}]}}}}"#
+                );
+                let (row, stats) =
+                    parse_person_line_with(&schema, line.as_bytes(), Seq::default(), true).unwrap();
+                assert_eq!(row.org_ids, [42]);
+                // The keyword multi-field also skips it: count the input value just once.
+                assert_eq!(stats.ignored_by_index, 1);
+                assert_eq!(stats.first_ignored.unwrap().field, "external_id");
+            }
+        }
+    }
+
+    #[test]
     fn lines_with_a_number_too_long_for_elasticsearch_are_quarantined() {
         // The sign and point count as characters.
         for (ok, long) in [

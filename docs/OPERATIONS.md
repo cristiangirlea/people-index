@@ -198,7 +198,8 @@ make k3d-down        # delete the cluster
 
   The sample is a document with a last name and a joined organization when the index has one;
   the last two checks run only when the sample has text names, and an organization id up to
-  `i64::MAX` (the `long` mapping drops larger ones), so persons without names or without
+  `i64::MAX` with at most 1000 decoded characters if it is a string (the `long` mapping skips
+  larger ids and longer strings), so persons without names or without
   resolved organizations never fail them. A non-empty index that returns no sample fails
   `sample:ids`; an empty index gets only `alias` and `count`. A
   failure means the index or the alias is wrong, not the data. Checking an older run with
@@ -347,7 +348,9 @@ being resumed.
 - `values_ignored_by_index` (extract stages, in `summary.json` and
   `pi_task_counter_total{counter="values_ignored_by_index"}`) counts the values of kept records
   that Elasticsearch skips under `ignore_malformed` (`"n/a"` in `followers`, `"yes"` in
-  `open_to_work`), or above a keyword's `ignore_above` (a 600-character `skills` element).
+  `open_to_work`, identifier strings longer than 1000 decoded characters), or above a
+  keyword's `ignore_above` (a 600-character `skills` element). Over-limit identifier strings
+  keep their records and parsed `u64` join references.
   It counts each input value once if any applicable field ignores it, including known date
   formats and multi-fields. See [ARCHITECTURE.md](ARCHITECTURE.md#the-data) for the rules and
   known divergences. The value remains in `_source`; the record stays
@@ -1068,7 +1071,7 @@ fit the field's type in the mapping:
 
 | kind | takes | mapping type |
 |---|---|---|
-| `number` | a number, or a string of decimal digits within `u64` (strict: anything else quarantines the record) | `long` or `integer` with `ignore_malformed: true` |
+| `number` | a number, or a string of decimal digits within `u64` (strict: anything else quarantines the record; strings over 1000 decoded characters are kept and counted in `values_ignored_by_index`, but not indexed) | `long` or `integer` with `ignore_malformed: true` |
 | `boolean` | `true`, `false`, `"true"`, `"false"`, `""` (strict) | `boolean` |
 | `lenient_long`, `lenient_integer`, `lenient_boolean` | any scalar or array of scalars; values the index skips are counted, not quarantined | `long`, `integer`, `boolean` with `ignore_malformed: true` |
 | `string`, `string_array` | any scalar or array of scalars | `text`, `keyword`, or `date` with `ignore_malformed: true` |
@@ -1085,6 +1088,8 @@ count separately, before deduplication and assembly.
 Every `long`, `integer` and `date` field needs `ignore_malformed: true`, whatever its kind: an
 id above `i64::MAX` passes `number`, a value past `i32` fits no `integer`, and a `string` takes
 text no date format reads; without it Elasticsearch fails the document and the load with it.
+A `number` value outside its mapped numeric range is kept and counted once in
+`values_ignored_by_index`, for both JSON numbers and decimal strings.
 
 The file is refused at startup, with the file and the field named (`PI_SCHEMA_FILE
 /etc/people-index/feed/schema.json: person.fields[2].name: "x" is listed twice (also at

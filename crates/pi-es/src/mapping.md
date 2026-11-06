@@ -134,9 +134,13 @@ doing that:
   still fails the item, `ignore_malformed` or not.
 
 Identifiers (`id`, `roles.id`, `roles.organization_id`, `organizations.id`) are strict at
-extract time (`JsonKind::Number`): a value that is not a number, or a string of decimal digits
-within `u64` (`pi_model::parse_decimal_id`, so `"007"` passes), is quarantined, and
-`ignore_malformed` stays on them as a second line. Measures (`connections`, `followers`,
+extract time (`JsonKind::Number`): a value must be a number or a string of decimal digits
+within `u64` (`pi_model::parse_decimal_id`, so `"007"` passes); otherwise it is quarantined, and
+`ignore_malformed` stays on them as a second line. Identifier strings over 1000 decoded
+characters and numbers or decimal strings outside the mapped numeric range (above
+`i64::MAX` for `long`, past `i32` for `integer`) are kept but not indexed, and counted once
+in `values_ignored_by_index`. A term query on the field cannot find them; the join still uses
+the parsed `u64`. Measures (`connections`, `followers`,
 `open_to_work`, `organizations.employee_count`, `organizations.founded_year`) are lenient
 (`JsonKind::LenientLong`, `LenientInteger` for `founded_year`, `LenientBoolean`): any scalar or
 array of scalars passes, and only an object is quarantined. `values_ignored_by_index` counts the

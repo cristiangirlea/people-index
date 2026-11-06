@@ -105,7 +105,8 @@ impl FeedSchema {
         file.resolve()
     }
 
-    /// Resolve keyword limits and known date formats once for extraction, leaving the schema's serialized form unchanged.
+    /// Resolve numeric types, keyword limits and known date formats once for extraction,
+    /// leaving the schema's serialized form unchanged.
     #[must_use]
     pub fn with_index_limits(&self, mapping: &Value) -> Self {
         fn field_at<'a>(mapping: &'a Value, path: &str) -> &'a Value {
@@ -152,6 +153,10 @@ impl FeedSchema {
                     Value::String(s) => vec![s],
                     Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
                     _ => Vec::new(),
+                };
+                shape.numeric_type = match node["type"].as_str() {
+                    Some("integer") => crate::NumericType::Integer,
+                    _ => crate::NumericType::Long,
                 };
                 shape.date_format = date(node);
                 shape.keyword_limit = targets

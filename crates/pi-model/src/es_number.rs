@@ -34,9 +34,9 @@
 
 use crate::java_double;
 
-/// The numeric types a lenient field can be mapped as.
+/// The numeric types a strict or lenient field can be mapped as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NumericType {
+pub enum NumericType {
     /// `long`: a signed 64-bit integer.
     Long,
     /// `integer`: a signed 32-bit integer.
@@ -62,24 +62,25 @@ const MIN_LONG_SCALE: i64 = -19;
 
 /// The longest string, in UTF-16 units, either numeric type reads; a longer one is skipped
 /// whatever it holds (the limit observed, the unit derived; see the module notes).
-const MAX_STRING_CHARS: usize = 1000;
+pub(crate) const MAX_STRING_CHARS: usize = 1000;
+
+/// Whether a decoded string fits Elasticsearch's numeric string length limit.
+#[must_use]
+pub fn fits_numeric_string(s: &str) -> bool {
+    // UTF-16 units never outnumber UTF-8 bytes: count them only past the limit.
+    s.len() <= MAX_STRING_CHARS || s.encode_utf16().count() <= MAX_STRING_CHARS
+}
 
 /// How a field of type `ty` reads the raw JSON scalar `text` (not null, not an array or
 /// object).
 pub(crate) fn read(text: &str, ty: NumericType) -> Reading {
     match text.as_bytes().first() {
+        // A string without escapes is its own decoded form: borrow it instead of allocating.
+        Some(b'"') if text.len() >= 2 && !text.contains('\\') => {
+            read_string(&text[1..text.len() - 1], ty)
+        }
         Some(b'"') => match serde_json::from_str::<String>(text) {
-            Ok(s) if s.is_empty() => Reading::Indexed,
-            // UTF-16 units never outnumber UTF-8 bytes: count them only past the limit.
-            Ok(s) if s.len() > MAX_STRING_CHARS && s.encode_utf16().count() > MAX_STRING_CHARS => {
-                Reading::NotANumber
-            }
-            Ok(s) => match ty {
-                NumericType::Long => read_long_string(&s),
-                NumericType::Integer => {
-                    java_double::parse(&s).map_or(Reading::NotANumber, integer_range)
-                }
-            },
+            Ok(s) => read_string(&s, ty),
             Err(_) => Reading::NotANumber,
         },
         Some(b't' | b'f') => Reading::NotANumber,
@@ -89,6 +90,22 @@ pub(crate) fn read(text: &str, ty: NumericType) -> Reading {
                 .parse::<f64>()
                 .map_or(Reading::NotANumber, integer_range),
         },
+    }
+}
+
+/// A decoded string in a numeric field of type `ty`.
+fn read_string(s: &str, ty: NumericType) -> Reading {
+    if s.is_empty() {
+        Reading::Indexed
+    } else if !fits_numeric_string(s) {
+        Reading::NotANumber
+    } else {
+        match ty {
+            NumericType::Long => read_long_string(s),
+            NumericType::Integer => {
+                java_double::parse(s).map_or(Reading::NotANumber, integer_range)
+            }
+        }
     }
 }
 
@@ -255,6 +272,16 @@ fn digits<'a>(s: &'a str, i: &mut usize) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_string_limit_counts_utf16_units() {
+        assert!(fits_numeric_string(&"0".repeat(1000)));
+        assert!(!fits_numeric_string(&"0".repeat(1001)));
+        assert!(fits_numeric_string(&"\u{e9}".repeat(1000)));
+        assert!(!fits_numeric_string(&"\u{e9}".repeat(1001)));
+        assert!(fits_numeric_string(&"\u{1f600}".repeat(500)));
+        assert!(!fits_numeric_string(&"\u{1f600}".repeat(501)));
+    }
 
     #[test]
     fn the_grammar() {

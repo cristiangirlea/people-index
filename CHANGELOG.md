@@ -29,6 +29,8 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ### Fixed
 
+- Identifier strings longer than 1000 characters and ids above Elasticsearch's numeric range
+  are counted once in `values_ignored_by_index`; verify never samples them.
 - Retry transient S3 failures through brief store outages with the configurable `PI_STORE_RETRY_TIMEOUT` window.
 - `values_ignored_by_index` counts a string longer than 1000 characters in a `long` or `integer`
   field: Elasticsearch skips it whatever it holds (observed on 9.5.5 and 9.5.6); one that held a

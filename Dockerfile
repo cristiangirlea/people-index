@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --package people-index --bin people-index \
     && install -D -m 0755 target/release/people-index /out/people-index
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1 AS runtime
 LABEL org.opencontainers.image.title="people-index" \
       org.opencontainers.image.description="Staged, multi-node person and organization join loaded into Elasticsearch" \
       org.opencontainers.image.source="https://github.com/cristiangirlea/people-index" \

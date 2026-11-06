@@ -453,8 +453,8 @@ impl IndexAdmin {
     }
 }
 
-// Elasticsearch 9.5.5 renders dynamic booleans as strings, omits explicit object
-// types when properties are present, and renders copy_to strings as arrays.
+// Elasticsearch 9.5.5 (re-verified on 9.5.6) renders dynamic booleans as strings, omits
+// explicit object types when properties are present, and renders copy_to strings as arrays.
 fn normalize_mapping(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;

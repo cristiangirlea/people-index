@@ -67,16 +67,16 @@ Every case must pass, and none may print `PI_TEST_S3_ENDPOINT is not set` (that 
 The local filesystem store (`file://` or a bare path) is for one machine: it cannot run the
 distributed executor or hold the run lock.
 
-**Elasticsearch 9.** Tested with 9.5.5 only; several extraction rules follow behaviour observed
-on 9.5.5 ([ARCHITECTURE.md, The data](ARCHITECTURE.md#the-data)), so another version may skip
-values differently. The pipeline needs one user with role `people-index-writer` (cluster
-`monitor`, all privileges on `<alias>` and `<alias>-*`, nothing else) and your application one
-with `people-index-reader` (`read` and `view_index_metadata` on the alias only); both are in
+**Elasticsearch 9.** Tested with 9.5.6 only; several extraction rules follow behaviour observed
+on 9.5.5 and re-verified on 9.5.6 ([ARCHITECTURE.md, The data](ARCHITECTURE.md#the-data)), so
+another version may skip values differently. The pipeline needs one user with role
+`people-index-writer` (cluster `monitor`, all privileges on `<alias>` and `<alias>-*`, nothing
+else) and your application one with `people-index-reader` (`read` and `view_index_metadata` on
+the alias only); both are in
 [deploy/k8s/base/elasticsearch/roles.yml](../deploy/k8s/base/elasticsearch/roles.yml), and
 `deploy/compose/scripts/es-users.sh` creates the same roles through the security API. Block
 automatic creation of `<alias>-*` indexes (`action.auto_create_index: "-persons-*,+*"`, as both
-deployments do), so a bulk request can never recreate a lost run index with a default
-mapping.
+deployments do), so a bulk request can never recreate a lost run index with a default mapping.
 
 **Kubernetes or one host.** The Kustomize deployment uses ECK 3.5.0 for Elasticsearch, is
 validated against the Kubernetes 1.35 schemas, and the local cluster pins k3s v1.35.5; other
@@ -210,7 +210,7 @@ differently (`PI_EXECUTOR=distributed`, smaller or larger task memory).
 | `PI_SCHEMA_FILE`, `PI_MAPPING_FILE` | the built-in ones | feeds with other field names |
 | `PI_ES_URL`, `PI_ES_CA_CERT` | `http://localhost:9200`, unset | the cluster and the CA to trust |
 | `PI_ES_USERNAME` + `PI_ES_PASSWORD`, or `PI_ES_API_KEY` | unset | the pipeline's identity (one or the other) |
-| `PI_ALIAS` | `persons` | the queried alias; indexes are `<alias>-<run_id>`; a lowercase safe store segment of at most 126 bytes, not starting with `.`, whose run indexes do not match built-in ES 9.5.5 templates ([settings](OPERATIONS.md#alias-setting)) |
+| `PI_ALIAS` | `persons` | the queried alias; indexes are `<alias>-<run_id>`; a lowercase safe store segment of at most 126 bytes, not starting with `.`, whose run indexes do not match built-in ES 9.5.6 templates ([settings](OPERATIONS.md#alias-setting)) |
 | `PI_EXECUTOR`, `PI_CONCURRENCY` | `local`, CPUs | one process or coordinator plus workers; tasks per process |
 | `PI_TASK_MEMORY_BYTES`, `PI_BUFFER_BYTES`, `PI_SEGMENT_TARGET_BYTES` | 512 MiB, 256 MiB, 64 MiB | memory per task ([Sizing](OPERATIONS.md#sizing)) |
 | `PI_SENDERS_PER_WORKER`, `PI_BULK_MAX_BYTES` | 2, 8 MiB | bulk pressure on the cluster |
@@ -268,8 +268,8 @@ the run and is deleted once a newer run has published.
   administrator with a role descriptor limited to the alias. The commands to create, use and
   rotate one are in [OPERATIONS.md, Querying the index](OPERATIONS.md#querying-the-index).
   The reader cannot read `<alias>-*` indexes by name, write, or see cluster state.
-- **Paging**: on 9.5.5 an alias-only reader can open a point in time on the alias, but searching
-  with it returns 403 (PIT search needs `read` on the underlying indexes). Page with
+- **Paging**: on 9.5.5 and 9.5.6 an alias-only reader can open a point in time on the alias, but
+  searching with it returns 403 (PIT search needs `read` on the underlying indexes). Page with
   `search_after` without a PIT, or with `from` and `size`; a publish between two pages can change
   the results.
 - **Network**: in Kubernetes, ingress to Elasticsearch is denied by default. The label

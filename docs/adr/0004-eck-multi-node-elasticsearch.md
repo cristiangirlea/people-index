@@ -12,7 +12,7 @@ placement, no quorum, and a heavy bulk load competes with cluster-state work on 
 ## Decision
 
 **Topology** (`deploy/k8s/base/elasticsearch`), run by the ECK operator (3.5.0, manifests pinned
-by checksum), Elasticsearch 9.5.5:
+by checksum), Elasticsearch 9.5.6:
 
 - **Three dedicated master nodes.** A quorum survives the loss of one; masters do no indexing,
   so a bulk load on the data nodes never starves cluster-state updates.

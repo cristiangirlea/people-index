@@ -22,10 +22,17 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
   complete delivery, and a directory named `latest` fails such a run. Remedy: rename the
   delivery and set `PI_DELIVERY` to the new name.
 - Pin the production example release image by digest and check rendered Job images.
+- Elasticsearch 9.5.6 (compose, the ECK spec and the snapshot bootstrap Job; aws-cli 2.39.3 in
+  compose). The Elasticsearch rules extraction predicts (numbers, number length, repeated keys,
+  keyword limits, analyzer tokens, the date table, the mapping read-back and the built-in
+  templates) were re-verified on 9.5.6 and are unchanged from 9.5.5.
 
 ### Fixed
 
 - Retry transient S3 failures through brief store outages with the configurable `PI_STORE_RETRY_TIMEOUT` window.
+- `values_ignored_by_index` counts a string longer than 1000 characters in a `long` or `integer`
+  field: Elasticsearch skips it whatever it holds (observed on 9.5.5 and 9.5.6); one that held a
+  readable number used to go uncounted.
 
 ## [0.1.0] - 2026-10-29
 

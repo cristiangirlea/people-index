@@ -1,5 +1,5 @@
 //! Java's `Double.parseDouble`, which Elasticsearch 9.5.5 was observed to use when it reads a
-//! string into an `integer` field.
+//! string into an `integer` field (re-verified on 9.5.6).
 //!
 //! The grammar: leading and trailing characters up to U+0020 are trimmed; then an optional sign
 //! and `NaN`, `Infinity`, a decimal `(digits [. digits?] | . digits) ([eE] [+-]? digits)?` or a

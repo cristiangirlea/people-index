@@ -1,8 +1,9 @@
 //! Repeated keys at any depth, reduced to each key's last occurrence.
 //!
 //! Elasticsearch rejects a document that repeats a key in any object ("Duplicate field"),
-//! observed against a real Elasticsearch 9.5.5 at the top level, in objects inside arrays, in
-//! objects several levels deep, in unmapped fields and inside `enabled: false` objects alike.
+//! observed against a real Elasticsearch 9.5.5 (re-verified on 9.5.6) at the top level, in
+//! objects inside arrays, in objects several levels deep, in unmapped fields and inside
+//! `enabled: false` objects alike.
 //! Extraction keeps such a record and drops every occurrence of a repeated key but the last, in
 //! every object, which is the occurrence [`crate::raw::RawObject::get`] reads and the shape
 //! checks judge.

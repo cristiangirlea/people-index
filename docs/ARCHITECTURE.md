@@ -139,9 +139,10 @@ this document, `roles` and `organization_id` stand for `person.references` and
 **A number token longer than 1000 characters** (as written: sign, digits, `.`, exponent)
 anywhere in the record, mapped, unknown or inside a disabled object, makes the line malformed
 (kind `record`, the reason names the path, as in `addresses[2].zip: a number of 1001
-characters; Elasticsearch accepts at most 1000`): Elasticsearch 9.5.5 refuses it while parsing
-the document, whatever the field's mapping (observed: 1001 digits fail the bulk item even in a
-`text` field or with `ignore_malformed`, 999 are indexed). Counting the sign, point and
+characters; Elasticsearch accepts at most 1000`): Elasticsearch 9.5.6 refuses it while parsing
+the document, whatever the field's mapping (observed on 9.5.5, re-verified on 9.5.6 (2026-11-06):
+1001 digits fail the bulk item even in a `text` field or with `ignore_malformed`, 1000 are
+indexed). Counting the sign, point and
 exponent too is deliberately strict. Only the numbers the stored body keeps count: one inside
 an earlier occurrence of a repeated key, which the body drops (below), does not quarantine the
 line, and the reason names the first kept one. `pi-model` notes them in the same pass of its
@@ -149,17 +150,16 @@ raw-JSON scanner (`scan`) that finds repeated keys and decides after it; the lim
 `MAX_NUMBER_CHARS`.
 
 **A key repeated in one object**, at any depth (the top level, a role, an object inside an
-array, an unknown field, a disabled object like `addresses`), is reduced to its last
-occurrence: Elasticsearch 9.5.5 fails the bulk item with "Duplicate field" for a repeat at any
-of those places (observed), and the last occurrence is the one every common JSON parser, and
-the checks here, read. The same scan pass notes the repeats (`RepeatedKeys`, a second visitor;
-keys compare as written and, when one has an escape, decoded, so `"\u006eame"` repeats
-`"name"`); a record with one is stored without each repeated key's earlier occurrences,
-from its key to the next key of the same object, every other byte as written (key spellings,
-value text, whitespace, order); a record without one, nearly all of them, is stored byte for
-byte. Such a record is kept, not malformed, and counted
-in the extract counter `records_with_repeated_keys` (per extracted line, like
-`values_ignored_by_index`).
+array, an unknown field, a disabled object like `addresses`), is reduced to its last occurrence:
+Elasticsearch 9.5.6 fails the bulk item with "Duplicate field" for a repeat at any of those
+places (observed on 9.5.5, re-verified on 9.5.6 (2026-11-06)), and the last occurrence is the
+one every common JSON parser, and the checks here, read. The same scan pass notes the repeats
+(`RepeatedKeys`, a second visitor; keys compare as written and, when one has an escape, decoded,
+so `"\u006eame"` repeats `"name"`); a record with one is stored without each repeated key's
+earlier occurrences, from its key to the next key of the same object, every other byte as
+written (key spellings, value text, whitespace, order); a record without one, nearly all of
+them, is stored byte for byte. Such a record is kept, not malformed, and counted in the extract
+counter `records_with_repeated_keys` (per extracted line, like `values_ignored_by_index`).
 
 Date fields contribute to `values_ignored_by_index` for the built-in format
 `strict_date_optional_time||strict_year_month||strict_year`, including multi-fields. The
@@ -191,8 +191,11 @@ record stays searchable by its other fields, and the value stays in `_source`. E
 such a record and counts in the extract counter `values_ignored_by_index` the values
 Elasticsearch skips (not malformed, not against `max_malformed`),
 following the rules
-Elasticsearch 9.5.5 was observed to apply (`pi-model`'s `es_number`, pinned in its tests):
+Elasticsearch was observed to apply on 9.5.5, re-verified on 9.5.6 (2026-11-06) (`pi-model`'s
+`es_number`, pinned in its tests):
 - either number type: a boolean is skipped, and so is a string of spaces only; `""` is not;
+  a string longer than 1000 characters (counted once unescaped) is skipped whatever it
+  holds (1000 are read);
 - `long` (`connections`, `followers`, `employee_count`): a string must be an exact decimal
   `[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?` with no surrounding whitespace
   (`"n/a"`, `" 5"` are skipped), truncated toward zero within `i64`; Java's `BigDecimal` limits
@@ -565,7 +568,7 @@ sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
 | `PI_ES_USERNAME`, `PI_ES_PASSWORD` or `PI_ES_API_KEY` | auth | unset |
 | `PI_ES_CA_CERT` | PEM file to trust | unset |
 | `PI_ES_REQUEST_TIMEOUT`, `PI_ES_GZIP` | one request's timeout, gzip bulk bodies | `120s`, false |
-| `PI_ALIAS` | published alias; safe lowercase store segment, not starting with `.`, at most 126 bytes, with no run-index collision with a built-in Elasticsearch 9.5.5 template | `persons` |
+| `PI_ALIAS` | published alias; safe lowercase store segment, not starting with `.`, at most 126 bytes, with no run-index collision with a built-in Elasticsearch 9.5.6 template | `persons` |
 | `PI_RUN_ID` | run id (`run`, `worker`, `stage`) | generated; `worker` follows the newest run |
 | `PI_RUN_ID_FROM_JOB_NAME` | derive the run id for `run` or `worker` from a CronJob Job name; mutually exclusive with `PI_RUN_ID` | unset |
 | `PI_EXECUTOR` | `local` or `distributed` | `local` |
@@ -643,7 +646,7 @@ Served on `PI_METRICS_ADDR` at `/metrics`:
 
 ## Deployment
 
-- **Kubernetes** (`deploy/k8s`, Kustomize): ECK 3.5.0 runs Elasticsearch 9.5.5 with three
+- **Kubernetes** (`deploy/k8s`, Kustomize): ECK 3.5.0 runs Elasticsearch 9.5.6 with three
   dedicated master nodes and a data node set spread across zones (`topology.kubernetes.io/zone`,
   shard allocation awareness); SeaweedFS 4.50 is the S3-compatible store locally (the
   production example uses external S3); the coordinator is a Job and the workers a Job with

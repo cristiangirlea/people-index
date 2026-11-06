@@ -1,4 +1,4 @@
-// Index patterns observed from GET _index_template on Elasticsearch 9.5.5.
+// Index patterns observed from GET _index_template on Elasticsearch 9.5.5, re-verified on 9.5.6.
 const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
     (".deprecation-indexing-template", ".logs-deprecation.*"),
     (

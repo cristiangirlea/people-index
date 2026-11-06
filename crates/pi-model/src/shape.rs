@@ -14,9 +14,10 @@
 //! value is not indexed and the field is listed in the document's `_ignored`) and keeps the
 //! document, searchable by its other fields. Extraction lets the record through and counts
 //! the values Elasticsearch skips ([`LineStats`]), following the rules Elasticsearch 9.5.5 was
-//! observed to apply ([`crate::es_number`] for numbers: `long` strings as exact decimals,
-//! `integer` values as Java doubles with the range checked before truncation, JSON floats in a
-//! `long` compared as doubles), with one known divergence: a non-ASCII decimal digit in a
+//! observed to apply, re-verified on 9.5.6 ([`crate::es_number`] for numbers: `long` strings
+//! as exact decimals, `integer` values as Java doubles with the range checked before
+//! truncation, JSON floats in a `long` compared as doubles, strings past 1000 characters
+//! skipped), with one known divergence: a non-ASCII decimal digit in a
 //! `long` string is counted, though Elasticsearch indexes it. An object still fails those
 //! fields, `ignore_malformed` or not, so it is quarantined there too.
 //!
@@ -749,11 +750,12 @@ mod tests {
         (r#"[true,"x"]"#, true),
     ];
 
-    /// What Elasticsearch 9.5.5 did with each value, observed against a real 9.5.5 instance
-    /// (fields mapped `long`, `integer` and `boolean` with `ignore_malformed: true`, `_ignored`
-    /// read back per document): `false` means indexed (not in `_ignored`), `true` skipped (the
-    /// field listed in `_ignored`). The count must match every row; the one known divergence
-    /// is pinned apart below.
+    /// What Elasticsearch 9.5.5 did with each value, observed against a real 9.5.5 instance and
+    /// re-verified on 9.5.6 on 2026-11-06 (fields mapped `long`, `integer` and `boolean` with
+    /// `ignore_malformed: true`, `_ignored` read back per document): `false` means indexed (not
+    /// in `_ignored`), `true` skipped (the field listed in `_ignored`). The count must match
+    /// every row; the one known divergence and the 1000-character string limit are pinned apart
+    /// below.
     #[test]
     fn counts_what_elasticsearch_9_5_5_skips() {
         for (field, fields, table) in [
@@ -768,11 +770,23 @@ mod tests {
                 assert_eq!(stats.ignored_by_index, u64::from(*skipped), "{record}");
             }
         }
-        // The known divergence: Elasticsearch 9.5.5 indexes a `long` string of a non-ASCII
-        // decimal digit (U+0665, ARABIC-INDIC DIGIT FIVE); the grammar here is ASCII only, so
-        // the counter counts it.
+        // The known divergence: Elasticsearch (9.5.5 and 9.5.6) indexes a `long` string of a
+        // non-ASCII decimal digit (U+0665, ARABIC-INDIC DIGIT FIVE); the grammar here is ASCII
+        // only, so the counter counts it.
         let stats = check("{\"followers\":\"\u{0665}\"}", PERSON_FIELDS).unwrap();
         assert_eq!(stats.ignored_by_index, 1);
+        // A string past 1000 characters is skipped whatever it holds (observed on 9.5.5 and
+        // 9.5.6); one of 1000 is read.
+        for (field, fields) in [
+            ("followers", PERSON_FIELDS),
+            ("founded_year", ORGANIZATION_FIELDS),
+        ] {
+            for (n, skipped) in [(1000, 0), (1001, 1)] {
+                let record = format!(r#"{{"{field}":"{}5"}}"#, "0".repeat(n - 1));
+                let stats = check(&record, fields).unwrap();
+                assert_eq!(stats.ignored_by_index, skipped, "{field}, {n} characters");
+            }
+        }
     }
 
     #[test]

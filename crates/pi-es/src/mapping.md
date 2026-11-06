@@ -34,19 +34,21 @@ or text multi-field, including on an unindexed parent. Omitting them uses the de
 names (including custom analyzers and `keyword`) are refused because a single immense term
 can fail indexing or queries. Fields inside disabled objects are not parsed and are exempt.
 
-On a single-node Elasticsearch 9.5.5 container, `_analyze` on 40,000 ASCII `a` characters
-produced 157 tokens of at most 255 bytes for `standard`, `simple`, `whitespace`, and
-`english`; indexing each succeeded. Further probes found that these analyzers cap tokens at
-255 characters for ASCII, CJK, U+023A and four-byte input. Multibyte tokens reached about
-765 bytes (CJK and U+023A), far below the 32,766-byte term limit. `french` also indexed
-successfully (157 one-byte tokens for the ASCII input), but is not on the deliberately small
-allow-list. `keyword` and `pattern` (`\W+`) failed indexing with HTTP 400; `fingerprint`
+On a single-node Elasticsearch 9.5.5 container (re-verified on 9.5.6, 2026-11-06), `_analyze` on
+40,000 ASCII `a` characters produced 157 tokens of at most 255 bytes for `standard`, `simple`,
+`whitespace`, and `english`; indexing each succeeded. Further probes found that these analyzers
+cap tokens at 255 characters for ASCII, CJK, U+023A and four-byte input. Multibyte tokens
+reached about 765 bytes (CJK and U+023A), far below the 32,766-byte term limit. `french` also
+indexed successfully (157 one-byte tokens for the ASCII input), but is not on the deliberately
+small allow-list. `keyword` and `pattern` (`\W+`) failed indexing with HTTP 400; `fingerprint`
 emitted nothing for a 40,000-character word (safe for that input, but still refused). A
 `search_analyzer` of `keyword` did not fail indexing, but a match query with a 40,000-character
-value failed with HTTP 400. The startup check validates names; prepare-index also reads the effective index settings and
-mapping, refusing analysis definitions or mapping changes introduced by templates.
+value failed with HTTP 400. The startup check validates names; prepare-index also reads the
+effective index settings and mapping, refusing analysis definitions or mapping changes
+introduced by templates.
 
-A 9.5.5 single-node probe created an index with the built-in mapping and run metadata.
+A 9.5.5 single-node probe (re-verified on 9.5.6) created an index with the built-in mapping and
+run metadata.
 GET `_mapping` returned `dynamic` as the string `"false"`, omitted `type: object` on
 objects with properties, and returned scalar `copy_to` as a one-element array; the rest
 matched. A matching index template defining a default keyword-tokenizer analyzer and an
@@ -54,11 +56,11 @@ extra keyword field put both in the created index: GET `_settings` exposed the a
 and GET `_mapping` exposed the field. The read-back check normalizes those observed mapping
 forms and compares the entire mapping including run metadata.
 
-A 9.5.5 single-node probe with a basic licence applied templates to `test-1` with this
-mapping. Index-level `index.mapping.ignore_above: 10` appeared in GET `_settings`, not
-GET `_mapping`; a longer `profile_url` remained in `_source` and was absent from `_ignored`.
-With `index.mapping.source.mode: synthetic`, creation and indexing succeeded, but GET
-`_settings` reported `STORED` and the URL remained in `_source`: basic did not activate
+A 9.5.5 single-node probe with a basic licence (re-verified on 9.5.6) applied templates to
+`test-1` with this mapping. Index-level `index.mapping.ignore_above: 10` appeared in GET
+`_settings`, not GET `_mapping`; a longer `profile_url` remained in `_source` and was absent
+from `_ignored`. With `index.mapping.source.mode: synthetic`, creation and indexing succeeded,
+but GET `_settings` reported `STORED` and the URL remained in `_source`: basic did not activate
 synthetic source. With `disabled`, creation and indexing succeeded, GET `_settings` reported
 `disabled`, and GET the document returned no `_source`. Neither source mode appeared in GET
 `_mapping`. The effective settings check refuses the index-level limit and source modes other
@@ -70,15 +72,15 @@ than stored, including when a template supplies them.
 `size_range`, `keywords`, `technologies`: exact values used in filters and facets, never
 analysed.
 
-Every keyword with an index or doc values, including multi-fields, has `ignore_above`:
-8191 for codes without a smaller limit, 512 or 1024 for the others. Elasticsearch measures
-Java string length in UTF-16 code units (an emoji is two). A unit takes at most three UTF-8
-bytes, so 8191 units take at most 24,573 bytes, below Lucene's 32,766-byte term limit;
-the safe ceiling is 10,922 units. On Elasticsearch 9.5.5, 4,095 emoji were indexed and
-found by a term query; 5,000 emoji were ignored and listed in `_ignored`; 8191 three-byte
-BMP characters were indexed. A further probe indexed a document containing 8192 emoji in
-`country`, `first_name`, `roles.location`, `organizations.domain` and `skills`; the original
-`_source` remained and `_ignored` listed each affected keyword path.
+Every keyword with an index or doc values, including multi-fields, has `ignore_above`: 8191 for
+codes without a smaller limit, 512 or 1024 for the others. Elasticsearch measures Java string
+length in UTF-16 code units (an emoji is two). A unit takes at most three UTF-8 bytes, so 8191
+units take at most 24,573 bytes, below Lucene's 32,766-byte term limit; the safe ceiling is
+10,922 units. On Elasticsearch 9.5.5 (re-verified on 9.5.6), 4,095 emoji were indexed and found
+by a term query; 5,000 emoji were ignored and listed in `_ignored`; 8191 three-byte BMP
+characters were indexed. A further probe indexed a document containing 8192 emoji in `country`,
+`first_name`, `roles.location`, `organizations.domain` and `skills`; the original `_source`
+remained and `_ignored` listed each affected keyword path.
 
 `values_ignored_by_index` counts each input value over the smallest applicable keyword limit,
 once even if multiple fields ignore it, and counts each array element separately. It counts
@@ -100,7 +102,7 @@ their own that no query needs. `enabled: false` skips mapping their contents ent
 shape (or a malformed value) cannot fail a bulk item, and they cost nothing but `_source`.
 The JSON parser still reads their tokens, and its own rules apply before any mapping, so two
 things fail the item in any field, disabled, `text` or `ignore_malformed` alike (both observed
-on 9.5.5):
+on 9.5.5, re-verified on 9.5.6 (2026-11-06)):
 
 - a number token longer than 1000 characters: extraction quarantines such a record as `record`,
   naming the path (`pi_model`'s `MAX_NUMBER_CHARS`), unless the number is in an occurrence of a
@@ -132,34 +134,38 @@ doing that:
   still fails the item, `ignore_malformed` or not.
 
 Identifiers (`id`, `roles.id`, `roles.organization_id`, `organizations.id`) are strict at
-extract time (`JsonKind::Number`): a value that is not a number, or a string of decimal
-digits within `u64` (`pi_model::parse_decimal_id`, so `"007"` passes), is quarantined, and `ignore_malformed` stays on them as a second line. Measures (`connections`,
-`followers`, `open_to_work`, `organizations.employee_count`, `organizations.founded_year`) are
-lenient (`JsonKind::LenientLong`, `LenientInteger` for `founded_year`, `LenientBoolean`): any
-scalar or array of scalars passes, and only an object is quarantined. `values_ignored_by_index`
-counts the values Elasticsearch skips (listed in `_ignored`), following the rules observed on
-9.5.5 and pinned in `pi-model`'s tests (`pi_model` `es_number`): in either number type a
-boolean; in a `long` a string other than `""` that is not an exact decimal (no surrounding
-whitespace) or whose integer part is outside `i64`, or whose exponent is outside `int` or
-scale (fraction digits as written minus the exponent) outside `int` or below -19, whatever its
-value (`BigDecimal`'s limits: `"0e20"` is skipped, `"0e19"` is not), a JSON integer
-outside `i64`, or a JSON float beyond `±2^63` compared as a double (so values that round to
-2^63 pass); in an `integer` a value Java's `Double.parseDouble` rejects (it trims, so a string
-of spaces only is rejected, and takes `NaN`, `Infinity`, `d`/`f` suffixes and hexadecimal;
-those forms were observed, the rest of the grammar is derived from Java's) or one outside
-`i32` before truncation; in a `boolean` anything but `true`, `false`, `"true"`, `"false"` and `""`. One known divergence: a
-non-ASCII decimal digit in a `long` string (`"٥"`) is counted, though Elasticsearch indexes it.
-The counter counts per extracted line, before person deduplication, and an organization's
-value once however many person documents embed it. Every number and date field must be mapped
-with `ignore_malformed: true` (and a lenient one as its own type), a multi-field under `fields`
-included: `check_mapping` refuses the mapping at startup otherwise. `roles.start_date` and `end_date` accept full dates,
-`yyyy-MM` and `yyyy` (a JSON number such as `2020` is read as text, so as a year), so range
-queries work on partial dates.
+extract time (`JsonKind::Number`): a value that is not a number, or a string of decimal digits
+within `u64` (`pi_model::parse_decimal_id`, so `"007"` passes), is quarantined, and
+`ignore_malformed` stays on them as a second line. Measures (`connections`, `followers`,
+`open_to_work`, `organizations.employee_count`, `organizations.founded_year`) are lenient
+(`JsonKind::LenientLong`, `LenientInteger` for `founded_year`, `LenientBoolean`): any scalar or
+array of scalars passes, and only an object is quarantined. `values_ignored_by_index` counts the
+values Elasticsearch skips (listed in `_ignored`), following the rules observed on 9.5.5,
+re-verified on 9.5.6 (2026-11-06), and pinned in `pi-model`'s tests (`pi_model` `es_number`): in
+either number type a boolean or a string longer than 1000 characters (counted once unescaped,
+whatever it holds; 1000 are read; `\u0030` escapes observed on 9.5.6); in a `long` a string
+other than `""` that is not an exact decimal (no surrounding whitespace) or whose integer part
+is outside `i64`, or whose exponent is outside `int` or scale (fraction digits as written minus
+the exponent) outside `int` or below -19, whatever its value (`BigDecimal`'s limits: `"0e20"` is
+skipped, `"0e19"` is not), a JSON integer outside `i64`, or a JSON float beyond `±2^63` compared
+as a double (so values that round to 2^63 pass); in an `integer` a value Java's
+`Double.parseDouble` rejects (it trims, so a string of spaces only is rejected, and takes `NaN`,
+`Infinity`, `d`/`f` suffixes and hexadecimal; those forms were observed, the rest of the grammar
+is derived from Java's) or one outside `i32` before truncation; in a `boolean` anything but
+`true`, `false`, `"true"`, `"false"` and `""`. One known divergence: a non-ASCII decimal digit
+in a `long` string (`"٥"`) is counted, though Elasticsearch indexes it. The counter counts per
+extracted line, before person deduplication, and an organization's value once however many
+person documents embed it. Every number and date field must be mapped with `ignore_malformed:
+true` (and a lenient one as its own type), a multi-field under `fields` included:
+`check_mapping` refuses the mapping at startup otherwise. `roles.start_date` and `end_date`
+accept full dates, `yyyy-MM` and `yyyy` (a JSON number such as `2020` is read as text, so as a
+year), so range queries work on partial dates.
 
 ## Date observations and the extraction counter
 
 The built-in format is `strict_date_optional_time||strict_year_month||strict_year`.
-A probe against Elasticsearch 9.5.5 gave the following results; the complete probe is pinned
+A probe against Elasticsearch 9.5.5 gave the following results, re-verified row for row on
+9.5.6 (2026-11-06) for both the built-in and the default format; the complete probe is pinned
 in the model tests as raw JSON values.
 
 | Values | Indexed | Ignored |
@@ -191,7 +197,8 @@ copy of only the fields it needs (`roles.title`, `roles.organization_id`), not o
 
 ## Built-in index templates (Elasticsearch 9.5.5)
 
-A single-node 9.5.5 container returned these from `GET _index_template`.
+A single-node 9.5.5 container returned these from `GET _index_template`; a 9.5.6 container
+returned the same 63 templates, patterns and priorities (2026-11-06).
 An absent priority is shown as unset. `*` is a wildcard.
 
 | Template | Index patterns | Priority |
@@ -267,9 +274,9 @@ tier); `GET /_data_stream` returned no streams. Startup rejects aliases whose ru
 indexes can match these patterns. Other cluster templates and later ES versions require
 operator review; the effective configuration check remains necessary.
 
-The same 9.5.5 probe with `GET _template` returned the legacy patterns
+The same 9.5.5 probe (re-verified on 9.5.6) with `GET _template` returned the legacy patterns
 `.monitoring-es-7-*`, `.monitoring-kibana-7-*`, `.monitoring-logstash-7-*`,
 `.monitoring-beats-7-*`, and `.monitoring-alerts-7`. An index named
 `.monitoring-es-7-<run_id>` was created with the monitoring mapping. Startup refuses
-dot-prefixed aliases: Elasticsearch 9.5.5 deprecates names beginning with a dot and
+dot-prefixed aliases: Elasticsearch 9.5.5 and 9.5.6 deprecate names beginning with a dot and
 says they will not be allowed in a future version.

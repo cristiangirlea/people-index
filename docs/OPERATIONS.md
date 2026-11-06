@@ -11,7 +11,7 @@ them all.
 | piece | compose | Kubernetes (k3d) |
 |---|---|---|
 | image | `people-index:local`, built from `Dockerfile` (`make image`) | the same image, loaded with `make image-import` |
-| Elasticsearch 9.5.5 | `es01`, `es02`, `es03`: three master+data nodes, zones a/b/c | ECK resource `es`: 3 dedicated masters + a data node set across zones; HTTP service `es-es-http:9200` |
+| Elasticsearch 9.5.6 | `es01`, `es02`, `es03`: three master+data nodes, zones a/b/c | ECK resource `es`: 3 dedicated masters + a data node set across zones; HTTP service `es-es-http:9200` |
 | TLS | CA and node certificates from `elasticsearch-certutil` (service `certs`) | ECK's self-signed CA, secret `es-es-http-certs-public` key `ca.crt` |
 | pipeline user | `pipeline`, role `people-index-writer`, created by `es-users` | the same user in ECK's file realm; credentials in secret `pipeline-es-credentials` (`username`, `password`) |
 | reader user | `reader`, role `people-index-reader`, created by `es-users` | role `people-index-reader` is available for an operator to assign to a user |
@@ -39,7 +39,7 @@ passes; `s3-init` checks it on every start and stops the stack if a store does n
 lowercase safe store segment (`a-z`, digits, `.`, `_`, `=`, `-`), not `.` or `..`,
 not starting with `.`, `-` or `_`, and at most 126 bytes. This leaves room for the separator
 and a 128-byte run ID within Elasticsearch's 255-byte index-name limit. Startup refuses
-aliases whose run indexes can match a built-in Elasticsearch 9.5.5 index template, naming
+aliases whose run indexes can match a built-in Elasticsearch 9.5.6 index template, naming
 the template; for example `logs`, `metrics`, and `traces` are refused. The observed
 patterns and probe are in [mapping.md](../crates/pi-es/src/mapping.md#built-in-index-templates-elasticsearch-955).
 Review templates installed on your own cluster and on other Elasticsearch versions too;
@@ -217,11 +217,11 @@ operator to assign to a user. Compose follows `PI_ALIAS` when creating the role.
 change the reader's alias in `deploy/k8s/base/elasticsearch/roles.yml` when changing `PI_ALIAS`.
 Use the alias in the API key descriptor and search URL below as well.
 
-On Elasticsearch 9.5.5 this reader can open a point in time (PIT) on the alias, but
-searching with its PIT id returns 403: PIT search requires `read` on the underlying
-`persons-*` indexes, which this role does not grant. Page through the alias with
-`search_after` without a PIT, or use `from` and `size`. Without a PIT, a publish or
-other index changes between requests can change the results.
+On Elasticsearch 9.5.5, re-verified on 9.5.6 (2026-11-06), this reader can open a point in time
+(PIT) on the alias, but searching with its PIT id returns 403: PIT search requires `read` on the
+underlying `persons-*` indexes, which this role does not grant. Page through the alias with
+`search_after` without a PIT, or use `from` and `size`. Without a PIT, a publish or other index
+changes between requests can change the results.
 
 Create a key as an administrator with `manage_api_key` and access to the alias. API keys are
 limited by both their descriptor and the creating user's privileges; the descriptor below gives

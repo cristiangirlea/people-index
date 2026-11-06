@@ -13,10 +13,12 @@ use crate::error::{MalformedKind, MalformedRecord};
 use crate::scan::{JsonPath, ScanVisitor, scan};
 
 /// The most characters a JSON number token may have, as written (sign, digits, `.`,
-/// exponent). Observed against a real Elasticsearch 9.5.5: a number of 1001 digits fails the
-/// bulk item in any field, even `text` and even with `ignore_malformed`; 999 digits are
-/// indexed. Counting the sign, point and exponent too is deliberately on the strict side: the
-/// parser may count only digits, so such a record may be quarantined where it would index.
+/// exponent). Observed against a real Elasticsearch 9.5.5, re-verified on 9.5.6: a number of
+/// 1001 digits fails the bulk item in any field, even `text` and even with `ignore_malformed`;
+/// 1000 digits are indexed. Counting the sign, point and exponent too is deliberately on the
+/// strict side: the parser may count only digits (on 9.5.5 and 9.5.6, `-`, 995 digits and
+/// `.5e+1`, 1001 characters, were indexed), so such a record may be quarantined where it would
+/// index.
 pub(crate) const MAX_NUMBER_CHARS: usize = 1000;
 
 /// Notes every number longer than [`MAX_NUMBER_CHARS`] during a scan; it never stops it, since

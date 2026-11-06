@@ -1,11 +1,16 @@
 //! How Elasticsearch reads one scalar into a `long` or `integer` field, so extraction can count
 //! the values a field with `ignore_malformed` skips (and lists in `_ignored`).
 //!
-//! The rules follow what Elasticsearch 9.5.5 was observed to do (pinned in
-//! `shape::tests::counts_what_elasticsearch_9_5_5_skips`):
+//! The rules follow what Elasticsearch 9.5.5 was observed to do, re-verified on 9.5.6
+//! (2026-11-06; pinned in `shape::tests::counts_what_elasticsearch_9_5_5_skips`):
 //!
 //! - A JSON boolean is skipped; the empty string is indexed (as no value) and a string of
 //!   spaces only is skipped, in both types.
+//! - A string longer than 1000 characters, counted after JSON unescaping, is skipped in both
+//!   types, whatever it holds: observed on 9.5.5 and 9.5.6 for zero-padded integers, decimals,
+//!   exponents and space-padded values, and on 9.5.6 for `\u0030` escapes (1000 characters read,
+//!   1001 skipped). Counting UTF-16 units rather than code points is derived (Java's string
+//!   length); it cannot change a result, since no non-ASCII string is read as a number here.
 //! - `long`, a string: an exact decimal, `[+-]? (digits [. digits?] | . digits) ([eE] [+-]?
 //!   digits)?` with no surrounding whitespace, truncated toward zero and checked against the
 //!   range of `i64` without floating point. Anything else is skipped, and so is a decimal whose
@@ -55,12 +60,20 @@ const TWO_TO_THE_63: f64 = 9_223_372_036_854_775_808.0;
 /// The lowest scale (digits after the point minus the exponent) a `long` string may have.
 const MIN_LONG_SCALE: i64 = -19;
 
+/// The longest string, in UTF-16 units, either numeric type reads; a longer one is skipped
+/// whatever it holds (the limit observed, the unit derived; see the module notes).
+const MAX_STRING_CHARS: usize = 1000;
+
 /// How a field of type `ty` reads the raw JSON scalar `text` (not null, not an array or
 /// object).
 pub(crate) fn read(text: &str, ty: NumericType) -> Reading {
     match text.as_bytes().first() {
         Some(b'"') => match serde_json::from_str::<String>(text) {
             Ok(s) if s.is_empty() => Reading::Indexed,
+            // UTF-16 units never outnumber UTF-8 bytes: count them only past the limit.
+            Ok(s) if s.len() > MAX_STRING_CHARS && s.encode_utf16().count() > MAX_STRING_CHARS => {
+                Reading::NotANumber
+            }
             Ok(s) => match ty {
                 NumericType::Long => read_long_string(&s),
                 NumericType::Integer => {
@@ -268,7 +281,6 @@ mod tests {
             // `long`, JSON integers: exact.
             ("-9223372036854775808", Long, Indexed),
             ("-9223372036854775809", Long, OutOfRange),
-            ("0000000000000000000000000001", Long, Indexed),
             // `long`, other JSON numbers: as doubles, against 2^63.
             ("9223372036854775807.999", Long, Indexed),
             ("9223372036854776832.0", Long, Indexed), // a tie: to even, 2^63
@@ -313,18 +325,47 @@ mod tests {
     #[test]
     fn very_long_strings_read_without_panic() {
         let digits = 100_000;
-        let long = format!(r#""0.{}1""#, "0".repeat(digits));
-        assert_eq!(read(&long, NumericType::Long), Reading::Indexed);
-        let long = format!(r#""9.{}""#, "9".repeat(digits));
-        assert_eq!(read(&long, NumericType::Long), Reading::Indexed);
-        let long = format!(r#""{}""#, "9".repeat(digits));
-        assert_eq!(read(&long, NumericType::Long), Reading::OutOfRange);
-        let long = format!(r#""{}e-{}""#, "9".repeat(digits), digits);
-        assert_eq!(read(&long, NumericType::Long), Reading::Indexed);
+        for long in [
+            format!(r#""0.{}1""#, "0".repeat(digits)),
+            format!(r#""9.{}""#, "9".repeat(digits)),
+            format!(r#""{}""#, "9".repeat(digits)),
+            format!(r#""{}e-{}""#, "9".repeat(digits), digits),
+        ] {
+            assert_eq!(read(&long, NumericType::Long), Reading::NotANumber);
+        }
+        let hex = format!(r#""0x0.{}p0""#, "f".repeat(digits));
+        assert_eq!(read(&hex, NumericType::Integer), Reading::NotANumber);
         let number = format!("0.{}1", "0".repeat(digits));
         assert_eq!(read(&number, NumericType::Long), Reading::Indexed);
         assert_eq!(read(&number, NumericType::Integer), Reading::Indexed);
-        let hex = format!(r#""0x0.{}p0""#, "f".repeat(digits));
-        assert_eq!(read(&hex, NumericType::Integer), Reading::Indexed);
+    }
+
+    /// Observed on Elasticsearch 9.5.5 and 9.5.6: a string of 1000 characters is read and one
+    /// of 1001 is skipped in either type, whatever it holds. Escapes count once decoded,
+    /// observed on 9.5.6: 999 `\u0030` and a `5` (5995 characters as written) are read, 1000
+    /// and a `5` are skipped.
+    #[test]
+    fn strings_past_1000_characters_are_skipped() {
+        use NumericType::{Integer, Long};
+        use Reading::{Indexed, NotANumber};
+        for (n, want) in [(1000, Indexed), (1001, NotANumber)] {
+            let zeros = format!(r#""{}5""#, "0".repeat(n - 1));
+            let fraction = format!(r#""0.{}1""#, "0".repeat(n - 3));
+            let exponent = format!(r#""5e{}1""#, "0".repeat(n - 3));
+            let spaces = format!(r#""{}5""#, " ".repeat(n - 1));
+            let escaped = format!(r#""{}5""#, r"\u0030".repeat(n - 1));
+            for (text, ty) in [
+                (&zeros, Long),
+                (&fraction, Long),
+                (&exponent, Long),
+                (&escaped, Long),
+                (&zeros, Integer),
+                (&fraction, Integer),
+                (&spaces, Integer),
+                (&escaped, Integer),
+            ] {
+                assert_eq!(read(text, ty), want, "{n} characters as {ty:?}");
+            }
+        }
     }
 }

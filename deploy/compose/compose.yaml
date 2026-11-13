@@ -224,7 +224,7 @@ services:
     logging: *logging
 
   s3:
-    image: chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
     hostname: s3
     # Build an ephemeral gateway config with separate bucket-scoped identities.
     user: "1000:1000"
@@ -252,7 +252,7 @@ services:
       start_period: 5s
 
   s3-init:
-    image: amazon/aws-cli:2.39.3@sha256:d557b3524475d70dd3104cf44d96568ee3188897b73a6ece2b37aa50e1af362f
+    image: amazon/aws-cli:2.39.7@sha256:bba262340b0bc7cbf3a8a48612531263b56f4b280c4f036a07816af1b271bda0
     entrypoint: ["bash", "/scripts/s3-init.sh"]
     depends_on:
       s3: { condition: service_healthy }
@@ -339,7 +339,7 @@ services:
       - --digest
 
   prometheus:
-    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
     profiles: [metrics]
     command:
       - --config.file=/etc/prometheus/prometheus.yml

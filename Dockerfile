@@ -22,7 +22,7 @@
 
 ARG CARGO_CHEF_VERSION=0.1.78
 
-FROM rust:1.99.1-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS chef
+FROM rust:1.99.1-slim-trixie@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS chef
 ARG CARGO_CHEF_VERSION
 RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src
@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --package people-index --bin people-index \
     && install -D -m 0755 target/release/people-index /out/people-index
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS runtime
 LABEL org.opencontainers.image.title="people-index" \
       org.opencontainers.image.description="Staged, multi-node person and organization join loaded into Elasticsearch" \
       org.opencontainers.image.source="https://github.com/cristiangirlea/people-index" \

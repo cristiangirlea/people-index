@@ -7,6 +7,11 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Changed
+
+- Compose gives each Elasticsearch node 1536m (`ES_MEM_LIMIT`, was 1g) with the same 512m heap:
+  at 1g a node ran at its memory limit and the kernel killed it under load.
+
 ## [0.2.0] - 2026-11-20
 
 ### Added

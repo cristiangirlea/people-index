@@ -66,7 +66,7 @@ x-es-node: &es-node
   deploy:
     resources:
       limits:
-        memory: ${ES_MEM_LIMIT:-1g}
+        memory: ${ES_MEM_LIMIT:-1536m}
   stop_grace_period: 2m
   restart: unless-stopped
   logging: *logging

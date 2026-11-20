@@ -509,7 +509,10 @@ defaults, plus the document being decoded and a couple of segments being read. A
 than the load buffer still passes, alone, so a small buffer slows the load but never stops it.
 
 **Elasticsearch.** Heap at most half of the node's memory (compose: `ES_HEAP` and
-`ES_MEM_LIMIT`), the rest is page cache for segments. On a nearly full disk the watermarks keep
+`ES_MEM_LIMIT`), the rest is page cache for segments. Below the heap's half, the node's own
+memory is not small: the locked heap, direct memory (half the heap) and the JVM itself need about
+0.95 GiB at a 512m heap, so a 1 GiB limit runs at its ceiling and the kernel kills the node under
+load (#140). Compose gives each node 1536m. On a nearly full disk the watermarks keep
 shards unassigned; free space, or for a throwaway dev stack set
 `ES_DISK_THRESHOLD_ENABLED=false`.
 

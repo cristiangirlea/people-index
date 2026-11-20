@@ -14,17 +14,22 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 - `PI_DELIVERY=latest`: a run plans the newest delivery that has its `_COMPLETE` marker (by
   name), records it in `plan.json`, and is skipped (`runs/<id>/skipped.json`, exit 0, its
   workers too) when the alias already serves that delivery or a newer one, unless
-  `PI_REPUBLISH_UNCHANGED_DELIVERY=true`; a delivery can no longer be named `latest`.
+  `PI_REPUBLISH_UNCHANGED_DELIVERY=true`; a delivery can no longer be named `latest`. A skipped
+  `run` prints `{"run_id", "status": "skipped", "delivery", "serving_run", "reason"}` instead of
+  the stage lists and counts `pi_runs_skipped_total`.
 - A security policy (`SECURITY.md`) for reporting vulnerabilities privately.
 
 ### Changed
 
 - **Breaking** (the feed contract and settings, (a) and (c) of the
-  [compatibility policy](docs/INTEGRATING.md#compatibility-policy)): a delivery can no longer be
-  named `latest`. `PI_DELIVERY=latest` used to read `raw/latest/`; it now plans the newest
-  complete delivery, and a directory named `latest` fails such a run. Remedy: rename the
-  delivery and set `PI_DELIVERY` to the new name.
+  [compatibility policy](https://github.com/cristiangirlea/people-index/blob/v0.2.0/docs/INTEGRATING.md#compatibility-policy)):
+  a delivery can no longer be named `latest`. `PI_DELIVERY=latest` used to read `raw/latest/`; it
+  now plans the newest complete delivery, and a directory named `latest` fails such a run.
+  Remedy: rename the delivery and set `PI_DELIVERY` to the new name.
 - Pin the production example release image by digest and check rendered Job images.
+- The in-cluster SeaweedFS requests 1.5 GiB and is limited to 2 GiB of memory (was 512 MiB / 1 GiB
+  in the base, 256 / 512 MiB in the local overlay) after it was OOM-killed on k3d. Docker needs at
+  least 14 GiB of memory for the local overlay (was 10).
 - Elasticsearch 9.5.6 (compose, the ECK spec and the snapshot bootstrap Job). The Elasticsearch
   rules extraction predicts (numbers, number length, repeated keys, keyword limits, analyzer
   tokens, the date table, the mapping read-back and the built-in templates) were re-verified on

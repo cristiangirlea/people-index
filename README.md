@@ -80,7 +80,7 @@ attribute), SeaweedFS, one coordinator and `--scale worker=N`.
 Both paths need Docker and GNU make (and bash). `make help` lists every target;
 [docs/OPERATIONS.md](docs/OPERATIONS.md) explains each one.
 
-**Docker Compose** (memory limits in `deploy/compose/.env.example`: 3 × 1 GiB Elasticsearch,
+**Docker Compose** (memory limits in `deploy/compose/.env.example`: 3 × 1.5 GiB Elasticsearch,
 3 × 2 GiB workers, 1 GiB coordinator):
 
 ```bash

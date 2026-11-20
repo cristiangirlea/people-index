@@ -23,10 +23,12 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
   complete delivery, and a directory named `latest` fails such a run. Remedy: rename the
   delivery and set `PI_DELIVERY` to the new name.
 - Pin the production example release image by digest and check rendered Job images.
-- Elasticsearch 9.5.6 (compose, the ECK spec and the snapshot bootstrap Job; aws-cli 2.39.3 in
-  compose). The Elasticsearch rules extraction predicts (numbers, number length, repeated keys,
+- Elasticsearch 9.5.6 (compose, the ECK spec and the snapshot bootstrap Job). The Elasticsearch rules extraction predicts (numbers, number length, repeated keys,
   keyword limits, analyzer tokens, the date table, the mapping read-back and the built-in
   templates) were re-verified on 9.5.6 and are unchanged from 9.5.5.
+- SeaweedFS 4.53 (compose and Kubernetes), aws-cli 2.39.7 and Prometheus v3.16.0 in compose.
+  SeaweedFS 4.52 reworked how conditional writes are checked; the conformance suite with its
+  create-if-absent and update-if-match races, and the lease test, pass against 4.53.
 
 ### Fixed
 

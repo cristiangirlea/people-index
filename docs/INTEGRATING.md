@@ -50,7 +50,7 @@ from the built-in ones are described by a schema file and a mapping file
 create-if-absent (`If-None-Match: *`) and update-if-match (`If-Match: <etag>`) PUTs; the store
 must answer 412 when one does not hold (404 is also accepted for `If-Match` on a missing key, as
 AWS S3 answers), with exactly one winner under concurrency
-([ADR 0003](adr/0003-object-store-commits-and-leases.md)). SeaweedFS 4.50 is tested on every
+([ADR 0003](adr/0003-object-store-commits-and-leases.md)). SeaweedFS 4.53 is tested on every
 pull request; AWS S3 documents both conditions and is what the production example targets, but
 no test in this repository runs against it. To check your store, run the same conformance and
 lease cases CI runs against SeaweedFS (`scripts/check-s3.sh`), pointed at a scratch bucket of

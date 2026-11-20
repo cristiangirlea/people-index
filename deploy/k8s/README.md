@@ -107,7 +107,7 @@ The monitoring component requires Prometheus to scrape kube-state-metrics config
 
 ## The object store
 
-SeaweedFS 4.50 (`chrislusf/seaweedfs:4.50`, `weed server -s3`) stands in for S3 locally; MinIO no
+SeaweedFS 4.53 (`chrislusf/seaweedfs:4.53`, `weed server -s3`) stands in for S3 locally; MinIO no
 longer publishes container images. The commit and lease protocol depends on conditional writes,
 probed against 4.48 with the same flags and security context as the StatefulSet:
 
@@ -124,7 +124,7 @@ probed against 4.48 with the same flags and security context as the StatefulSet:
 
 Since 4.49 (SeaweedFS #11882) an `If-Match` PUT on a missing key answers 404 NoSuchKey, as AWS S3
 does; the S3 client reads that as a failed precondition, and `scripts/check-s3.sh` re-verified
-the whole protocol against 4.50.
+the whole protocol against 4.50 and 4.53 (2026-11-20).
 
 It runs as one replica: its data (generated inputs, run intermediates, snapshots of a rebuildable
 index) can be recreated, and production uses a managed object store.

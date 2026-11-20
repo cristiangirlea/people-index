@@ -10,8 +10,9 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 ### Changed
 
 - Compose gives each Elasticsearch node 1536m (`ES_MEM_LIMIT`, was 1g) with the same 512m heap:
-  under load a node holds about 1.3 GiB of anonymous memory, and at 1g the kernel killed nodes
-  for memory, which failed loads or left a short index for the publish guard to refuse.
+  measured at 1536m under load, a node holds about 1.2 GiB of anonymous memory, and at 1g the
+  kernel killed nodes for memory, which failed loads or left a short index for the publish guard
+  to refuse.
 
 ## [0.2.0] - 2026-11-20
 

@@ -508,13 +508,13 @@ within `PI_LOAD_BUFFER_BYTES` (default twice `PI_BULK_MAX_BYTES`): about
 defaults, plus the document being decoded and a couple of segments being read. A document larger
 than the load buffer still passes, alone, so a small buffer slows the load but never stops it.
 
-**Elasticsearch.** Heap at most half of the node's memory (compose: `ES_HEAP` and
-`ES_MEM_LIMIT`), the rest is page cache for segments. The node's own memory goes well past the
-heap: in compose (which locks memory with `bootstrap.memory_lock`), a node with a 512m heap held
-about 1.3 GiB of anonymous memory under the e2e load, about 1 GiB of it locked, and peaked near
-1.4 GiB. At a 1 GiB limit the kernel killed such nodes for memory and Docker restarted them
-without a line in their logs (#140), so compose gives each node 1536m. The e2e prints each node's
-peak, anonymous and locked memory against its limit; keep the anonymous figure clear of it.
+**Elasticsearch.** Heap at most half of the node's memory (compose: `ES_HEAP` and `ES_MEM_LIMIT`),
+the rest is page cache for segments. The node's own memory goes well past the heap: in compose
+(which locks memory with `bootstrap.memory_lock`), measured at a 1536m limit, a node with a 512m
+heap held about 1.2 GiB of anonymous memory under the e2e load, about 0.95 GiB of it locked, and
+peaked near 1.3 GiB. At a 1 GiB limit the kernel killed such nodes for memory and Docker restarted
+them without a line in their logs (#140), so compose gives each node 1536m. The e2e prints each
+node's peak, anonymous and locked memory against its limit; keep the anonymous figure clear of it.
 On a nearly full disk the watermarks keep shards unassigned; free space, or for a throwaway dev
 stack set `ES_DISK_THRESHOLD_ENABLED=false`.
 

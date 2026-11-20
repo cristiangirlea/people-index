@@ -266,10 +266,11 @@ jobs:
           mkdir -p e2e-logs
           make compose-logs > e2e-logs/compose.log 2>&1 || true
           docker compose -f deploy/compose/compose.yaml ps -a > e2e-logs/ps.txt 2>&1 || true
+          # Docker's OOMKilled flag resets when a container restarts, so it is not shown: an OOM
+          # kill is in container-events.txt and kernel-oom.txt.
           state='{{.Name}} restarts={{.RestartCount}} exit={{.State.ExitCode}}'
-          state+=' oomkilled={{.State.OOMKilled}} finished={{.State.FinishedAt}}'
-          # shellcheck disable=SC2046 # one argument per container id
-          docker inspect -f "$state" $(docker ps -aq) > e2e-logs/containers.txt 2>&1 || true
+          state+=' finished={{.State.FinishedAt}}'
+          docker ps -aq | xargs -r docker inspect -f "$state" > e2e-logs/containers.txt 2>&1 || true
           sudo dmesg -T 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' \
             > e2e-logs/kernel-oom.txt || true
           free -m > e2e-logs/memory.txt 2>&1 || true
@@ -277,10 +278,11 @@ jobs:
             >> e2e-logs/memory.txt 2>&1 || true
       - name: Elasticsearch memory against its limit
         if: always()
-        # Per node, since its container last (re)started: the cgroup's peak (page cache included,
-        # so it reaches the limit on any busy node), anonymous, file and unevictable memory now
-        # (anon against max is the headroom that matters), swap, and the OOM kills this cgroup
-        # counted. A restarted node has a new cgroup: Docker's restart count covers earlier starts.
+        # Per node, since its container last (re)started: the cgroup's peak (page cache included),
+        # anonymous, file and unevictable memory now (anon against max is the headroom that
+        # matters), swap, and the OOM kills this cgroup counted. A restarted node has a new cgroup
+        # and Docker's OOMKilled flag resets, so a kill shows only as a restart here; the event
+        # watcher and the kernel lines in e2e-logs record it.
         run: |
           cg=/sys/fs/cgroup
           for node in es01 es02 es03; do
@@ -292,9 +294,9 @@ jobs:
             swap=$(docker exec "$c" cat "$cg/memory.swap.current" "$cg/memory.swap.peak" \
               | tr '\n' ' ' || echo "?")
             kills=$(docker exec "$c" grep -h oom_kill "$cg/memory.events" || echo "?")
-            state=$(docker inspect -f '{{.RestartCount}} {{.State.OOMKilled}}' "$c" || echo "? ?")
+            restarts=$(docker inspect -f '{{.RestartCount}}' "$c" || echo "?")
             echo "$node peak=$peak max=$max $stat swap(current,peak)=$swap $kills" \
-              "restarts/oomkilled=$state"
+              "restarts=$restarts"
           done
       - name: upload logs
         if: failure()

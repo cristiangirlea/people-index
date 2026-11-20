@@ -30,6 +30,8 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ### Fixed
 
+- Remove the CLI's direct dependency on the unmaintained `humantime` (RUSTSEC-2026-0542).
+  Duration settings accept the same forms.
 - Identifier strings longer than 1000 characters and ids above Elasticsearch's numeric range
   are counted once in `values_ignored_by_index`; verify never samples them.
 - Retry transient S3 failures through brief store outages with the configurable `PI_STORE_RETRY_TIMEOUT` window.

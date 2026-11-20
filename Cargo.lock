@@ -1540,7 +1540,6 @@ dependencies = [
  "bytes",
  "clap",
  "flate2",
- "humantime",
  "metrics",
  "metrics-exporter-prometheus",
  "pi-coord",

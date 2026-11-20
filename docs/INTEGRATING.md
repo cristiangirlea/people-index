@@ -195,14 +195,14 @@ docker run --rm -v "$PWD/es-ca.crt:/ca/ca.crt:ro" \
 
 The settings an integrator most often changes. The full table is
 [ARCHITECTURE.md, Configuration](ARCHITECTURE.md#configuration); byte sizes take suffixes
-(`256MiB`), durations humantime (`30m`). The defaults are the binary's; the Kubernetes base
-ConfigMap (`deploy/k8s/base/kustomization.yaml`) and the production example set several of them
-differently (`PI_EXECUTOR=distributed`, smaller or larger task memory).
+(`256MiB`), and durations use humantime 2.4.0 syntax (`30m`). The defaults are the binary's;
+the Kubernetes base ConfigMap (`deploy/k8s/base/kustomization.yaml`) and the production example
+set several of them differently (`PI_EXECUTOR=distributed`, smaller or larger task memory).
 
 | setting | default | what for |
 |---|---|---|
 | `PI_STORE_URL` | `file://./store` | the run store, `s3://bucket/prefix` |
-| `PI_STORE_RETRY_TIMEOUT` | `120s` | S3 retry window from the initial request |
+| `PI_STORE_RETRY_TIMEOUT` | `2m` | S3 retry window from the initial request |
 | `PI_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | unset; `us-east-1` | an S3-compatible endpoint (path-style requests) and its credentials |
 | `PI_INPUT_URL` | `<store>/raw` | inputs under a separate prefix |
 | `PI_DELIVERY`, `PI_REQUIRE_COMPLETE_MARKER` | unset, false | which delivery a run reads, and whether `_COMPLETE` is required; `PI_DELIVERY=latest` plans the newest complete delivery and skips a run whose delivery the alias already serves ([Scheduled runs](OPERATIONS.md#following-new-deliveries)) |

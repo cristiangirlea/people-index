@@ -785,12 +785,12 @@ run's index; take a snapshot of it first if you need it, or delete it now
 
 ### Keeping the last indexes for instant rollback
 
-Proposed default, for the owner to confirm: no. Every kept index is a full copy (primaries and
-replicas) on the data nodes, so keeping one previous index doubles the disk the alias needs,
-for a rollback that snapshots already provide in minutes. When the previous index does still
-exist (a publish that could not delete it lists it under `not_deleted` in its `summary.json`),
-rolling back is step 4 alone, with that index's name. Keeping N indexes on purpose would need a
-publish option that skips deleting them; none exists.
+Decided on 2026-11-20: no; snapshots are the rollback. Every kept index is a full copy
+(primaries and replicas) on the data nodes, so keeping one previous index doubles the disk the
+alias needs, for a rollback that snapshots already provide in minutes. When the previous index
+does still exist (a publish that could not delete it lists it under `not_deleted` in its
+`summary.json`), rolling back is step 4 alone, with that index's name. Keeping N indexes on
+purpose would need a publish option that skips deleting them; none exists.
 
 ### Disaster recovery
 

@@ -7,6 +7,8 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-20
+
 ### Added
 
 - `PI_DELIVERY=latest`: a run plans the newest delivery that has its `_COMPLETE` marker (by
@@ -23,12 +25,15 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
   complete delivery, and a directory named `latest` fails such a run. Remedy: rename the
   delivery and set `PI_DELIVERY` to the new name.
 - Pin the production example release image by digest and check rendered Job images.
-- Elasticsearch 9.5.6 (compose, the ECK spec and the snapshot bootstrap Job). The Elasticsearch rules extraction predicts (numbers, number length, repeated keys,
-  keyword limits, analyzer tokens, the date table, the mapping read-back and the built-in
-  templates) were re-verified on 9.5.6 and are unchanged from 9.5.5.
+- Elasticsearch 9.5.6 (compose, the ECK spec and the snapshot bootstrap Job). The Elasticsearch
+  rules extraction predicts (numbers, number length, repeated keys, keyword limits, analyzer
+  tokens, the date table, the mapping read-back and the built-in templates) were re-verified on
+  9.5.6 and are unchanged from 9.5.5.
 - SeaweedFS 4.54 (compose and Kubernetes), aws-cli 2.40.4 and Prometheus v3.16.0 in compose.
   SeaweedFS 4.52 reworked how conditional writes are checked; the conformance suite with its
   create-if-absent and update-if-match races, and the lease test, pass against 4.53 and 4.54.
+- Refresh the pinned Rust build image and the distroless runtime image; the runtime image no
+  longer carries the zlib vulnerabilities CVE-2026-76844 and CVE-2026-85091 found in 0.1.0's.
 
 ### Fixed
 
@@ -36,7 +41,8 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
   Duration settings accept the same forms.
 - Identifier strings longer than 1000 characters and ids above Elasticsearch's numeric range
   are counted once in `values_ignored_by_index`; verify never samples them.
-- Retry transient S3 failures through brief store outages with the configurable `PI_STORE_RETRY_TIMEOUT` window.
+- Retry transient S3 failures through brief store outages with the configurable
+  `PI_STORE_RETRY_TIMEOUT` window.
 - `values_ignored_by_index` counts a string longer than 1000 characters in a `long` or `integer`
   field: Elasticsearch skips it whatever it holds (observed on 9.5.5 and 9.5.6); one that held a
   readable number used to go uncounted.

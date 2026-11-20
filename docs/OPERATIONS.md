@@ -509,13 +509,14 @@ defaults, plus the document being decoded and a couple of segments being read. A
 than the load buffer still passes, alone, so a small buffer slows the load but never stops it.
 
 **Elasticsearch.** Heap at most half of the node's memory (compose: `ES_HEAP` and
-`ES_MEM_LIMIT`), the rest is page cache for segments. Besides the heap, a node uses up to half
-the heap in direct memory and about 0.2 GiB of JVM overhead: a 512m heap can use about 0.95 GiB,
-which leaves a 1 GiB node almost no page cache. In compose (which locks the heap with
-`bootstrap.memory_lock`), 1 GiB nodes restarted under load without a log line, which fits a
-kernel OOM kill (#140), so compose gives each node 1536m. On a nearly full disk the watermarks keep
-shards unassigned; free space, or for a throwaway dev stack set
-`ES_DISK_THRESHOLD_ENABLED=false`.
+`ES_MEM_LIMIT`), the rest is page cache for segments. The node's own memory goes well past the
+heap: in compose (which locks memory with `bootstrap.memory_lock`), a node with a 512m heap held
+about 1.3 GiB of anonymous memory under the e2e load, about 1 GiB of it locked, and peaked near
+1.4 GiB. At a 1 GiB limit the kernel killed such nodes for memory and Docker restarted them
+without a line in their logs (#140), so compose gives each node 1536m. The e2e prints each node's
+peak, anonymous and locked memory against its limit; keep the anonymous figure clear of it.
+On a nearly full disk the watermarks keep shards unassigned; free space, or for a throwaway dev
+stack set `ES_DISK_THRESHOLD_ENABLED=false`.
 
 ## Failure model
 

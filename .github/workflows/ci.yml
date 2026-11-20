@@ -230,7 +230,7 @@ jobs:
       WORKER_CONCURRENCY: "1"
       WORKER_MEMORY: 1g
       ES_HEAP: 512m
-      ES_MEM_LIMIT: 1g
+      ES_MEM_LIMIT: 1536m
       DATAGEN_PERSONS: "20000"
       DATAGEN_ORGANIZATIONS: "5000"
       DATAGEN_FILES: "4"
@@ -249,6 +249,15 @@ jobs:
           load: true
           tags: people-index:local
           cache-from: type=gha,scope=image
+      - name: record container exits while the e2e runs
+        # Containers restart on failure (restart: unless-stopped) and a kernel OOM kill leaves
+        # nothing in their own logs. Docker replays only its last 256 events, which healthchecks
+        # fill in minutes, so watch from the start; the watcher lives until the job ends.
+        run: |
+          mkdir -p e2e-logs
+          fmt='{{.Time}} {{.Action}} {{.Actor.Attributes.name}} exit={{.Actor.Attributes.exitCode}}'
+          nohup docker events --format "$fmt" --filter type=container \
+            --filter event=oom --filter event=die > e2e-logs/container-events.txt 2>&1 &
       - name: datagen, two runs, restore drill, verify, republish checks
         run: make compose-e2e
       - name: collect logs
@@ -257,6 +266,38 @@ jobs:
           mkdir -p e2e-logs
           make compose-logs > e2e-logs/compose.log 2>&1 || true
           docker compose -f deploy/compose/compose.yaml ps -a > e2e-logs/ps.txt 2>&1 || true
+          # Docker's OOMKilled flag resets when a container restarts, so it is not shown: an OOM
+          # kill is in container-events.txt and kernel-oom.txt.
+          state='{{.Name}} restarts={{.RestartCount}} exit={{.State.ExitCode}}'
+          state+=' finished={{.State.FinishedAt}}'
+          docker ps -aq | xargs -r docker inspect -f "$state" > e2e-logs/containers.txt 2>&1 || true
+          sudo dmesg -T 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' \
+            > e2e-logs/kernel-oom.txt || true
+          free -m > e2e-logs/memory.txt 2>&1 || true
+          docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' \
+            >> e2e-logs/memory.txt 2>&1 || true
+      - name: Elasticsearch memory against its limit
+        if: always()
+        # Per node, since its container last (re)started: the cgroup's peak (page cache included),
+        # anonymous, file and unevictable memory now (anon against max is the headroom that
+        # matters), swap, and the OOM kills this cgroup counted. A restarted node has a new cgroup
+        # and Docker's OOMKilled flag resets, so a kill shows only as a restart here; the event
+        # watcher and the kernel lines in e2e-logs record it.
+        run: |
+          cg=/sys/fs/cgroup
+          for node in es01 es02 es03; do
+            c="people-index-$node-1"
+            peak=$(docker exec "$c" cat "$cg/memory.peak" || echo "?")
+            max=$(docker exec "$c" cat "$cg/memory.max" || echo "?")
+            stat=$(docker exec "$c" grep -E '^(anon|file|unevictable) ' "$cg/memory.stat" \
+              | tr '\n' ' ' || echo "?")
+            swap=$(docker exec "$c" cat "$cg/memory.swap.current" "$cg/memory.swap.peak" \
+              | tr '\n' ' ' || echo "?")
+            kills=$(docker exec "$c" grep -h oom_kill "$cg/memory.events" || echo "?")
+            restarts=$(docker inspect -f '{{.RestartCount}}' "$c" || echo "?")
+            echo "$node peak=$peak max=$max $stat swap(current,peak)=$swap $kills" \
+              "restarts=$restarts"
+          done
       - name: upload logs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

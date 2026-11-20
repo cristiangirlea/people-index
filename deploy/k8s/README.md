@@ -107,7 +107,7 @@ The monitoring component requires Prometheus to scrape kube-state-metrics config
 
 ## The object store
 
-SeaweedFS 4.50 (`chrislusf/seaweedfs:4.50`, `weed server -s3`) stands in for S3 locally; MinIO no
+SeaweedFS 4.53 (`chrislusf/seaweedfs:4.53`, `weed server -s3`) stands in for S3 locally; MinIO no
 longer publishes container images. The commit and lease protocol depends on conditional writes,
 probed against 4.48 with the same flags and security context as the StatefulSet:
 

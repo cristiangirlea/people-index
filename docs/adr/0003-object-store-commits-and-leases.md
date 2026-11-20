@@ -49,13 +49,13 @@ deployment's own flags: 412 in every case above, and in 16-way races of create-i
 update-if-match on one key, exactly one 200 in each of three rounds; anonymous or wrongly signed
 requests get 403. The lease tests and the store conformance suite pass against it. Re-verified
 with SeaweedFS 4.50 on 2026-11-06 (`scripts/check-s3.sh`: the conformance suite, its
-create-if-absent and update-if-match races, and the lease test). Since 4.49 SeaweedFS answers an
-`If-Match` on a missing key with 404, as AWS S3 does (SeaweedFS #11882); the client maps it to a
-failed precondition, which the conformance suite checks. MinIO is not
-used because its project stopped publishing community container images, so there was no
-maintained image to pin; it was not tested. The local filesystem backend supports
-create-if-absent (an atomic hard link) but not update-if-match, so it serves only the local
-executor, and the distributed executor refuses it.
+create-if-absent and update-if-match races, and the lease test). Again with 4.53 on 2026-11-20,
+the same checks. Since 4.49 SeaweedFS answers an `If-Match` on a missing key with 404, as AWS S3
+does (SeaweedFS #11882); the client maps it to a failed precondition, which the conformance
+suite checks. MinIO is not used because its project stopped publishing community container
+images, so there was no maintained image to pin; it was not tested. The local filesystem backend
+supports create-if-absent (an atomic hard link) but not update-if-match, so it serves only the
+local executor, and the distributed executor refuses it.
 
 ## Consequences
 

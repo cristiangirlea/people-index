@@ -7,6 +7,10 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Changed
+
+- The production example overlay runs the signed 0.2.0 image, pinned by digest.
+
 ## [0.2.0] - 2026-11-20
 
 ### Added
@@ -38,7 +42,8 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
   SeaweedFS 4.52 reworked how conditional writes are checked; the conformance suite with its
   create-if-absent and update-if-match races, and the lease test, pass against 4.53 and 4.54.
 - Refresh the pinned Rust build image and the distroless runtime image; the runtime image no
-  longer carries the zlib vulnerabilities CVE-2026-76844 and CVE-2026-85091 found in 0.1.0's.
+  longer carries the zlib vulnerabilities CVE-2026-85091 (high) and CVE-2026-27171 (medium)
+  found in 0.1.0's.
 
 ### Fixed
 

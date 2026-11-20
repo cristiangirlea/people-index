@@ -26,9 +26,9 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 - Elasticsearch 9.5.6 (compose, the ECK spec and the snapshot bootstrap Job). The Elasticsearch rules extraction predicts (numbers, number length, repeated keys,
   keyword limits, analyzer tokens, the date table, the mapping read-back and the built-in
   templates) were re-verified on 9.5.6 and are unchanged from 9.5.5.
-- SeaweedFS 4.53 (compose and Kubernetes), aws-cli 2.39.7 and Prometheus v3.16.0 in compose.
+- SeaweedFS 4.54 (compose and Kubernetes), aws-cli 2.40.4 and Prometheus v3.16.0 in compose.
   SeaweedFS 4.52 reworked how conditional writes are checked; the conformance suite with its
-  create-if-absent and update-if-match races, and the lease test, pass against 4.53.
+  create-if-absent and update-if-match races, and the lease test, pass against 4.53 and 4.54.
 
 ### Fixed
 

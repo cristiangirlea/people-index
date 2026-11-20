@@ -560,12 +560,12 @@ checks the organization feed, `join` checks the person feed.
 
 Every option is a CLI flag with a `PI_*` environment variable (clap `env`), except `stage`'s
 stage name and `--task`, and `verify`'s `--digest` and `--page-size`, which are flags only. Byte
-sizes accept suffixes (`256MiB`), durations humantime (`60s`, `30m`).
+sizes accept suffixes (`256MiB`), and durations use humantime 2.4.0 syntax (`60s`, `30m`).
 
 | variable | meaning | default |
 |---|---|---|
 | `PI_STORE_URL` | object store prefix | `file://./store` |
-| `PI_STORE_RETRY_TIMEOUT` | S3 retry window from the initial request, at most 5 minutes; a request or backoff can finish after it | `120s` |
+| `PI_STORE_RETRY_TIMEOUT` | S3 retry window from the initial request, at most 5 minutes; a request or backoff can finish after it | `2m` |
 | `PI_INPUT_URL` | input prefix, if not `<store>/raw` | unset |
 | `PI_DELIVERY` | input sub-prefix for a delivery; `latest`: the newest complete one, chosen when a run plans ("Feed delivery contract") | unset |
 | `PI_REPUBLISH_UNCHANGED_DELIVERY` | `run` with `PI_DELIVERY=latest`: plan the newest delivery even when the alias already serves it, instead of skipping the run | false |

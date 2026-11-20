@@ -12,10 +12,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::byte_size::{parse_byte_size, parse_byte_size_usize};
-
-fn parse_duration(text: &str) -> Result<Duration, String> {
-    humantime::parse_duration(text).map_err(|e| format!("{text:?}: {e}"))
-}
+use crate::duration::parse_duration;
 
 fn parse_store_retry_timeout(text: &str) -> Result<Duration, String> {
     let duration = parse_duration(text)?;
@@ -76,7 +73,7 @@ pub struct StoreArgs {
     #[arg(long, env = "PI_DELIVERY")]
     pub delivery: Option<String>,
     /// Time after the first S3 request during which retries may start.
-    #[arg(long, env = "PI_STORE_RETRY_TIMEOUT", default_value = humantime::format_duration(pi_store::DEFAULT_STORE_RETRY_TIMEOUT).to_string(), value_parser = parse_store_retry_timeout)]
+    #[arg(long, env = "PI_STORE_RETRY_TIMEOUT", default_value = "2m", value_parser = parse_store_retry_timeout)]
     pub store_retry_timeout: Duration,
     /// S3-compatible endpoint (MinIO). Credentials come from AWS_* variables.
     #[arg(long, env = "PI_S3_ENDPOINT")]
@@ -399,6 +396,24 @@ mod tests {
     #[test]
     fn the_cli_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn store_retry_timeout_default_matches_the_store_and_help() {
+        let mut command = Cli::command();
+        let run = command.find_subcommand_mut("run").unwrap();
+        assert!(run.render_long_help().to_string().contains("[default: 2m]"));
+        let retry_timeout = run
+            .get_arguments()
+            .find(|arg| arg.get_id() == "store_retry_timeout")
+            .unwrap();
+        let [default] = retry_timeout.get_default_values() else {
+            panic!("expected one store retry timeout default");
+        };
+        assert_eq!(
+            parse_store_retry_timeout(default.to_str().unwrap()).unwrap(),
+            pi_store::DEFAULT_STORE_RETRY_TIMEOUT,
+        );
     }
 
     #[test]

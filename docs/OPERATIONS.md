@@ -445,8 +445,10 @@ scheduler cannot see a shortfall: give Docker at least 15 GiB.
 **Elasticsearch on k3d.** On 2026-11-20 a 200,000-person run with an SLM snapshot during `load`
 reached, in anonymous memory sampled every 10 s, 0.98-1.02 GB on the masters (512m heap) and
 1.39-1.40 GB on the data nodes (768m heap, 1536Mi limit), with no OOM kill or restart; the
-heap is not locked here. At 1 GiB the masters had under 100 MB left, so they get 1280Mi; the
-data nodes keep about 210 MB. Measure again before raising a heap or the data size (#143).
+heap is not locked here. At 1 GiB the masters had under 100 MB left, so they get 1280Mi. The
+same run on 2026-11-23 at 1280Mi left the masters 259-328 MiB and the data nodes 190-203 MiB of
+anonymous plus kernel memory, and the Docker VM peaked at 12.3 GiB. Measure again before raising
+a heap or the data size (#143).
 
 **Run store.** Budget for roughly `PI_RETAIN_RUNS` (default 3) published runs of segments,
 plus current and unfinished runs and runs sharing a boundary timestamp. Set it to 0 to disable

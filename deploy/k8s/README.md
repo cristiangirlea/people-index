@@ -15,7 +15,7 @@ the stages, the storage layout and the `PI_*` settings used here.
 | `components/snapshots/` | S3 snapshot repository `people-index` (bucket `people-index-snapshots`, prefix `snapshots/`) and the SLM policy `nightly` |
 | `components/schedule/` | optional CronJob for indexed coordinator and worker runs |
 | `components/monitoring/` | elasticsearch-exporter, ServiceMonitors, a PodMonitor for the pipeline's `:9464`, alert rules; needs the prometheus-operator CRDs and kube-state-metrics with Job labels allowlisted (see below) |
-| `overlays/local/` | k3d sizing (about 7.5 GiB for Elasticsearch), snapshots, `imagePullPolicy: Never` for `people-index:local` |
+| `overlays/local/` | k3d sizing (about 8.25 GiB for Elasticsearch), snapshots, `imagePullPolicy: Never` for `people-index:local` |
 | `overlays/production-example/` | 6 data nodes, external S3 instead of SeaweedFS, monitoring and snapshots, sizing notes |
 | `jobs/` | `run.yaml` (coordinator + workers), `datagen.yaml` and `verify.yaml`, rendered by `render.sh` from an overlay's `jobs.vars` |
 | `gen-secrets.sh` | writes an overlay's git-ignored credential env files from its `*.env.example` |
@@ -49,7 +49,7 @@ kubectl --context k3d-people-index -n people-index wait elasticsearch/es \
 ```
 
 Server-side apply because the ECK CRDs are too large for the annotation client-side apply keeps.
-Docker needs at least 14 GiB of memory for the local overlay (the sum is in docs/OPERATIONS.md, Sizing).
+Docker needs at least 15 GiB of memory for the local overlay (the sum is in docs/OPERATIONS.md, Sizing).
 
 Generate inputs, then run the pipeline:
 

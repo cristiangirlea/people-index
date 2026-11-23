@@ -20,6 +20,10 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
   measured at 1536m under load, a node holds about 1.2 GiB of anonymous memory, and at 1g the
   kernel killed nodes for memory, which failed loads or left a short index for the publish guard
   to refuse.
+- The k3d local overlay's Elasticsearch masters get 1280Mi (was 1Gi) with the same 512m heap: in
+  a measured 200,000-person run they came within 51-87 MiB of 1Gi, and at 1280Mi they keep
+  259-328 MiB. The data nodes, measured 190-203 MiB below 1536Mi, keep it. Give Docker at least
+  15 GiB (was 14).
 
 ## [0.2.0] - 2026-11-20
 

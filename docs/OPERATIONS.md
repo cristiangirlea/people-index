@@ -436,11 +436,20 @@ k3d with an SLM snapshot taken during `load` finished with no SeaweedFS restart;
 peaked at 910 MiB there (`kubectl top`, every 5 s). It grows with the data it holds and serves, so measure
 before running larger data on it; production uses an external S3 store instead.
 
-**Docker memory for the local overlay.** During a run the overlay requests about 12.5 GiB:
-Elasticsearch 7.5 GiB (three 1 GiB masters, three 1.5 GiB data nodes), SeaweedFS 1.5 GiB (up to
-2 GiB), and a run's three workers and coordinator 3.5 GiB, plus the k3s nodes, the ECK
+**Docker memory for the local overlay.** During a run the overlay requests about 13.25 GiB:
+Elasticsearch 8.25 GiB (three 1.25 GiB masters, three 1.5 GiB data nodes), SeaweedFS 1.5 GiB (up
+to 2 GiB), and a run's three workers and coordinator 3.5 GiB, plus the k3s nodes, the ECK
 operator and system pods. The k3d nodes share one Docker VM without per-node caps, so the
-scheduler cannot see a shortfall: give Docker at least 14 GiB.
+scheduler cannot see a shortfall: give Docker at least 15 GiB.
+
+**Elasticsearch on k3d.** On 2026-11-20 a 200,000-person run with an SLM snapshot during `load`
+reached, in anonymous memory sampled every 10 s, 937-973 MiB on the masters (512m heap) and
+1324-1335 MiB on the data nodes (768m heap, 1536Mi limit), with no OOM kill or restart; the
+heap is not locked here. At 1Gi the masters had 51-87 MiB left, so they get 1280Mi. The same
+run on 2026-11-23 at 1280Mi kept anonymous plus kernel memory (what counts toward the limit)
+259-328 MiB below the limit on the masters and 190-203 MiB below it on the data nodes, and the
+Docker VM, with nothing else running in it, peaked at 12.3 GiB. Measure again before raising a
+heap or the data size (#143).
 
 **Run store.** Budget for roughly `PI_RETAIN_RUNS` (default 3) published runs of segments,
 plus current and unfinished runs and runs sharing a boundary timestamp. Set it to 0 to disable

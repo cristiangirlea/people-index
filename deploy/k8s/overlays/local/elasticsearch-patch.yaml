@@ -20,9 +20,9 @@
   value:
     requests:
       cpu: 200m
-      memory: 1Gi
+      memory: 1280Mi
     limits:
-      memory: 1Gi
+      memory: 1280Mi
 - op: replace
   path: /spec/nodeSets/0/volumeClaimTemplates/0/spec/resources/requests/storage
   value: 1Gi

@@ -7,6 +7,12 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Security
+
+- Update `url` to 2.5.9 (RUSTSEC-2026-0592: a stack overflow in `Url::origin()` on nested `blob:`
+  URLs). people-index never calls `origin()`; its dependencies `object_store` and `reqwest` use
+  `url` on configured endpoints.
+
 ### Changed
 
 - The production example overlay runs the signed 0.2.0 image, pinned by digest.

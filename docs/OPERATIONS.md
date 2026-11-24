@@ -594,6 +594,12 @@ cosign verify ghcr.io/cristiangirlea/people-index@sha256:DIGEST \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
 ```
 
+Releases from 0.2.1 are signed with cosign v3 in the Sigstore bundle format, stored as an OCI
+referrer; the release workflow runs this verification before it adds the version tag. cosign v3
+(3.1.4 checked) verifies every release with the command above. cosign v2 (2.6.0 and 2.6.1
+checked) verifies 0.2.1 and later only with `--new-bundle-format` added; without it, it reports
+no signatures. 0.1.0 and 0.2.0 were signed with cosign v2.6.0 and verify with both v2 and v3.
+
 ## Snapshot storage
 
 The Kubernetes snapshots component registers the repository `people-index` on the bucket

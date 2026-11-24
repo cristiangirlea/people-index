@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "people-index"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1567,7 +1567,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pi-coord"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "pi-datagen"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "rand 0.10.4",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "pi-es"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "flate2",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "pi-model"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "postcard",
  "proptest",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "pi-segment"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "pi-model",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "pi-stages"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "pi-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "futures",

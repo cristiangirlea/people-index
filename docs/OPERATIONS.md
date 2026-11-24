@@ -598,8 +598,8 @@ Releases from 0.2.1 are signed with cosign v3 in the Sigstore bundle format, sto
 referrer. The release workflow runs this verification with cosign v3.1.4 before it adds the
 version tag, and on pull requests against the production example's pinned image. cosign v2 needs
 `--new-bundle-format` added for 0.2.1 and later; without it, it reports no signatures (2.6.0 and
-2.6.1, checked on a test image signed by cosign v3). 0.1.0 and 0.2.0 were signed with cosign
-v2.6.0 and verify with v2.6.0 and v3.1.4.
+2.6.1, checked on 0.2.1). 0.1.0 and 0.2.0 were signed with cosign v2.6.0 and verify with v2.6.0
+and v3.1.4.
 
 ## Snapshot storage
 

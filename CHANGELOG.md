@@ -7,6 +7,8 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-24
+
 ### Security
 
 - Update `url` to 2.5.9 (RUSTSEC-2026-0592: a stack overflow in `Url::origin()` on nested `blob:`
@@ -15,6 +17,10 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ### Changed
 
+- Release images are signed with cosign v3 (was v2.6.0), in the Sigstore bundle format stored as
+  an OCI referrer, and the release workflow verifies the signature before it adds the version
+  tag. Verify this release with cosign v3, or with cosign v2 and `--new-bundle-format`: without
+  that flag cosign v2 reports no signatures. 0.1.0 and 0.2.0 still verify with v2 and v3.
 - The production example overlay runs the signed 0.2.0 image, pinned by digest.
 - Compose gives each Elasticsearch node 1536m (`ES_MEM_LIMIT`, was 1g) with the same 512m heap:
   measured at 1536m under load, a node holds about 1.2 GiB of anonymous memory, and at 1g the

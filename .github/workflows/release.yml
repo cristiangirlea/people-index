@@ -4,7 +4,11 @@ on:
   push:
     tags: ['v*.*.*']
   pull_request:
-    paths: [.github/workflows/release.yml, Dockerfile, scripts/release-notes.sh]
+    paths:
+      - .github/workflows/release.yml
+      - Dockerfile
+      - scripts/release-notes.sh
+      - deploy/k8s/overlays/production-example/jobs.vars
   workflow_dispatch:
 
 permissions: {}
@@ -186,3 +190,34 @@ jobs:
           # shellcheck disable=SC2016 # Markdown backticks are literal.
           printf '\nImage: `%s:%s@%s`\n' "$IMAGE" "${TAG#v}" "$DIGEST" >> release-notes.md
           gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md
+
+  # The documented cosign verification, run with the sign job's cosign against the production
+  # example's pinned release image, so a change to cosign or to the command is tested before a
+  # tag run depends on it.
+  verify-pinned:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: Verify the pinned image's signature
+        run: |
+          pinned="$(sed -n 's/^IMAGE=//p' deploy/k8s/overlays/production-example/jobs.vars)"
+          version="${pinned#"$IMAGE":}"
+          version="${version%%@*}"
+          digest="${pinned#*@}"
+          if [[ "$pinned" != "$IMAGE:$version@$digest" || ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "unexpected IMAGE in jobs.vars: $pinned" >&2
+            exit 1
+          fi
+          cosign verify "$IMAGE@$digest" \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/v$version" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "Verified $IMAGE:$version@$digest"

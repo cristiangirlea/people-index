@@ -7,6 +7,10 @@ project follows the compatibility policy in [docs/INTEGRATING.md](docs/INTEGRATI
 
 ## [Unreleased]
 
+### Changed
+
+- The production example overlay runs the signed 0.2.1 image, pinned by digest.
+
 ## [0.2.1] - 2026-11-24
 
 ### Security

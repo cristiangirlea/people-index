@@ -56,7 +56,7 @@ x-es-env: &es-env
   s3.client.default.region: us-east-1
 
 x-es-node: &es-node
-  image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6@sha256:79b4f1de4c15e6eca824723086a51e5934406d614d410cc11be77748cafac537
+  image: docker.elastic.co/elasticsearch/elasticsearch:9.5.7@sha256:8aa3b18f6a26880f4c2fa1ffb37a48213e201b0b6a1a47412c66b1f5d533de91
   depends_on:
     certs:
       condition: service_completed_successfully
@@ -143,7 +143,7 @@ x-pipeline: &pipeline
 
 services:
   certs:
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6@sha256:79b4f1de4c15e6eca824723086a51e5934406d614d410cc11be77748cafac537
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.7@sha256:8aa3b18f6a26880f4c2fa1ffb37a48213e201b0b6a1a47412c66b1f5d533de91
     user: "0"
     entrypoint: ["bash", "/scripts/certs.sh"]
     volumes:
@@ -205,7 +205,7 @@ services:
       - es03-data:/usr/share/elasticsearch/data
 
   es-users:
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6@sha256:79b4f1de4c15e6eca824723086a51e5934406d614d410cc11be77748cafac537
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.7@sha256:8aa3b18f6a26880f4c2fa1ffb37a48213e201b0b6a1a47412c66b1f5d533de91
     entrypoint: ["bash", "/scripts/es-users.sh"]
     depends_on:
       es01: { condition: service_healthy }
@@ -224,7 +224,7 @@ services:
     logging: *logging
 
   s3:
-    image: chrislusf/seaweedfs:4.54@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15
+    image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
     hostname: s3
     # Build an ephemeral gateway config with separate bucket-scoped identities.
     user: "1000:1000"
@@ -252,7 +252,7 @@ services:
       start_period: 5s
 
   s3-init:
-    image: amazon/aws-cli:2.40.4@sha256:eaf444b45380050f920ab07492754aa76223dd90234e51c1f92c2e9391b5ee6b
+    image: amazon/aws-cli:2.42.2@sha256:6c24ad4e8cdf12defd41c7e6d2ed836e73da9cbfecc1e9d7fd148bb9f4ea5eb2
     entrypoint: ["bash", "/scripts/s3-init.sh"]
     depends_on:
       s3: { condition: service_healthy }

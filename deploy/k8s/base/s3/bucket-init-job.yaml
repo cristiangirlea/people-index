@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: snapshot-bucket-init
-          image: chrislusf/seaweedfs:4.54@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15
+          image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
           command: ["/bin/sh", "/scripts/bucket-init.sh"]
           env:
             - {name: S3_ENDPOINT, value: "http://s3:8333"}
@@ -55,7 +55,7 @@ spec:
         - name: bucket-init
           # The store's own image (it has curl): no separate image whose pinned digest a registry
           # could delete, and Dependabot bumps it with the store.
-          image: chrislusf/seaweedfs:4.54@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15
+          image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
           command: ["/bin/sh", "/scripts/bucket-init.sh"]
           env:
             - name: S3_ENDPOINT

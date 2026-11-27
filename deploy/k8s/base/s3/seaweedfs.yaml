@@ -44,7 +44,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: identity-config
-          image: chrislusf/seaweedfs:4.54@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15
+          image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
           command: ["/bin/sh", "/scripts/identity-config.sh"]
           env:
             - {name: PIPELINE_BUCKET, value: people-index}
@@ -72,7 +72,7 @@ spec:
             - {name: scripts, mountPath: /scripts, readOnly: true}
       containers:
         - name: seaweedfs
-          image: chrislusf/seaweedfs:4.54@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15
+          image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
           # The image's entrypoint adds `-dir=/data -volume.max=0` for `server`.
           args:
             - server
